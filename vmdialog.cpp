@@ -158,7 +158,17 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
         // 执行 qemu-img create
         QProcess proc;
         proc.start(qemuImg, {"create", "-f", fmt, path, sizeStr});
-        proc.waitForFinished(30000);
+        bool finished = proc.waitForFinished(120000);  // 最多等 2 分钟
+
+        if (!finished) {
+            // 超时 — 进程卡住了
+            proc.kill();
+            proc.waitForFinished(2000);
+            QMessageBox::critical(&dlg, "创建超时",
+                "qemu-img 创建磁盘超时，进程已强制终止。\n"
+                "请检查磁盘是否已存在或被其他进程占用。");
+            return;
+        }
 
         if (proc.exitCode() != 0) {
             QString err = QString::fromUtf8(proc.readAllStandardError());
