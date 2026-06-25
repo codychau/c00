@@ -57,6 +57,9 @@ private:
     QListWidget    *m_pciList;
     QCheckBox      *m_hugepagesCb;
 
+    // 磁盘高级
+    QCheckBox      *m_virtioDiskCb;
+
     // 额外参数
     QPlainTextEdit *m_extraEdit;
 

@@ -33,10 +33,11 @@ struct VMConfig {
     // 从 extra 提炼的字段
     QString machine  = "q35";   // q35, pc, pc-i440fx-*
     QString cpuType  = "host";  // host, qemu64, pentium3, cortex-a72
-    bool    kvm      = true;    // 启用 KVM 加速
-    QString vga      = "virtio";// virtio, cirrus, qxl, virtio-gpu, none
-    QString net      = "user";  // user, bridge, tap
-    QString nicModel = "virtio-net-pci"; // 网卡模型
+    bool    kvm       = true;    // 启用 KVM 加速
+    bool    virtioDisk = true;   // 系统盘使用 virtio（关闭后用默认 IDE/SATA）
+    QString vga       = "virtio";// virtio, cirrus, qxl, virtio-gpu, none
+    QString net       = "user";  // user, bridge, tap
+    QString nicModel  = "virtio-net-pci"; // 网卡模型
 
     // 端口转发 (user 模式下生效)
     QVector<PortFwd> portForwards;

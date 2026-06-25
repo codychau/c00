@@ -312,6 +312,11 @@ VMDialog::VMDialog(QWidget *parent)
     isoRow->addWidget(m_isoBtn);
     basicForm->addRow("ISO:", isoRow);
 
+    m_virtioDiskCb = new QCheckBox("系统盘使用 VirtIO 接口（高性能，关闭后用 IDE/SATA 兼容旧 OS）");
+    m_virtioDiskCb->setChecked(true);
+    m_virtioDiskCb->setToolTip("开启: -drive if=virtio (更快)\n关闭: 默认接口 (IDE/SATA, 兼容 Win2000/98)");
+    basicForm->addRow("", m_virtioDiskCb);
+
     leftCol->addWidget(basicGroup);
 
     // ── 数据盘 ──
@@ -642,6 +647,7 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     }
 
     // 自动启动
+    m_virtioDiskCb->setChecked(vm.virtioDisk);
     m_autoStartCb->setChecked(vm.autoStart);
 
     // 硬件直通
@@ -703,6 +709,7 @@ VMConfig VMDialog::vmConfig() const
     vm.net        = m_netCombo->currentData().toString();
     vm.nicModel   = m_nicCombo->currentText();
     vm.ramfb      = m_ramfbCb->isChecked();
+    vm.virtioDisk = m_virtioDiskCb->isChecked();
     vm.autoStart  = m_autoStartCb->isChecked();
 
     // 端口转发
