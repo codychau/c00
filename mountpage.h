@@ -6,6 +6,7 @@
 #include <QTableWidget>
 #include <QPushButton>
 #include <QProcess>
+#include <QMessageBox>
 
 class MountPage : public QWidget
 {
@@ -16,6 +17,8 @@ public:
 
 private slots:
     void refresh();
+    void unmount();
+    void onSelectionChanged();
 
 private:
     void runCmd(const QString &cmd, const QStringList &args,
@@ -24,6 +27,7 @@ private:
     QTableWidget *m_table;
     QLabel *m_status;
     QPushButton *m_refreshBtn;
+    QPushButton *m_unmountBtn;
 };
 
 #endif // MOUNTPAGE_H
