@@ -346,8 +346,9 @@ void VMPage::startVM()
     QString sockPath = qmpSocketPath(vm.name);
     args << "-qmp" << QString("unix:%1,server=on,wait=off").arg(sockPath);
 
+    // 系统盘 — 不加 if=virtio 以兼容旧 OS（Win2000/98 无 virtio 驱动）
     if (!vm.disk.isEmpty())
-        args << "-drive" << QString("file=%1,format=qcow2,if=virtio,index=0,cache=none,aio=native").arg(vm.disk);
+        args << "-drive" << QString("file=%1,format=qcow2").arg(vm.disk);
 
     for (int di = 0; di < vm.dataDisks.size(); ++di) {
         const auto &dd = vm.dataDisks[di];
