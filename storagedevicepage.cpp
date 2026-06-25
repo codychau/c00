@@ -1,5 +1,6 @@
 #include "storagedevicepage.h"
 #include "smartdialog.h"
+#include "formatdialog.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -51,6 +52,16 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     m_status = new QLabel("双击设备行查看详情");
     m_status->setStyleSheet("color: #888;");
     row->addWidget(m_status, 1);
+
+    m_formatBtn = new QPushButton("🔧 格式化");
+    m_formatBtn->setVisible(false);
+    m_formatBtn->setToolTip("格式化此分区");
+    m_formatBtn->setStyleSheet(
+        "QPushButton { background: #dc2626; color: white; padding: 4px 16px; "
+        "border-radius: 4px; font-weight: bold; }"
+        "QPushButton:hover { background: #b91c1c; }");
+    connect(m_formatBtn, &QPushButton::clicked, this, &StorageDevicePage::showFormatDialog);
+    row->addWidget(m_formatBtn);
 
     m_mountBtn = new QPushButton("📂 挂载");
     m_mountBtn->setVisible(false);
@@ -192,6 +203,7 @@ void StorageDevicePage::onSelectionChanged()
     if (!item) {
         m_smartBtn->setVisible(false);
         m_mountBtn->setVisible(false);
+        m_formatBtn->setVisible(false);
         return;
     }
 
@@ -205,6 +217,10 @@ void StorageDevicePage::onSelectionChanged()
     // 挂载按钮: 有文件系统、未挂载、且不是 disk 本身
     bool canMount = !fstype.isEmpty() && mount.isEmpty() && type != "disk";
     m_mountBtn->setVisible(canMount);
+
+    // 格式化按钮: part 类型且有文件系统（已经格式化的分区）
+    bool canFormat = type == "part" && !fstype.isEmpty();
+    m_formatBtn->setVisible(canFormat);
 }
 
 void StorageDevicePage::showSmart()
@@ -333,4 +349,26 @@ void StorageDevicePage::showMountDialog()
         }
     });
     p->start("pkexec", {"mount", devPath, mnt});
+}
+
+void StorageDevicePage::showFormatDialog()
+{
+    auto *item = m_tree->currentItem();
+    if (!item) return;
+
+    QString devName = item->data(0, RoleName).toString();
+    QString fstype  = item->data(0, RoleFsType).toString();
+    QString mount   = item->data(0, RoleMount).toString();
+    QString type    = item->data(0, RoleType).toString();
+
+    if (type != "part" || fstype.isEmpty()) return;
+
+    QString devPath = QString("/dev/%1").arg(devName);
+    bool isMounted = !mount.isEmpty();
+
+    FormatDialog dlg(devPath, devName, fstype, mount, isMounted, this);
+    dlg.exec();
+
+    // 对话框关闭后刷新设备列表
+    refresh();
 }

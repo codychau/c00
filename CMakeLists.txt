@@ -29,6 +29,8 @@ add_executable(server-toolbox
     pcidialog.h
     smartdialog.cpp
     smartdialog.h
+    formatdialog.cpp
+    formatdialog.h
     entertainmentpage.cpp
     entertainmentpage.h
     aipage.cpp

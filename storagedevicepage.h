@@ -19,6 +19,7 @@ private slots:
     void onSelectionChanged();
     void showSmart();
     void showMountDialog();
+    void showFormatDialog();
 
 private:
     void runCmd(const QString &cmd, const QStringList &args,
@@ -34,6 +35,7 @@ private:
     QPushButton *m_refreshBtn;
     QPushButton *m_smartBtn;
     QPushButton *m_mountBtn;
+    QPushButton *m_formatBtn;
 };
 
 #endif // STORAGEDEVICEPAGE_H
