@@ -346,7 +346,10 @@ void VMPage::startVM()
     args << "-vga" << vm.vga;
 
     if (vm.vnc >= 0) {
-        args << "-vnc" << QString(":%1").arg(vm.vnc);
+        // vnc 字段存的是端口号 (5902), QEMU 需要显示编号 (:2)
+        int display = vm.vnc - 5900;
+        if (display < 0) display = 0;
+        args << "-vnc" << QString(":%1").arg(display);
     }
 
     // ── 硬件直通: PCI 直通 ──
