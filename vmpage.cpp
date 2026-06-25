@@ -443,8 +443,12 @@ void VMPage::startVM()
         if (elapsed < 5 && exitCode != 0) {
             QString errMsg = stderr.isEmpty() ? "虚机启动后立即退出" : stderr.left(2000);
             Logger::log("VM", QString("❌ %1 启动失败:\n%2").arg(name, errMsg));
-            QMessageBox::critical(this, "虚机启动失败",
-                QString("%1\n\n退出码: %2\n\nQEMU 输出:\n%3").arg(name).arg(exitCode).arg(errMsg));
+            // 延迟弹窗，避免在信号处理器内直接弹模态框重入事件循环导致崩溃
+            QTimer::singleShot(0, this, [this, name, exitCode, errMsg]() {
+                QMessageBox::critical(this, "虚机启动失败",
+                    QString("%1\n\n退出码: %2\n\nQEMU 输出:\n%3")
+                        .arg(name).arg(exitCode).arg(errMsg));
+            });
         }
 
         m_runningProcs.remove(name);
