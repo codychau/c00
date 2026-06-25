@@ -13,6 +13,7 @@
 #include <QColor>
 #include <QBrush>
 #include <QStandardPaths>
+#include <QDateTime>
 
 #include "logger.h"
 
@@ -382,27 +383,45 @@ void VMPage::startVM()
     Logger::log("VM", cmdLine.left(500));
 
     auto *proc = new QProcess(this);
-    proc->setProcessChannelMode(QProcess::ForwardedChannels);
+    proc->setProcessChannelMode(QProcess::MergedChannels);
     proc->start(vm.qemuBinary, args);
 
     if (!proc->waitForStarted(3000)) {
         QString err = proc->errorString();
         Logger::log("VM", QString("❌ 启动失败: %1 — %2").arg(vm.name, err));
         QMessageBox::warning(this, "启动失败",
-            "无法启动 QEMU:\n" + err);
+            QString("无法启动 QEMU:\n%1").arg(err));
         delete proc;
     } else {
+        auto startedAt = QDateTime::currentSecsSinceEpoch();
         Logger::log("VM", QString("✅ %1 已启动 (PID: %2)").arg(vm.name).arg(proc->processId()));
         m_status->setText(QString("▶️ %1 已启动 (PID: %2)")
                           .arg(vm.name).arg(proc->processId()));
 
         // 进程退出时更新状态
         connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this, proc, name = vm.name](int exitCode, QProcess::ExitStatus status) {
-                    if (status == QProcess::CrashExit)
+                this, [this, proc, name = vm.name, startedAt](int exitCode, QProcess::ExitStatus status) {
+                    auto elapsed = QDateTime::currentSecsSinceEpoch() - startedAt;
+                    QString stderr = QString::fromUtf8(proc->readAll()).trimmed();
+
+                    if (status == QProcess::CrashExit) {
                         Logger::log("VM", QString("💥 %1 异常退出").arg(name));
-                    else
-                        Logger::log("VM", QString("⏹️ %1 正常退出 (exit: %2)").arg(name).arg(exitCode));
+                    } else {
+                        Logger::log("VM", QString("⏹️ %1 正常退出 (exit: %2, 运行 %3s)")
+                            .arg(name).arg(exitCode).arg(elapsed));
+                    }
+
+                    // 启动后 5 秒内退出且 exit != 0 → 多半是参数错误
+                    if (elapsed < 5 && exitCode != 0) {
+                        QString errMsg = stderr.isEmpty()
+                            ? "虚机启动后立即退出"
+                            : stderr.left(2000);
+                        Logger::log("VM", QString("❌ %1 启动失败:\n%2").arg(name, errMsg));
+                        QMessageBox::critical(this, "虚机启动失败",
+                            QString("%1\n\n退出码: %2\n\nQEMU 输出:\n%3")
+                                .arg(name).arg(exitCode).arg(errMsg));
+                    }
+
                     m_status->setText(QString("⏹️ %1 已停止").arg(name));
                     refreshStatus();
                     proc->deleteLater();
