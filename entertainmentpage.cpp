@@ -25,9 +25,19 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
     layout->setSpacing(8);
 
     // ── 标题 ──
+    auto *titleRow = new QHBoxLayout();
     auto *title = new QLabel("🎮 娱乐选项");
     QFont f = title->font(); f.setPointSize(14); f.setBold(true);
     title->setFont(f);
+    titleRow->addWidget(title);
+
+    auto *expBadge = new QLabel("  [实验性]  ");
+    expBadge->setStyleSheet(
+        "background-color: #f59e0b; color: white; border-radius: 4px;"
+        "padding: 2px 8px; font-weight: bold; font-size: 11px;");
+    titleRow->addWidget(expBadge);
+    titleRow->addStretch();
+    layout->addLayout(titleRow);
     layout->addWidget(title);
 
     // ── 状态栏 ──
@@ -123,6 +133,15 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
     volL->addLayout(btnR);
 
     layout->addWidget(volG);
+    layout->addStretch();
+
+    // ── 实验性标注 + 未来规划 ──
+    auto *noteLabel = new QLabel(
+        "💡 本页面功能为实验性，后续计划支持手柄检测与按键映射配置。");
+    noteLabel->setStyleSheet("color: #888; font-size: 11px; font-style: italic;");
+    noteLabel->setWordWrap(true);
+    layout->addWidget(noteLabel);
+
     layout->addStretch();
 
     // 设置 scroll area
