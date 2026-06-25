@@ -439,10 +439,11 @@ VMDialog::VMDialog(QWidget *parent)
 
     // VNC
     m_vncSpin = new QSpinBox();
-    m_vncSpin->setRange(-1, 9999);
+    m_vncSpin->setRange(-1, 99);
     m_vncSpin->setValue(-1);
     m_vncSpin->setSpecialValueText("禁用");
-    advForm->addRow("VNC 端口 (5900+):", m_vncSpin);
+    m_vncSpin->setToolTip("显示编号 (0~99)，VNC 端口 = 5900 + 编号");
+    advForm->addRow("VNC 显示编号 (0~99):", m_vncSpin);
 
     // ramfb
     m_ramfbCb = new QCheckBox("ramfb 显示 (aarch64)");

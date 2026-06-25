@@ -165,7 +165,7 @@ void VMPage::refreshTable()
         m_table->setItem(i, ColNet, new QTableWidgetItem(vm.net));
 
         m_table->setItem(i, ColVNC, new QTableWidgetItem(
-            vm.vnc < 0 ? "禁用" : QString::number(vm.vnc)));
+            vm.vnc < 0 ? "禁用" : QString::number(5900 + vm.vnc)));
 
         auto *statusItem = new QTableWidgetItem("⋯ 检测中");
         statusItem->setForeground(QColor("#9ca3af"));
@@ -376,9 +376,8 @@ void VMPage::startVM()
     args << "-vga" << vm.vga;
 
     if (vm.vnc >= 0) {
-        int display = vm.vnc - 5900;
-        if (display < 0) display = 0;
-        args << "-vnc" << QString(":%1").arg(display);
+        // vnc 存的是显示编号 (0~99)，直接传给 QEMU
+        args << "-vnc" << QString(":%1").arg(vm.vnc);
     }
 
     for (const auto &bdf : vm.pciDevices) {
@@ -561,7 +560,9 @@ void VMPage::connectVNC()
         return;
     }
 
-    QString target = QString("localhost:%1").arg(vm.vnc);
+    // VNC 端口 = 5900 + 显示编号
+    int vncPort = 5900 + vm.vnc;
+    QString target = QString("localhost:%1").arg(vncPort);
     QString viewer = m_vncViewer;
 
     QStringList args;
