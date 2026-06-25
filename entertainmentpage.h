@@ -67,6 +67,14 @@ private:
 
     QStringList m_availableModes;
     QString m_monitorName;
+
+    // 手柄
+    QLabel         *m_ctrlStatusLabel;
+    QPushButton    *m_ctrlDetectBtn;
+    QLabel         *m_ctrlListLabel;
+    QProcess       *m_ctrlProcess;
+
+    void detectControllers();
 };
 
 #endif // ENTERTAINMENTPAGE_H

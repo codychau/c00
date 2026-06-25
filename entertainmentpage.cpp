@@ -25,19 +25,9 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
     layout->setSpacing(8);
 
     // ── 标题 ──
-    auto *titleRow = new QHBoxLayout();
     auto *title = new QLabel("🎮 娱乐选项");
     QFont f = title->font(); f.setPointSize(14); f.setBold(true);
     title->setFont(f);
-    titleRow->addWidget(title);
-
-    auto *expBadge = new QLabel("  [实验性]  ");
-    expBadge->setStyleSheet(
-        "background-color: #f59e0b; color: white; border-radius: 4px;"
-        "padding: 2px 8px; font-weight: bold; font-size: 11px;");
-    titleRow->addWidget(expBadge);
-    titleRow->addStretch();
-    layout->addLayout(titleRow);
     layout->addWidget(title);
 
     // ── 状态栏 ──
@@ -133,14 +123,45 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
     volL->addLayout(btnR);
 
     layout->addWidget(volG);
-    layout->addStretch();
 
-    // ── 实验性标注 + 未来规划 ──
-    auto *noteLabel = new QLabel(
-        "💡 本页面功能为实验性，后续计划支持手柄检测与按键映射配置。");
-    noteLabel->setStyleSheet("color: #888; font-size: 11px; font-style: italic;");
-    noteLabel->setWordWrap(true);
-    layout->addWidget(noteLabel);
+    // ==================================================
+    // 手柄检测 [实验性]
+    // ==================================================
+    auto *ctrlG = new QGroupBox();
+    auto *ctrlTitleRow = new QHBoxLayout();
+
+    auto *ctrlTitle = new QLabel("🎮 手柄检测与设置");
+    QFont cf = ctrlTitle->font(); cf.setBold(true);
+    ctrlTitle->setFont(cf);
+    ctrlTitleRow->addWidget(ctrlTitle);
+
+    auto *ctrlBadge = new QLabel("  [实验性]  ");
+    ctrlBadge->setStyleSheet(
+        "background-color: #f59e0b; color: white; border-radius: 4px;"
+        "padding: 2px 8px; font-weight: bold; font-size: 11px;");
+    ctrlTitleRow->addWidget(ctrlBadge);
+    ctrlTitleRow->addStretch();
+
+    // QGroupBox 没有直接的 setTitleLayout, 用 QVBoxLayout 包装
+    auto *ctrlOuter = new QVBoxLayout(ctrlG);
+    ctrlOuter->addLayout(ctrlTitleRow);
+
+    auto *ctrlDetectRow = new QHBoxLayout();
+    m_ctrlDetectBtn = new QPushButton("🔍 检测手柄");
+    connect(m_ctrlDetectBtn, &QPushButton::clicked, this, &EntertainmentPage::detectControllers);
+    ctrlDetectRow->addWidget(m_ctrlDetectBtn);
+    ctrlDetectRow->addStretch();
+    ctrlOuter->addLayout(ctrlDetectRow);
+
+    m_ctrlStatusLabel = new QLabel("未检测");
+    m_ctrlStatusLabel->setStyleSheet("color: #888;");
+    ctrlOuter->addWidget(m_ctrlStatusLabel);
+
+    m_ctrlListLabel = new QLabel("");
+    m_ctrlListLabel->setStyleSheet("color: #555; font-family: monospace;");
+    ctrlOuter->addWidget(m_ctrlListLabel);
+
+    layout->addWidget(ctrlG);
 
     layout->addStretch();
 
@@ -416,4 +437,51 @@ void EntertainmentPage::refreshVolumeOnly()
 void EntertainmentPage::updateVolumeLabel()
 {
     m_volumeLabel->setText(QString("音量：%1%").arg(m_currentVolume));
+}
+
+// ── 手柄检测 ──────────────────────────────────────────
+
+void EntertainmentPage::detectControllers()
+{
+    m_ctrlStatusLabel->setText("正在检测手柄…");
+    m_ctrlListLabel->clear();
+    m_ctrlDetectBtn->setEnabled(false);
+
+    // 用 lsusb 和 /dev/input 检测
+    runCmd("sh", {"-c",
+        "ls /dev/input/js* 2>/dev/null | head -5; "
+        "echo '---USB---'; "
+        "lsusb | grep -iE 'gamepad|joystick|controller|xbox|playstation|nintendo|8bitdo|game' 2>/dev/null; "
+        "echo '---EVDEV---'; "
+        "grep -l '' /sys/class/input/event*/device/name 2>/dev/null | "
+        "xargs -I{} sh -c 'echo -n \"{}: \"; cat {}' 2>/dev/null | "
+        "grep -iE 'joystick|gamepad|controller|xbox|playstation|nintendo'"
+    }, [this](const QString &out) {
+        m_ctrlDetectBtn->setEnabled(true);
+
+        QStringList lines;
+        for (const auto &l : out.split('\n')) {
+            if (!l.trimmed().isEmpty())
+                lines << l.trimmed();
+        }
+
+        if (lines.isEmpty()) {
+            m_ctrlStatusLabel->setText("❌ 未检测到手柄");
+            m_ctrlListLabel->setText("未连接任何手柄设备。");
+        } else {
+            int devCount = 0;
+            QStringList devices;
+            for (const auto &l : lines) {
+                if (l.startsWith("/dev/input/js")) {
+                    devCount++;
+                    devices << QString("📦 %1").arg(l);
+                } else if (!l.contains("---")) {
+                    devices << QString("🔌 %1").arg(l);
+                }
+            }
+            m_ctrlStatusLabel->setText(
+                QString("✅ 检测到 %1 个手柄设备").arg(devCount));
+            m_ctrlListLabel->setText(devices.join("\n"));
+        }
+    });
 }
