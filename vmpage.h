@@ -6,6 +6,8 @@
 #include <QTableWidget>
 #include <QPushButton>
 #include <QTimer>
+#include <QMap>
+#include <QProcess>
 
 #include "vmconfig.h"
 
@@ -22,14 +24,19 @@ private slots:
     void editVM(int row);
     void deleteVM();
     void startVM();
+    void stopVM();
     void connectVNC();
     void refreshTable();
     void refreshStatus();
     void startAutoStartVMs();
+    void onSelectionChanged();
 
 private:
     void saveConfig();
+    void updateStartButton();
+    void sendQemuPowerdown(const QString &vmName);
     QString findVNCViewer() const;
+    QString qmpSocketPath(const QString &vmName) const;
 
     VMConfigManager m_mgr;
     QTableWidget   *m_table;
@@ -40,7 +47,10 @@ private:
     QPushButton    *m_startBtn;
     QPushButton    *m_vncBtn;
     QTimer         *m_statusTimer;
-    QString         m_vncViewer;   // 检测到的 VNC 客户端路径
+    QString         m_vncViewer;
+
+    // 跟踪运行的虚机进程，用于停止操作
+    QMap<QString, QProcess*> m_runningProcs;
 };
 
 #endif // VMPAGE_H

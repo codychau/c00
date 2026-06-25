@@ -5,7 +5,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network)
 
 add_executable(server-toolbox
     main.cpp
@@ -46,4 +46,5 @@ add_executable(server-toolbox
 target_link_libraries(server-toolbox PRIVATE
     Qt6::Core
     Qt6::Widgets
+    Qt6::Network
 )

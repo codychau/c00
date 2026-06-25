@@ -14,6 +14,8 @@
 #include <QBrush>
 #include <QStandardPaths>
 #include <QDateTime>
+#include <QLocalSocket>
+#include <QTemporaryDir>
 
 #include "logger.h"
 
@@ -45,6 +47,8 @@ VMPage::VMPage(QWidget *parent)
 
     connect(m_table, &QTableWidget::cellDoubleClicked,
             this, [this](int row, int) { editVM(row); });
+    connect(m_table, &QTableWidget::itemSelectionChanged,
+            this, &VMPage::onSelectionChanged);
 
     layout->addWidget(m_table);
 
@@ -71,7 +75,16 @@ VMPage::VMPage(QWidget *parent)
     btnRow->addWidget(m_deleteBtn);
 
     m_startBtn = new QPushButton("▶️ 启动");
-    connect(m_startBtn, &QPushButton::clicked, this, &VMPage::startVM);
+    m_startBtn->setMinimumWidth(100);
+    connect(m_startBtn, &QPushButton::clicked, this, [this]() {
+        int row = m_table->currentRow();
+        if (row < 0) return;
+        auto *item = m_table->item(row, ColStatus);
+        if (item && item->text().contains("运行中"))
+            stopVM();
+        else
+            startVM();
+    });
     btnRow->addWidget(m_startBtn);
 
     m_vncBtn = new QPushButton("🖥️ VNC 连接");
@@ -107,13 +120,29 @@ VMPage::VMPage(QWidget *parent)
 
 QString VMPage::findVNCViewer() const
 {
-    // 优先级: TigerVNC > GTK VNC > 其他
     QStringList candidates = {"vncviewer", "gvncviewer", "vinagre", "krdc", "remmina"};
     for (const auto &candidate : candidates) {
         QString path = QStandardPaths::findExecutable(candidate);
         if (!path.isEmpty()) return path;
     }
     return {};
+}
+
+void VMPage::onSelectionChanged()
+{
+    updateStartButton();
+}
+
+void VMPage::updateStartButton()
+{
+    int row = m_table->currentRow();
+    if (row < 0) {
+        m_startBtn->setText("▶️ 启动");
+        return;
+    }
+    auto *item = m_table->item(row, ColStatus);
+    bool running = item && item->text().contains("运行中");
+    m_startBtn->setText(running ? "⏹️ 停止" : "▶️ 启动");
 }
 
 void VMPage::refreshTable()
@@ -138,70 +167,60 @@ void VMPage::refreshTable()
         m_table->setItem(i, ColVNC, new QTableWidgetItem(
             vm.vnc < 0 ? "禁用" : QString::number(vm.vnc)));
 
-        // 状态列初始文本，稍后由 refreshStatus() 更新
         auto *statusItem = new QTableWidgetItem("⋯ 检测中");
         statusItem->setForeground(QColor("#9ca3af"));
         m_table->setItem(i, ColStatus, statusItem);
 
-        // 额外参数字段: 显示摘要 + 数据盘 + PCI 直通数量
         QStringList extras;
         if (!vm.extra.isEmpty()) {
             extras << (vm.extra.left(28).replace('\n', ' ')
                       + (vm.extra.length() > 28 ? "…" : ""));
         }
-        if (!vm.dataDisks.isEmpty()) {
+        if (!vm.dataDisks.isEmpty())
             extras << QString("💾%1").arg(vm.dataDisks.size());
-        }
-        if (!vm.pciDevices.isEmpty()) {
+        if (!vm.pciDevices.isEmpty())
             extras << QString("🖧%1").arg(vm.pciDevices.size());
-        }
-        if (vm.ramfb) {
+        if (vm.ramfb)
             extras << "🖵ramfb";
-        }
-        if (vm.hugepages) {
+        if (vm.hugepages)
             extras << "🖧H";
-        }
-        if (vm.autoStart) {
+        if (vm.autoStart)
             extras << "🔄auto";
-        }
         m_table->setItem(i, ColExtra, new QTableWidgetItem(
             extras.isEmpty() ? "" : extras.join(" | ")));
     }
 
     m_status->setText(QString("共 %1 个虚机").arg(vms.size()));
+    updateStartButton();
 }
 
 void VMPage::refreshStatus()
 {
     if (m_mgr.vms().isEmpty()) return;
 
-    // 一次 ps 拿到所有 qemu 进程命令行
     QProcess ps;
     ps.start("ps", {"-ef"});
     ps.waitForFinished(3000);
     QStringList allLines = QString::fromUtf8(ps.readAllStandardOutput()).split('\n');
 
-    // 过滤出 QEMU 进程行
     QStringList qemuLines;
     for (const auto &line : allLines) {
-        if (line.contains("qemu-system-")) {
+        if (line.contains("qemu-system-"))
             qemuLines.append(line);
-        }
     }
 
-    // 逐行匹配虚机
+    bool prevRunning = false;
+    int curRow = m_table->currentRow();
+    if (curRow >= 0) {
+        auto *item = m_table->item(curRow, ColStatus);
+        prevRunning = item && item->text().contains("运行中");
+    }
+
     for (int i = 0; i < m_mgr.vms().size(); ++i) {
         const auto &vm = m_mgr.vms()[i];
         bool running = false;
-
         for (const auto &ql : qemuLines) {
-            // 用磁盘路径匹配最可靠
-            if (ql.contains(vm.disk)) {
-                running = true;
-                break;
-            }
-            // 退一步用名称匹配
-            if (ql.contains("-name") && ql.contains(vm.name)) {
+            if (ql.contains(vm.disk) || (ql.contains("-name") && ql.contains(vm.name))) {
                 running = true;
                 break;
             }
@@ -216,8 +235,32 @@ void VMPage::refreshStatus()
         } else {
             item->setText("⏹️ 已停止");
             item->setForeground(QColor("#9ca3af"));
+            // 进程已退出，清理跟踪
+            if (m_runningProcs.contains(vm.name)) {
+                m_runningProcs[vm.name]->deleteLater();
+                m_runningProcs.remove(vm.name);
+            }
         }
     }
+
+    // 状态变化时更新按钮文字
+    bool nowRunning = false;
+    if (curRow >= 0) {
+        auto *item = m_table->item(curRow, ColStatus);
+        nowRunning = item && item->text().contains("运行中");
+    }
+    if (prevRunning != nowRunning)
+        updateStartButton();
+}
+
+QString VMPage::qmpSocketPath(const QString &vmName) const
+{
+    // 用临时目录存放 QMP socket，避免名称冲突
+    static QTemporaryDir tmpDir;
+    QString safeName = vmName;
+    safeName.replace(QRegularExpression("[^\\w\\-]"), "_");
+    return (tmpDir.isValid() ? tmpDir.path() : "/tmp")
+           + "/qmp_" + safeName + ".sock";
 }
 
 void VMPage::addVM()
@@ -273,12 +316,13 @@ void VMPage::deleteVM()
     refreshStatus();
 }
 
+// ── 启动 ──
+
 void VMPage::startVM()
 {
     int row = m_table->currentRow();
     if (row < 0 || row >= m_mgr.vms().size()) return;
 
-    // 已经在运行则跳过
     auto *statusItem = m_table->item(row, ColStatus);
     if (statusItem && statusItem->text().contains("运行中")) {
         QMessageBox::information(this, "提示",
@@ -288,50 +332,37 @@ void VMPage::startVM()
 
     const auto &vm = m_mgr.vms()[row];
 
-    // 构造 QEMU 命令行
     QStringList args;
     args << "-name" << vm.name;
     args << "-smp" << QString::number(vm.cpu);
     args << "-m" << QString::number(vm.memory);
 
-    // 机器类型 + KVM
     QString machineStr = vm.machine;
-    if (vm.kvm)
-        machineStr += ",accel=kvm";
+    if (vm.kvm) machineStr += ",accel=kvm";
     args << "-machine" << machineStr;
-
-    // CPU 类型
     args << "-cpu" << vm.cpuType;
 
-    // 系统盘
-    if (!vm.disk.isEmpty()) {
-        args << "-drive" << QString("file=%1,format=qcow2,if=virtio,index=0,cache=none,aio=native").arg(vm.disk);
-    }
+    // QMP 管理接口（用于关机/电源管理）
+    QString sockPath = qmpSocketPath(vm.name);
+    args << "-qmp" << QString("unix:%1,server=on,wait=off").arg(sockPath);
 
-    // 数据盘（从 index=1 开始）
+    if (!vm.disk.isEmpty())
+        args << "-drive" << QString("file=%1,format=qcow2,if=virtio,index=0,cache=none,aio=native").arg(vm.disk);
+
     for (int di = 0; di < vm.dataDisks.size(); ++di) {
         const auto &dd = vm.dataDisks[di];
         if (dd.path.isEmpty()) continue;
         args << "-drive" << QString("id=drive%1,file=%2,format=%3,if=virtio,index=%4,cache=%5,aio=%6")
-            .arg(di + 1)
-            .arg(dd.path, dd.format)
-            .arg(di + 1)
-            .arg(dd.cache, dd.aio);
+            .arg(di + 1).arg(dd.path, dd.format).arg(di + 1).arg(dd.cache, dd.aio);
     }
 
-    if (!vm.iso.isEmpty()) {
+    if (!vm.iso.isEmpty())
         args << "-cdrom" << vm.iso;
-    }
 
-    // ── 网络: user 模式 + 端口转发 ──
     if (vm.net == "user") {
         QString netdev = "user,id=net0";
-        for (const auto &pf : vm.portForwards) {
-            netdev += QString(",hostfwd=%1::%2-:%3")
-                .arg(pf.protocol)
-                .arg(pf.hostPort)
-                .arg(pf.guestPort);
-        }
+        for (const auto &pf : vm.portForwards)
+            netdev += QString(",hostfwd=%1::%2-:%3").arg(pf.protocol).arg(pf.hostPort).arg(pf.guestPort);
         args << "-netdev" << netdev;
         args << "-device" << QString("%1,netdev=net0").arg(vm.nicModel);
     } else if (vm.net == "bridge") {
@@ -342,44 +373,34 @@ void VMPage::startVM()
         args << "-device" << QString("%1,netdev=net0").arg(vm.nicModel);
     }
 
-    // VGA
     args << "-vga" << vm.vga;
 
     if (vm.vnc >= 0) {
-        // vnc 字段存的是端口号 (5902), QEMU 需要显示编号 (:2)
         int display = vm.vnc - 5900;
         if (display < 0) display = 0;
         args << "-vnc" << QString(":%1").arg(display);
     }
 
-    // ── 硬件直通: PCI 直通 ──
     for (const auto &bdf : vm.pciDevices) {
         QString addr = bdf;
-        // 补全短地址为 0000: 前缀
         if (!addr.contains(':')) continue;
         if (addr.count(':') == 1 && !addr.startsWith("0000:"))
             addr = "0000:" + addr;
         args << "-device" << QString("vfio-pci,host=%1").arg(addr);
     }
 
-    // ── ramfb (aarch64 图形输出) ──
-    if (vm.ramfb) {
+    if (vm.ramfb)
         args << "-device" << "ramfb";
-    }
 
-    // ── 硬件直通: Hugepages ──
     if (vm.hugepages) {
-        QString memSizeStr = QString::number(vm.memory);
         args << "-object"
              << QString("memory-backend-file,id=mem,size=%1M,mem-path=/dev/hugepages,share=on")
-                    .arg(memSizeStr)
+                    .arg(vm.memory)
              << "-numa" << "node,memdev=mem";
     }
 
-    // 额外参数
-    if (!vm.extra.isEmpty()) {
+    if (!vm.extra.isEmpty())
         args << vm.extra.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-    }
 
     QString cmdLine = vm.qemuBinary + " " + args.join(' ');
     Logger::log("VM", QString("启动虚机: %1").arg(vm.name));
@@ -395,59 +416,133 @@ void VMPage::startVM()
         QMessageBox::warning(this, "启动失败",
             QString("无法启动 QEMU:\n%1").arg(err));
         delete proc;
-    } else {
-        auto startedAt = QDateTime::currentSecsSinceEpoch();
-        Logger::log("VM", QString("✅ %1 已启动 (PID: %2)").arg(vm.name).arg(proc->processId()));
-        m_status->setText(QString("▶️ %1 已启动 (PID: %2)")
-                          .arg(vm.name).arg(proc->processId()));
-
-        // 进程退出时更新状态
-        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [this, proc, name = vm.name, startedAt](int exitCode, QProcess::ExitStatus status) {
-                    auto elapsed = QDateTime::currentSecsSinceEpoch() - startedAt;
-                    QString stderr = QString::fromUtf8(proc->readAll()).trimmed();
-
-                    if (status == QProcess::CrashExit) {
-                        Logger::log("VM", QString("💥 %1 异常退出").arg(name));
-                    } else {
-                        Logger::log("VM", QString("⏹️ %1 正常退出 (exit: %2, 运行 %3s)")
-                            .arg(name).arg(exitCode).arg(elapsed));
-                    }
-
-                    // 启动后 5 秒内退出且 exit != 0 → 多半是参数错误
-                    if (elapsed < 5 && exitCode != 0) {
-                        QString errMsg = stderr.isEmpty()
-                            ? "虚机启动后立即退出"
-                            : stderr.left(2000);
-                        Logger::log("VM", QString("❌ %1 启动失败:\n%2").arg(name, errMsg));
-                        QMessageBox::critical(this, "虚机启动失败",
-                            QString("%1\n\n退出码: %2\n\nQEMU 输出:\n%3")
-                                .arg(name).arg(exitCode).arg(errMsg));
-                    }
-
-                    m_status->setText(QString("⏹️ %1 已停止").arg(name));
-                    refreshStatus();
-                    proc->deleteLater();
-                });
+        return;
     }
+
+    auto startedAt = QDateTime::currentSecsSinceEpoch();
+    Logger::log("VM", QString("✅ %1 已启动 (PID: %2)").arg(vm.name).arg(proc->processId()));
+    m_status->setText(QString("▶️ %1 已启动 (PID: %2)").arg(vm.name).arg(proc->processId()));
+
+    m_runningProcs[vm.name] = proc;
+    updateStartButton();
+
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, [this, proc, name = vm.name, startedAt](int exitCode, QProcess::ExitStatus status) {
+        auto elapsed = QDateTime::currentSecsSinceEpoch() - startedAt;
+        QString stderr = QString::fromUtf8(proc->readAll()).trimmed();
+
+        if (status == QProcess::CrashExit)
+            Logger::log("VM", QString("💥 %1 异常退出").arg(name));
+        else
+            Logger::log("VM", QString("⏹️ %1 正常退出 (exit: %2, 运行 %3s)")
+                .arg(name).arg(exitCode).arg(elapsed));
+
+        if (elapsed < 5 && exitCode != 0) {
+            QString errMsg = stderr.isEmpty() ? "虚机启动后立即退出" : stderr.left(2000);
+            Logger::log("VM", QString("❌ %1 启动失败:\n%2").arg(name, errMsg));
+            QMessageBox::critical(this, "虚机启动失败",
+                QString("%1\n\n退出码: %2\n\nQEMU 输出:\n%3").arg(name).arg(exitCode).arg(errMsg));
+        }
+
+        m_runningProcs.remove(name);
+        proc->deleteLater();
+        m_status->setText(QString("⏹️ %1 已停止").arg(name));
+        refreshStatus();
+    });
 }
+
+// ── 停止 ──
+
+void VMPage::stopVM()
+{
+    int row = m_table->currentRow();
+    if (row < 0 || row >= m_mgr.vms().size()) return;
+
+    const auto &vm = m_mgr.vms()[row];
+    auto *statusItem = m_table->item(row, ColStatus);
+    if (!statusItem || !statusItem->text().contains("运行中")) return;
+
+    // 弹出选择
+    auto *menu = new QMessageBox(this);
+    menu->setWindowTitle("停止虚机");
+    menu->setText(QString("选择停止方式: %1").arg(vm.name));
+    menu->setIcon(QMessageBox::Question);
+
+    auto *btnShutdown = menu->addButton("🛑 正常关机", QMessageBox::AcceptRole);
+    auto *btnKill     = menu->addButton("⚡ 极速停止", QMessageBox::DestructiveRole);
+    auto *btnCancel   = menu->addButton("取消", QMessageBox::RejectRole);
+    menu->setDefaultButton(btnShutdown);
+    menu->exec();
+
+    if (menu->clickedButton() == btnCancel)
+        return;
+
+    if (menu->clickedButton() == btnShutdown) {
+        Logger::log("VM", QString("正常关机: %1").arg(vm.name));
+        sendQemuPowerdown(vm.name);
+
+        // 如果进程还在跟踪，等待最多 15 秒后强行终止
+        if (m_runningProcs.contains(vm.name)) {
+            QProcess *p = m_runningProcs[vm.name];
+            if (!p->waitForFinished(15000)) {
+                Logger::log("VM", QString("超时，强行终止: %1").arg(vm.name));
+                p->kill();
+                p->waitForFinished(2000);
+            }
+        }
+    } else {
+        Logger::log("VM", QString("极速停止: %1").arg(vm.name));
+        // 直接杀 QEMU 进程
+        if (m_runningProcs.contains(vm.name)) {
+            m_runningProcs[vm.name]->kill();
+            m_runningProcs[vm.name]->waitForFinished(2000);
+        } else {
+            // 不在跟踪表中，用 pidof/pkill
+            QProcess::execute("pkill", {"-9", "-f",
+                QString("qemu.*-name.*%1").arg(QRegularExpression::escape(vm.name))});
+        }
+    }
+
+    refreshStatus();
+}
+
+void VMPage::sendQemuPowerdown(const QString &vmName)
+{
+    QString sockPath = qmpSocketPath(vmName);
+
+    auto *socket = new QLocalSocket(this);
+    socket->connectToServer(sockPath, QIODevice::ReadWrite);
+
+    if (socket->waitForConnected(2000)) {
+        // QMP 协议: 先发送 capabilities 握手，再发送 system_powerdown
+        QByteArray cmd = R"({"execute":"qmp_capabilities"}
+{"execute":"system_powerdown"}
+)";
+        socket->write(cmd);
+        socket->waitForBytesWritten(1000);
+        socket->waitForReadyRead(1000);  // 读取响应（不关心内容）
+        socket->disconnectFromServer();
+    } else {
+        Logger::log("VM", QString("QMP socket 连接失败: %1").arg(sockPath));
+    }
+    socket->deleteLater();
+}
+
+// ── 自动启动 ──
 
 void VMPage::startAutoStartVMs()
 {
     const auto &vms = m_mgr.vms();
     for (int i = 0; i < vms.size(); ++i) {
         if (!vms[i].autoStart) continue;
-
-        // 检查是否已在运行
         auto *statusItem = m_table->item(i, ColStatus);
-        if (statusItem && statusItem->text().contains("运行中"))
-            continue;
-
-        // 临时选中该行并启动
+        if (statusItem && statusItem->text().contains("运行中")) continue;
         m_table->setCurrentCell(i, 0);
         startVM();
     }
 }
+
+// ── VNC 连接 ──
 
 void VMPage::connectVNC()
 {
@@ -460,7 +555,6 @@ void VMPage::connectVNC()
         return;
     }
 
-    // 检查是否在运行
     auto *statusItem = m_table->item(row, ColStatus);
     if (!statusItem || !statusItem->text().contains("运行中")) {
         QMessageBox::information(this, "提示", "该虚机未运行，请先启动");
@@ -470,17 +564,15 @@ void VMPage::connectVNC()
     QString target = QString("localhost:%1").arg(vm.vnc);
     QString viewer = m_vncViewer;
 
-    // 根据不同的 VNC 客户端构造参数
     QStringList args;
-    if (viewer.contains("vncviewer")) {
-        args << target;   // TigerVNC: vncviewer localhost:5902
-    } else if (viewer.contains("gvncviewer")) {
-        args << target;   // gvncviewer localhost:5902
-    } else if (viewer.contains("remmina")) {
+    if (viewer.contains("vncviewer"))
+        args << target;
+    else if (viewer.contains("gvncviewer"))
+        args << target;
+    else if (viewer.contains("remmina"))
         args << "-c" << QString("vnc://%1").arg(target);
-    } else {
-        args << target;   // 默认
-    }
+    else
+        args << target;
 
     if (!QProcess::startDetached(viewer, args)) {
         QMessageBox::warning(this, "启动失败",
