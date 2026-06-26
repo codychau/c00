@@ -420,6 +420,7 @@ void StorageDevicePage::showFormatDialog()
     // 进入后台运行 → 立即显示状态栏 + "恢复窗口"按钮
     connect(m_formatDlg, &FormatDialog::enteredBackground,
             this, [this]() {
+        m_formatBackground = true;
         setFormatRunning(true);
     });
     // 进度更新时确保状态栏可见（防止先完成再进后台的边界情况）
@@ -429,10 +430,16 @@ void StorageDevicePage::showFormatDialog()
             setFormatRunning(true);
     });
 
-    // 模态运行，直到任务完成/失败/取消才返回
+    // 模态运行
     m_formatDlg->exec();
 
-    // 任务已结束，清理
+    // 如果是后台运行模式，对话框被 hide() 导致 exec() 提前返回，
+    // 此时任务仍在进行中，不要清理——由 onFormatFinished() 负责收尾。
+    if (m_formatBackground) {
+        return;
+    }
+
+    // 前台任务已结束（完成/失败/取消），清理
     setFormatRunning(false);
     m_formatDlg->deleteLater();
     m_formatDlg = nullptr;
@@ -442,12 +449,17 @@ void StorageDevicePage::showFormatDialog()
 void StorageDevicePage::onFormatFinished(bool success)
 {
     m_formatRunning = false;
-    if (m_formatDlg) {
-        m_formatDlg->deleteLater();
-        m_formatDlg = nullptr;
-    }
     setFormatRunning(false);
-    refresh();
-    // 透传给父页面
+    // 透传给父页面（StoragePage 的状态栏）
     emit formatFinished(success);
+
+    // 后台任务结束后清理对话框并刷新设备列表
+    if (m_formatBackground) {
+        m_formatBackground = false;
+        if (m_formatDlg) {
+            m_formatDlg->deleteLater();
+            m_formatDlg = nullptr;
+        }
+        refresh();
+    }
 }

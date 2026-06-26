@@ -262,15 +262,13 @@ void FormatDialog::appendLog(const QString &msg, const QString &color)
 void FormatDialog::setProgressValue(int value)
 {
     m_progress->setValue(value);
-    if (m_backgroundMode)
-        emit formatProgress(value, m_progress->format());
+    emit formatProgress(value, m_progress->format());
 }
 
 void FormatDialog::setProgressText(const QString &text)
 {
     m_progress->setFormat(text);
-    if (m_backgroundMode)
-        emit formatProgress(m_progress->value(), text);
+    emit formatProgress(m_progress->value(), text);
 }
 
 void FormatDialog::enableButtons(bool enabled)
@@ -368,6 +366,7 @@ void FormatDialog::onCancel()
             enableButtons(true);
             appendLog("[WARN] 用户取消操作", "yellow");
             Logger::log("FORMAT", "格式化任务被用户取消");
+            emit formatFinished(false);
             done(QDialog::Rejected);  // 退出 exec
         }
         return;
@@ -494,13 +493,11 @@ void FormatDialog::finishWithError(const QString &reason)
 {
     appendLog(QString("[ERR] %1").arg(reason), "red");
     Logger::log("FORMAT", QString("格式化任务失败: %1").arg(reason));
-    enableButtons(true);
     m_running = false;
 
-    if (m_backgroundMode) {
-        emit formatFinished(false);
-        done(QDialog::Rejected);  // 退出 exec
-    }
+    // 始终通知父页面并关闭对话框
+    emit formatFinished(false);
+    done(QDialog::Rejected);
 }
 
 // ── 各步骤实现 ──
@@ -789,10 +786,10 @@ void FormatDialog::doCleanup()
     m_running = false;
     enableButtons(true);
 
+    // 始终通知父页面
+    emit formatFinished(true);
+
     if (m_backgroundMode) {
-        // 后台模式：发信号，不弹窗
-        emit formatFinished(true);
-        // 自动关闭对话框
         accept();
     } else {
         QMessageBox::information(this, "格式化完成",

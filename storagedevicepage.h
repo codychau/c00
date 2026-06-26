@@ -53,6 +53,7 @@ private:
 
     FormatDialog *m_formatDlg = nullptr;
     bool m_formatRunning = false;
+    bool m_formatBackground = false;
 };
 
 #endif // STORAGEDEVICEPAGE_H
