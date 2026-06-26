@@ -3,6 +3,7 @@
 
 #include <QWidget>
 #include <QLabel>
+#include <QProgressBar>
 #include <QTreeWidget>
 #include <QPushButton>
 #include <QProcess>
@@ -16,6 +17,11 @@ class StorageDevicePage : public QWidget
 public:
     explicit StorageDevicePage(QWidget *parent = nullptr);
     ~StorageDevicePage() override;
+
+signals:
+    // 向父页面（StoragePage）透传格式化状态
+    void formatProgress(int percent, const QString &status);
+    void formatFinished(bool success);
 
 private slots:
     void refresh();
@@ -34,10 +40,12 @@ private:
                                const QString &type, const QString &fstype,
                                const QString &mount);
     void setFormatRunning(bool running);
+    void onFormatProgress(int percent, const QString &status);
 
     QTreeWidget *m_tree;
     QLabel *m_status;
-    QLabel *m_formatBanner;       // 后台格式化时的提示条
+
+    // 后台格式化状态栏（控件在 StoragePage，这里只保留引用以更新按钮状态）
     QPushButton *m_refreshBtn;
     QPushButton *m_smartBtn;
     QPushButton *m_mountBtn;

@@ -28,8 +28,11 @@ public:
 
 signals:
     void formatFinished(bool success);
+    void formatProgress(int percent, const QString &status);
+    void enteredBackground();
 
 private slots:
+    void showEvent(QShowEvent *event) override;
     void onStartFormat();
     void onBackgroundRun();
     void onCancel();
@@ -67,6 +70,9 @@ private:
     bool             m_running = false;
     bool             m_backgroundMode = false;
 
+    // 进程输出缓存，用于实时读取 stdout 的同时不丢失最终输出
+    QString          m_procStdOut;
+
     // 流程控制
     enum Step {
         StepBackup,
@@ -87,6 +93,7 @@ private:
     void enableButtons(bool enabled);
 
     void startStep();
+    void onProcessOutput();
     void onProcessFinished(int exitCode, QProcess::ExitStatus status);
 
     void finishWithError(const QString &reason);

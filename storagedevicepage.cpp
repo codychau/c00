@@ -32,16 +32,6 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
-    // ── 后台格式化提示条 ──
-    m_formatBanner = new QLabel(
-        "⚠️  有格式化任务正在进行，请等待结束...");
-    m_formatBanner->setStyleSheet(
-        "QLabel { background: #fef3c7; color: #92400e; font-weight: bold; "
-        "padding: 12px 16px; border-radius: 4px; border: 1px solid #fbbf24; "
-        "font-size: 14px; }");
-    m_formatBanner->setVisible(false);
-    layout->addWidget(m_formatBanner);
-
     // ── 树形列表 ──
     m_tree = new QTreeWidget();
     m_tree->setColumnCount(5);
@@ -208,12 +198,27 @@ void StorageDevicePage::buildTree(const QString &json)
 void StorageDevicePage::setFormatRunning(bool running)
 {
     m_formatRunning = running;
-    m_formatBanner->setVisible(running);
-    m_tree->setEnabled(!running);
+
+    // 操作按钮禁用/启用（状态栏在 StoragePage，由信号驱动）
+    m_formatBtn->setEnabled(!running);
+    m_mountBtn->setEnabled(!running);
+    m_smartBtn->setEnabled(!running);
     m_refreshBtn->setEnabled(!running);
+    m_tree->setEnabled(!running);
+
     m_status->setText(running
         ? "🔴 格式化任务后台运行中..."
         : "就绪");
+
+    if (!running) {
+        onSelectionChanged();
+    }
+}
+
+void StorageDevicePage::onFormatProgress(int percent, const QString &status)
+{
+    // 直接透传给父页面
+    emit formatProgress(percent, status);
 }
 
 void StorageDevicePage::refresh()
@@ -410,35 +415,39 @@ void StorageDevicePage::showFormatDialog()
 
     connect(m_formatDlg, &FormatDialog::formatFinished,
             this, &StorageDevicePage::onFormatFinished);
+    connect(m_formatDlg, &FormatDialog::formatProgress,
+            this, &StorageDevicePage::onFormatProgress);
+    // 进入后台运行 → 立即显示状态栏 + "恢复窗口"按钮
+    connect(m_formatDlg, &FormatDialog::enteredBackground,
+            this, [this]() {
+        setFormatRunning(true);
+    });
+    // 进度更新时确保状态栏可见（防止先完成再进后台的边界情况）
+    connect(m_formatDlg, &FormatDialog::formatProgress,
+            this, [this](int, const QString &) {
+        if (!m_formatRunning)
+            setFormatRunning(true);
+    });
 
-    // 非后台模式：exec 阻塞等待
+    // 模态运行，直到任务完成/失败/取消才返回
     m_formatDlg->exec();
 
-    // 如果 dialog 没有进入后台模式（正常关闭），清理
-    if (!m_formatDlg->isRunning()) {
-        setFormatRunning(false);
-        m_formatDlg->deleteLater();
-        m_formatDlg = nullptr;
-        refresh();
-    }
+    // 任务已结束，清理
+    setFormatRunning(false);
+    m_formatDlg->deleteLater();
+    m_formatDlg = nullptr;
+    refresh();
 }
 
 void StorageDevicePage::onFormatFinished(bool success)
 {
-    if (success) {
-        m_status->setText("✅ 格式化任务完成");
-    } else {
-        m_status->setText("❌ 格式化任务失败");
-    }
-
-    // 清理对话框
     m_formatRunning = false;
     if (m_formatDlg) {
         m_formatDlg->deleteLater();
         m_formatDlg = nullptr;
     }
-
-    // 恢复正常界面
     setFormatRunning(false);
     refresh();
+    // 透传给父页面
+    emit formatFinished(success);
 }

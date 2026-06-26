@@ -262,21 +262,44 @@ void FormatDialog::appendLog(const QString &msg, const QString &color)
 void FormatDialog::setProgressValue(int value)
 {
     m_progress->setValue(value);
+    if (m_backgroundMode)
+        emit formatProgress(value, m_progress->format());
 }
 
 void FormatDialog::setProgressText(const QString &text)
 {
     m_progress->setFormat(text);
+    if (m_backgroundMode)
+        emit formatProgress(m_progress->value(), text);
 }
 
 void FormatDialog::enableButtons(bool enabled)
 {
+    m_startBtn->setVisible(enabled);
     m_startBtn->setEnabled(enabled);
     m_bgBtn->setVisible(!enabled && m_running);
-    m_cancelBtn->setEnabled(enabled);
+    m_cancelBtn->setEnabled(true);  // 取消按钮始终可用
+    if (!enabled) {
+        m_cancelBtn->setText("取消任务");
+    } else {
+        m_cancelBtn->setText("取消");
+    }
 }
 
 // ── 操作控制 ──
+
+void FormatDialog::showEvent(QShowEvent *event)
+{
+    QDialog::showEvent(event);
+    if (m_running) {
+        enableButtons(false);
+        m_cancelBtn->setText("取消任务");
+        m_progress->setVisible(true);
+        m_log->setVisible(true);
+        // 恢复窗口时强制显示后台运行按钮
+        m_bgBtn->setVisible(true);
+    }
+}
 
 void FormatDialog::onStartFormat()
 {
@@ -325,8 +348,10 @@ void FormatDialog::onStartFormat()
 void FormatDialog::onBackgroundRun()
 {
     m_backgroundMode = true;
-    appendLog("[INFO] 转入后台运行，窗口已隐藏", "cyan");
+    appendLog("[INFO] 转入后台运行", "cyan");
     Logger::log("FORMAT", "格式化任务转入后台运行");
+    emit enteredBackground();
+    emit formatProgress(m_progress->value(), m_progress->format());
     hide();
 }
 
@@ -343,6 +368,7 @@ void FormatDialog::onCancel()
             enableButtons(true);
             appendLog("[WARN] 用户取消操作", "yellow");
             Logger::log("FORMAT", "格式化任务被用户取消");
+            done(QDialog::Rejected);  // 退出 exec
         }
         return;
     }
@@ -364,7 +390,8 @@ void FormatDialog::startStep()
 
 void FormatDialog::onProcessFinished(int exitCode, QProcess::ExitStatus status)
 {
-    QString stdOut = m_proc ? QString::fromUtf8(m_proc->readAllStandardOutput()).trimmed() : "";
+    // 从 m_procStdOut 获取完整输出（onProcessOutput 已实时读取并缓存）
+    QString stdOut = m_procStdOut.trimmed();
     QString errMsg = m_proc ? QString::fromUtf8(m_proc->readAllStandardError()).trimmed() : "";
     Q_UNUSED(stdOut);
 
@@ -472,6 +499,7 @@ void FormatDialog::finishWithError(const QString &reason)
 
     if (m_backgroundMode) {
         emit formatFinished(false);
+        done(QDialog::Rejected);  // 退出 exec
     }
 }
 
@@ -484,8 +512,11 @@ void FormatDialog::runCmd(const QString &cmd, const QStringList &args,
         m_proc->deleteLater();
         m_proc = nullptr;
     }
+    m_procStdOut.clear();
     m_proc = new QProcess(this);
     m_proc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(m_proc, &QProcess::readyReadStandardOutput,
+            this, &FormatDialog::onProcessOutput);
     connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &FormatDialog::onProcessFinished);
 
@@ -505,6 +536,40 @@ void FormatDialog::runCmdStep(const QString &title, const QString &cmd,
     runCmd(cmd, args, usePkexec);
 }
 
+void FormatDialog::onProcessOutput()
+{
+    if (!m_proc) return;
+
+    QByteArray data = m_proc->readAllStandardOutput();
+    m_procStdOut += QString::fromUtf8(data);
+
+    // 尝试解析 rsync --progress 百分比
+    // rsync --progress 输出格式: "  xxx,xxx  74%   xxMB/s    0:00:00"
+    QString lastLine = m_procStdOut.section('\r', -1).section('\n', -1).trimmed();
+    static QRegularExpression re(R"((\d+)\s*%)");
+    auto match = re.match(lastLine);
+    if (match.hasMatch()) {
+        int pct = match.captured(1).toInt();
+        // 根据当前步骤映射到进度条范围
+        int fromVal, toVal;
+        switch (m_currentStep) {
+        case StepBackup:  fromVal = 0;  toVal = 10; break;
+        case StepRestore: fromVal = 60; toVal = 80; break;
+        default:          fromVal = 0;  toVal = 100; break;
+        }
+        int val = fromVal + (toVal - fromVal) * pct / 100;
+        m_progress->setValue(val);
+        setProgressText(QString("%1 (%2%)")
+            .arg(m_currentStep == StepBackup ? "正在备份" : "正在恢复")
+            .arg(pct));
+    }
+
+    // 限制缓存大小，防止大文件备份时内存暴涨
+    if (m_procStdOut.size() > 1024 * 1024) { // 1MB
+        m_procStdOut = m_procStdOut.right(65536);
+    }
+}
+
 void FormatDialog::doBackup()
 {
     if (m_ctx.targetDir.isEmpty()) {
@@ -518,11 +583,24 @@ void FormatDialog::doBackup()
     QString backupPath = m_ctx.targetDir + "/format_backup_" + m_devName;
 
     if (QDir(backupPath).exists()) {
-        appendLog("[SKIP] 使用现有备份", "yellow");
-        m_ctx.targetDir = backupPath;
-        m_currentStep = StepUnmount;
-        startStep();
-        return;
+        auto ret = QMessageBox::question(this, "发现已有备份",
+            QString("目录 %1 已存在备份。").arg(backupPath) +
+            "\n是否使用现有备份继续？\n\n"
+            "[是] 使用现有备份，跳过备份步骤\n"
+            "[否] 重新备份（删除旧备份重新复制）",
+            QMessageBox::Yes | QMessageBox::No);
+
+        if (ret == QMessageBox::Yes) {
+            appendLog("[SKIP] 使用现有备份", "yellow");
+            m_ctx.targetDir = backupPath;
+            m_currentStep = StepUnmount;
+            startStep();
+            return;
+        }
+
+        // 选择「否」：删除旧备份重新执行完整备份
+        appendLog("[INFO] 删除旧备份，重新备份", "yellow");
+        QDir(backupPath).removeRecursively();
     }
 
     QDir().mkpath(backupPath);
