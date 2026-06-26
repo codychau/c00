@@ -32,6 +32,16 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
+    // ── 后台格式化提示条 ──
+    m_formatBanner = new QLabel(
+        "⚠️  有格式化任务正在进行，请等待结束...");
+    m_formatBanner->setStyleSheet(
+        "QLabel { background: #fef3c7; color: #92400e; font-weight: bold; "
+        "padding: 12px 16px; border-radius: 4px; border: 1px solid #fbbf24; "
+        "font-size: 14px; }");
+    m_formatBanner->setVisible(false);
+    layout->addWidget(m_formatBanner);
+
     // ── 树形列表 ──
     m_tree = new QTreeWidget();
     m_tree->setColumnCount(5);
@@ -45,7 +55,7 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     m_tree->setAllColumnsShowFocus(true);
     connect(m_tree, &QTreeWidget::itemSelectionChanged,
             this, &StorageDevicePage::onSelectionChanged);
-    layout->addWidget(m_tree);
+    layout->addWidget(m_tree, 1);
 
     // ── 底部按钮行 ──
     auto *row = new QHBoxLayout();
@@ -83,6 +93,16 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     refresh();
 }
 
+StorageDevicePage::~StorageDevicePage()
+{
+    // 确保清理后台运行的格式化对话框
+    if (m_formatDlg) {
+        m_formatDlg->close();
+        m_formatDlg->deleteLater();
+        m_formatDlg = nullptr;
+    }
+}
+
 void StorageDevicePage::runCmd(const QString &cmd, const QStringList &args,
                                std::function<void(const QString &)> cb)
 {
@@ -93,6 +113,16 @@ void StorageDevicePage::runCmd(const QString &cmd, const QStringList &args,
                 p->deleteLater();
             });
     p->start(cmd, args);
+}
+
+static int countAllItems(QTreeWidgetItem *root)
+{
+    int n = 0;
+    for (int i = 0; i < root->childCount(); ++i) {
+        auto *child = root->child(i);
+        n += 1 + countAllItems(child);
+    }
+    return n;
 }
 
 // ── 递归建树 ──
@@ -175,20 +205,22 @@ void StorageDevicePage::buildTree(const QString &json)
         QString("共 %1 个块设备").arg(countAllItems(m_tree->invisibleRootItem())));
 }
 
-static int countAllItems(QTreeWidgetItem *root)
+void StorageDevicePage::setFormatRunning(bool running)
 {
-    int n = 0;
-    for (int i = 0; i < root->childCount(); ++i) {
-        auto *child = root->child(i);
-        n += 1 + countAllItems(child);
-    }
-    return n;
+    m_formatRunning = running;
+    m_formatBanner->setVisible(running);
+    m_tree->setEnabled(!running);
+    m_refreshBtn->setEnabled(!running);
+    m_status->setText(running
+        ? "🔴 格式化任务后台运行中..."
+        : "就绪");
 }
 
 void StorageDevicePage::refresh()
 {
     m_smartBtn->setVisible(false);
     m_mountBtn->setVisible(false);
+    m_formatBtn->setVisible(false);
     m_status->setText("正在检测块设备…");
 
     runCmd("lsblk", {"-J", "-o", "NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT"},
@@ -200,7 +232,7 @@ void StorageDevicePage::refresh()
 void StorageDevicePage::onSelectionChanged()
 {
     auto *item = m_tree->currentItem();
-    if (!item) {
+    if (!item || m_formatRunning) {
         m_smartBtn->setVisible(false);
         m_mountBtn->setVisible(false);
         m_formatBtn->setVisible(false);
@@ -218,7 +250,7 @@ void StorageDevicePage::onSelectionChanged()
     bool canMount = !fstype.isEmpty() && mount.isEmpty() && type != "disk";
     m_mountBtn->setVisible(canMount);
 
-    // 格式化按钮: part 类型且有文件系统（已经格式化的分区）
+    // 格式化按钮: part 类型且有文件系统
     bool canFormat = type == "part" && !fstype.isEmpty();
     m_formatBtn->setVisible(canFormat);
 }
@@ -282,19 +314,17 @@ void StorageDevicePage::showMountDialog()
     if (mnt.isEmpty()) return;
 
     // ── 校验 ──
-    // 1. 必须是绝对路径
     if (!mnt.startsWith('/')) {
         QMessageBox::warning(this, "路径无效", "挂载点必须是绝对路径（以 / 开头）");
         return;
     }
 
-    // 2. 不能是 / 本身
     if (mnt == "/") {
         QMessageBox::warning(this, "路径无效", "不能挂载到根目录");
         return;
     }
 
-    // 3. 不能是已挂载的路径（简单检查 /proc/mounts）
+    // 不能是已挂载的路径
     QFile mountsFile("/proc/mounts");
     if (mountsFile.open(QIODevice::ReadOnly)) {
         QString all = QString::fromUtf8(mountsFile.readAll());
@@ -318,7 +348,6 @@ void StorageDevicePage::showMountDialog()
             return;
         }
     } else {
-        // 目录已存在，检查是否为空
         if (!dir.isEmpty()) {
             auto ret = QMessageBox::question(this, "目录非空",
                 QString("「%1」目录非空，仍然挂载？").arg(mnt),
@@ -337,11 +366,7 @@ void StorageDevicePage::showMountDialog()
         if (exitCode == 0) {
             QMessageBox::information(this, "挂载成功",
                 QString("%1 → %2\n挂载成功！").arg(devPath, mnt));
-
-            // 刷新树
             refresh();
-
-            // 打开文件管理器
             QProcess::startDetached("xdg-open", {mnt});
         } else {
             QMessageBox::warning(this, "挂载失败",
@@ -366,9 +391,54 @@ void StorageDevicePage::showFormatDialog()
     QString devPath = QString("/dev/%1").arg(devName);
     bool isMounted = !mount.isEmpty();
 
-    FormatDialog dlg(devPath, devName, fstype, mount, isMounted, this);
-    dlg.exec();
+    // 如果有旧的对话框在运行，提示
+    if (m_formatDlg && m_formatDlg->isRunning()) {
+        QMessageBox::information(this, "格式化进行中",
+            "已有一个格式化任务正在运行，请等待完成。");
+        return;
+    }
 
-    // 对话框关闭后刷新设备列表
+    // 清理旧对话框
+    if (m_formatDlg) {
+        m_formatDlg->deleteLater();
+        m_formatDlg = nullptr;
+    }
+
+    // 创建对话框（堆上，支持后台运行后不销毁）
+    m_formatDlg = new FormatDialog(devPath, devName, fstype, mount, isMounted, this);
+    m_formatDlg->setAttribute(Qt::WA_DeleteOnClose, false); // 我们自己管理
+
+    connect(m_formatDlg, &FormatDialog::formatFinished,
+            this, &StorageDevicePage::onFormatFinished);
+
+    // 非后台模式：exec 阻塞等待
+    m_formatDlg->exec();
+
+    // 如果 dialog 没有进入后台模式（正常关闭），清理
+    if (!m_formatDlg->isRunning()) {
+        setFormatRunning(false);
+        m_formatDlg->deleteLater();
+        m_formatDlg = nullptr;
+        refresh();
+    }
+}
+
+void StorageDevicePage::onFormatFinished(bool success)
+{
+    if (success) {
+        m_status->setText("✅ 格式化任务完成");
+    } else {
+        m_status->setText("❌ 格式化任务失败");
+    }
+
+    // 清理对话框
+    m_formatRunning = false;
+    if (m_formatDlg) {
+        m_formatDlg->deleteLater();
+        m_formatDlg = nullptr;
+    }
+
+    // 恢复正常界面
+    setFormatRunning(false);
     refresh();
 }

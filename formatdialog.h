@@ -22,9 +22,16 @@ public:
                           const QString &mountPoint,
                           bool isMounted,
                           QWidget *parent = nullptr);
+    ~FormatDialog() override;
+
+    bool isRunning() const { return m_running; }
+
+signals:
+    void formatFinished(bool success);
 
 private slots:
     void onStartFormat();
+    void onBackgroundRun();
     void onCancel();
 
 private:
@@ -46,6 +53,7 @@ private:
     QCheckBox       *m_lazyCheck;         // 强制卸载
     QSpinBox        *m_inodeSpin;         // inode size
     QPushButton     *m_startBtn;
+    QPushButton     *m_bgBtn;             // 后台运行
     QPushButton     *m_cancelBtn;
     QProgressBar    *m_progress;
     QTextEdit       *m_log;
@@ -57,15 +65,16 @@ private:
     QString          m_mountPoint;
     bool             m_isMounted;
     bool             m_running = false;
+    bool             m_backgroundMode = false;
 
     // 流程控制
     enum Step {
         StepBackup,
         StepUnmount,
         StepFormat,
-        StepUpdateFstab,
         StepMount,
         StepRestore,
+        StepUpdateFstab,
         StepDone
     };
     Step             m_currentStep = StepBackup;
@@ -80,6 +89,7 @@ private:
     void startStep();
     void onProcessFinished(int exitCode, QProcess::ExitStatus status);
 
+    void finishWithError(const QString &reason);
     void doBackup();
     void doUnmount();
     void doFormat();

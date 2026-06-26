@@ -1,4 +1,5 @@
 #include "formatdialog.h"
+#include "logger.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -86,7 +87,6 @@ FormatDialog::FormatDialog(const QString &devPath,
     m_fsCombo = new QComboBox();
     for (const auto &fs : FS_OPTIONS)
         m_fsCombo->addItem(fs);
-    // 默认选中 ext4
     int ext4Idx = m_fsCombo->findText("ext4");
     if (ext4Idx >= 0) m_fsCombo->setCurrentIndex(ext4Idx);
     fsLayout->addRow("文件系统类型：", m_fsCombo);
@@ -96,7 +96,6 @@ FormatDialog::FormatDialog(const QString &devPath,
     m_inodeSpin->setValue(256);
     m_inodeSpin->setSuffix(" bytes");
     m_inodeSpin->setToolTip("inode 大小，大文件存储可考虑 1024+");
-    // 根据文件系统动态启用/禁用
     connect(m_fsCombo, &QComboBox::currentTextChanged, this, [this](const QString &fs) {
         m_inodeSpin->setEnabled(fs == "ext4" || fs == "xfs" || fs == "btrfs");
         m_discardCheck->setEnabled(fs == "ext4" || fs == "xfs" || fs == "btrfs");
@@ -111,7 +110,6 @@ FormatDialog::FormatDialog(const QString &devPath,
 
     m_noatimeCheck = new QCheckBox("noatime — 禁用访问时间更新，减少写入");
     m_noatimeCheck->setChecked(true);
-    m_noatimeCheck->setToolTip("挂载时添加 noatime 选项，适合 NAS/文件服务器");
     optLayout->addWidget(m_noatimeCheck);
 
     m_nodiratimeCheck = new QCheckBox("nodiratime — 禁用目录访问时间更新");
@@ -120,7 +118,6 @@ FormatDialog::FormatDialog(const QString &devPath,
 
     m_discardCheck = new QCheckBox("discard — 启用 TRIM（SSD 优化）");
     m_discardCheck->setChecked(true);
-    m_discardCheck->setToolTip("挂载时添加 discard 选项，SSD 建议开启");
     optLayout->addWidget(m_discardCheck);
 
     mainLayout->addWidget(optGroup);
@@ -145,6 +142,12 @@ FormatDialog::FormatDialog(const QString &devPath,
     // ── 底栏按钮 ──
     auto *btnRow = new QHBoxLayout();
     btnRow->addStretch();
+
+    m_bgBtn = new QPushButton("▶ 后台运行");
+    m_bgBtn->setToolTip("隐藏此窗口，在后台继续执行格式化流程");
+    m_bgBtn->setVisible(false);
+    connect(m_bgBtn, &QPushButton::clicked, this, &FormatDialog::onBackgroundRun);
+    btnRow->addWidget(m_bgBtn);
 
     m_cancelBtn = new QPushButton("取消");
     connect(m_cancelBtn, &QPushButton::clicked, this, &FormatDialog::onCancel);
@@ -189,14 +192,11 @@ FormatDialog::FormatDialog(const QString &devPath,
                 QString fsStr  = fstype.isNull() ? "" : fstype.toString();
                 QString mntStr = mount.isNull()  ? "" : mount.toString();
 
-                // 只添加 part 类型且有挂载点且不是自己的设备
                 if (type == "part" && !mntStr.isEmpty() && !fsStr.isEmpty()) {
                     QString devFull = QString("/dev/%1").arg(name);
                     if (devFull != m_devPath) {
-                        // 获取可用空间
                         QString info = tr("挂载点: %1 | 文件系统: %2")
                                         .arg(mntStr, fsStr);
-                        // 获取容量信息
                         auto *spaceP = new QProcess(this);
                         connect(spaceP, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
                                 this, [this, spaceP, devFull, info, mntStr](int, QProcess::ExitStatus) mutable {
@@ -214,7 +214,6 @@ FormatDialog::FormatDialog(const QString &devPath,
                             m_targetCombo->addItem(
                                 QString("%1 (%2)").arg(devFull, info),
                                 QVariant::fromValue(mntStr));
-                            // 存储额外信息显示
                             m_targetCombo->setItemData(
                                 m_targetCombo->count() - 1,
                                 info, Qt::UserRole + 1);
@@ -223,7 +222,6 @@ FormatDialog::FormatDialog(const QString &devPath,
                     }
                 }
 
-                // 递归 children
                 auto children = obj.value("children").toArray();
                 if (!children.isEmpty())
                     addParts(children);
@@ -238,10 +236,22 @@ FormatDialog::FormatDialog(const QString &devPath,
     p->start("lsblk", {"-J", "-o", "NAME,TYPE,FSTYPE,MOUNTPOINT"});
 }
 
+FormatDialog::~FormatDialog()
+{
+    if (m_proc && m_proc->state() != QProcess::NotRunning) {
+        m_proc->kill();
+        m_proc->waitForFinished(3000);
+    }
+}
+
 // ── UI 工具 ──
 
 void FormatDialog::appendLog(const QString &msg, const QString &color)
 {
+    // 写入 Logger（日志管理系统可查看）
+    Logger::log("FORMAT", msg);
+
+    // 更新 UI
     m_log->setVisible(true);
     QString colored = color.isEmpty()
         ? msg
@@ -262,6 +272,7 @@ void FormatDialog::setProgressText(const QString &text)
 void FormatDialog::enableButtons(bool enabled)
 {
     m_startBtn->setEnabled(enabled);
+    m_bgBtn->setVisible(!enabled && m_running);
     m_cancelBtn->setEnabled(enabled);
 }
 
@@ -281,7 +292,6 @@ void FormatDialog::onStartFormat()
     if (m_noatimeCheck->isChecked())  m_ctx.mountOpts << "noatime";
     if (m_nodiratimeCheck->isChecked()) m_ctx.mountOpts << "nodiratime";
     if (m_discardCheck->isChecked())  m_ctx.mountOpts << "discard";
-
     if (m_inodeSpin->isEnabled()) {
         m_ctx.mountOpts << QString("inode_size=%1").arg(m_inodeSpin->value());
     }
@@ -308,9 +318,16 @@ void FormatDialog::onStartFormat()
     appendLog("=== 开始格式化流程 ===", "cyan");
     m_progress->setVisible(true);
 
-    // 开始执行
     m_currentStep = StepBackup;
     startStep();
+}
+
+void FormatDialog::onBackgroundRun()
+{
+    m_backgroundMode = true;
+    appendLog("[INFO] 转入后台运行，窗口已隐藏", "cyan");
+    Logger::log("FORMAT", "格式化任务转入后台运行");
+    hide();
 }
 
 void FormatDialog::onCancel()
@@ -322,8 +339,10 @@ void FormatDialog::onCancel()
         if (ret == QMessageBox::Yes) {
             m_proc->kill();
             m_running = false;
+            m_backgroundMode = false;
             enableButtons(true);
             appendLog("[WARN] 用户取消操作", "yellow");
+            Logger::log("FORMAT", "格式化任务被用户取消");
         }
         return;
     }
@@ -333,30 +352,28 @@ void FormatDialog::onCancel()
 void FormatDialog::startStep()
 {
     switch (m_currentStep) {
-    case StepBackup:     doBackup();   break;
-    case StepUnmount:    doUnmount();  break;
-    case StepFormat:     doFormat();   break;
+    case StepBackup:      doBackup();     break;
+    case StepUnmount:     doUnmount();    break;
+    case StepFormat:      doFormat();     break;
+    case StepMount:       doMount();      break;
+    case StepRestore:     doRestore();    break;
     case StepUpdateFstab: doUpdateFstab(); break;
-    case StepMount:      doMount();    break;
-    case StepRestore:    doRestore();  break;
-    case StepDone:        doCleanup();  break;
+    case StepDone:        doCleanup();    break;
     }
 }
 
 void FormatDialog::onProcessFinished(int exitCode, QProcess::ExitStatus status)
 {
     QString stdOut = m_proc ? QString::fromUtf8(m_proc->readAllStandardOutput()).trimmed() : "";
-    QString stdErr = m_proc ? QString::fromUtf8(m_proc->readAllStandardError()).trimmed() : "";
+    QString errMsg = m_proc ? QString::fromUtf8(m_proc->readAllStandardError()).trimmed() : "";
     Q_UNUSED(stdOut);
 
     bool ok = (exitCode == 0 && status == QProcess::NormalExit);
 
     if (!ok) {
-        QString errMsg = stdErr.isEmpty() ? stdOut : stdErr;
-        appendLog(QString("[FAIL] %1").arg(errMsg), "red");
+        appendLog(QString("[FAIL] %1").arg(errMsg.isEmpty() ? stdOut : errMsg), "red");
     }
 
-    // 根据步骤处理结果
     switch (m_currentStep) {
     case StepBackup:
         if (ok) {
@@ -366,21 +383,26 @@ void FormatDialog::onProcessFinished(int exitCode, QProcess::ExitStatus status)
             startStep();
         } else {
             appendLog("[ERR] 备份失败，终止", "red");
-            enableButtons(true);
-            m_running = false;
+            finishWithError("备份失败");
         }
         break;
 
     case StepUnmount:
-        if (ok || (!ok && stdErr.contains("not mounted"))) {
+        if (ok || errMsg.contains("not mounted", Qt::CaseInsensitive)) {
             setProgressValue(20);
             setProgressText("已卸载");
             m_currentStep = StepFormat;
             startStep();
         } else {
-            appendLog("[ERR] 卸载失败，终止", "red");
-            enableButtons(true);
-            m_running = false;
+            // 如果勾选了强制卸载，尝试 umount -l
+            if (m_lazyCheck->isChecked()) {
+                appendLog("[RETRY] 尝试强制卸载...", "yellow");
+                runCmdStep("UNMOUNT-L", "umount", {"-l", m_mountPoint});
+                // 这个回调会在该命令完成后再次被调用
+            } else {
+                appendLog("[ERR] 卸载失败，终止", "red");
+                finishWithError("卸载失败（设备正忙）");
+            }
         }
         break;
 
@@ -388,60 +410,68 @@ void FormatDialog::onProcessFinished(int exitCode, QProcess::ExitStatus status)
         if (ok) {
             setProgressValue(40);
             setProgressText("格式化完成");
-            m_currentStep = StepUpdateFstab;
-            startStep();
-        } else {
-            appendLog("[ERR] 格式化失败", "red");
-            enableButtons(true);
-            m_running = false;
-        }
-        break;
-
-    case StepUpdateFstab:
-        if (ok) {
-            setProgressValue(50);
-            setProgressText("fstab 已更新");
             m_currentStep = StepMount;
             startStep();
         } else {
-            appendLog("[ERR] 更新 fstab 失败", "red");
-            enableButtons(true);
-            m_running = false;
+            appendLog("[ERR] 格式化失败", "red");
+            finishWithError("格式化失败");
         }
         break;
 
     case StepMount:
         if (ok) {
-            setProgressValue(70);
+            setProgressValue(60);
             setProgressText("已挂载");
             if (!m_ctx.targetDir.isEmpty()) {
                 m_currentStep = StepRestore;
             } else {
-                m_currentStep = StepDone;
+                m_currentStep = StepUpdateFstab;
             }
             startStep();
         } else {
-            appendLog("[ERR] 挂载失败", "red");
-            enableButtons(true);
-            m_running = false;
+            appendLog("[ERR] 挂载失败，系统仍可使用旧 fstab 启动", "red");
+            finishWithError("挂载失败");
         }
         break;
 
     case StepRestore:
         if (ok) {
-            setProgressValue(90);
+            setProgressValue(80);
             setProgressText("数据恢复完成");
+            m_currentStep = StepUpdateFstab;
+            startStep();
+        } else {
+            appendLog("[ERR] 恢复数据失败，fstab 未被修改，系统仍可正常启动", "red");
+            finishWithError("数据恢复失败");
+        }
+        break;
+
+    case StepUpdateFstab:
+        if (ok) {
+            setProgressValue(90);
+            setProgressText("fstab 已更新");
             m_currentStep = StepDone;
             startStep();
         } else {
-            appendLog("[ERR] 恢复数据失败", "red");
-            enableButtons(true);
-            m_running = false;
+            appendLog("[ERR] 更新 fstab 失败，系统仍可使用旧 fstab 启动", "red");
+            finishWithError("更新 fstab 失败");
         }
         break;
 
     case StepDone:
         break;
+    }
+}
+
+void FormatDialog::finishWithError(const QString &reason)
+{
+    appendLog(QString("[ERR] %1").arg(reason), "red");
+    Logger::log("FORMAT", QString("格式化任务失败: %1").arg(reason));
+    enableButtons(true);
+    m_running = false;
+
+    if (m_backgroundMode) {
+        emit formatFinished(false);
     }
 }
 
@@ -455,16 +485,15 @@ void FormatDialog::runCmd(const QString &cmd, const QStringList &args,
         m_proc = nullptr;
     }
     m_proc = new QProcess(this);
+    m_proc->setProcessChannelMode(QProcess::MergedChannels);
+    connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, &FormatDialog::onProcessFinished);
+
     if (usePkexec) {
         QStringList pkArgs;
         pkArgs << cmd << args;
-        m_proc->setProcessChannelMode(QProcess::MergedChannels);
-        connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &FormatDialog::onProcessFinished);
         m_proc->start("pkexec", pkArgs);
     } else {
-        connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, &FormatDialog::onProcessFinished);
         m_proc->start(cmd, args);
     }
 }
@@ -488,31 +517,19 @@ void FormatDialog::doBackup()
     setProgressText("正在备份数据...");
     QString backupPath = m_ctx.targetDir + "/format_backup_" + m_devName;
 
-    // 检查备份是否已完成
     if (QDir(backupPath).exists()) {
-        auto ret = QMessageBox::question(this, "备份已存在",
-            QString("备份目录 %1 已存在。\n重新备份？").arg(backupPath),
-            QMessageBox::Yes | QMessageBox::No);
-        if (ret == QMessageBox::No) {
-            appendLog("[SKIP] 使用现有备份", "yellow");
-            m_ctx.targetDir = backupPath;
-            m_currentStep = StepUnmount;
-            startStep();
-            return;
-        }
-        // 重新备份：删除旧的
-        QDir(backupPath).removeRecursively();
+        appendLog("[SKIP] 使用现有备份", "yellow");
+        m_ctx.targetDir = backupPath;
+        m_currentStep = StepUnmount;
+        startStep();
+        return;
     }
 
-    // 创建备份目录
     QDir().mkpath(backupPath);
 
-    // rsync 备份
     appendLog(QString("[BACKUP] %1 → %2").arg(m_mountPoint, backupPath));
     runCmdStep("BACKUP", "rsync",
         {"-aAXv", "--progress", m_mountPoint + "/", backupPath + "/"}, false);
-    // rsync 不需要 pkexec，可以普通权限
-    // 更新存储路径
     m_ctx.targetDir = backupPath;
 }
 
@@ -526,12 +543,7 @@ void FormatDialog::doUnmount()
     }
 
     setProgressText("正在卸载...");
-
-    // 先尝试正常卸载
     runCmdStep("UNMOUNT", "umount", {m_mountPoint});
-
-    // 如果失败且勾选了强制卸载，在 onProcessFinished 中处理
-    // 简单处理：如果失败则重试强制卸载
 }
 
 void FormatDialog::doFormat()
@@ -540,25 +552,21 @@ void FormatDialog::doFormat()
     QStringList args;
 
     if (m_ctx.newFsType == "ext4") {
-        args << "-F";  // 强制
-        if (m_inodeSpin->isEnabled() && m_inodeSpin->value() != 256) {
+        args << "-F";
+        if (m_inodeSpin->isEnabled() && m_inodeSpin->value() != 256)
             args << "-I" << QString::number(m_inodeSpin->value());
-        }
         args << m_devPath;
         runCmdStep("FORMAT", "mkfs.ext4", args);
     } else if (m_ctx.newFsType == "xfs") {
-        args << "-f";  // 强制
-        // XFS 的 inode 大小用 -i size=
-        if (m_inodeSpin->isEnabled() && m_inodeSpin->value() != 256) {
+        args << "-f";
+        if (m_inodeSpin->isEnabled() && m_inodeSpin->value() != 256)
             args << "-i" << QString("size=%1").arg(m_inodeSpin->value());
-        }
         args << m_devPath;
         runCmdStep("FORMAT", "mkfs.xfs", args);
     } else if (m_ctx.newFsType == "btrfs") {
-        args << "-f";  // 强制
-        if (m_inodeSpin->isEnabled() && m_inodeSpin->value() != 16384) {
+        args << "-f";
+        if (m_inodeSpin->isEnabled() && m_inodeSpin->value() != 16384)
             args << "--nodesize" << QString::number(m_inodeSpin->value());
-        }
         args << m_devPath;
         runCmdStep("FORMAT", "mkfs.btrfs", args);
     } else if (m_ctx.newFsType == "f2fs") {
@@ -569,8 +577,7 @@ void FormatDialog::doFormat()
         runCmdStep("FORMAT", "mkfs.ntfs", args);
     } else {
         appendLog(QString("[ERR] 不支持的文件系统: %1").arg(m_ctx.newFsType), "red");
-        enableButtons(true);
-        m_running = false;
+        finishWithError("不支持的文件系统");
     }
 }
 
@@ -578,20 +585,17 @@ void FormatDialog::doUpdateFstab()
 {
     setProgressText("正在更新 fstab...");
 
-    // 读取 fstab
     QFile fstab("/etc/fstab");
     if (!fstab.open(QIODevice::ReadOnly)) {
         appendLog("[FAIL] 无法读取 /etc/fstab", "red");
-        // 不终止，允许继续
-        m_currentStep = StepMount;
+        Logger::log("FORMAT", "无法读取 /etc/fstab，跳过更新");
+        m_currentStep = StepDone;
         startStep();
         return;
     }
     QString content = QString::fromUtf8(fstab.readAll());
     fstab.close();
 
-    // 查找旧 UUID（用设备路径查找）
-    // 读取新 UUID
     QString newUuid;
     {
         auto *p = new QProcess(this);
@@ -603,18 +607,14 @@ void FormatDialog::doUpdateFstab()
 
     if (newUuid.isEmpty()) {
         appendLog("[WARN] 无法获取新 UUID，跳过 fstab 更新", "yellow");
-        m_currentStep = StepMount;
+        m_currentStep = StepDone;
         startStep();
         return;
     }
 
-    // 在 fstab 中找到对应的行
     QStringList lines = content.split('\n');
     bool found = false;
-    QString oldUuid;
 
-    // 先用设备路径找，再用 UUID 找
-    QRegularExpression devRe(QString("^\\s*(UUID|/dev/%1)").arg(m_devName));
     for (int i = 0; i < lines.size(); ++i) {
         if (lines[i].trimmed().isEmpty() || lines[i].trimmed().startsWith('#'))
             continue;
@@ -622,12 +622,11 @@ void FormatDialog::doUpdateFstab()
         auto parts = lines[i].split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
         if (parts.isEmpty()) continue;
 
-        // 匹配设备或 UUID
-        if (parts[0] == m_devPath || parts[0] == m_devName) {
-            oldUuid = parts[0];
+        if (parts[0] == m_devPath || parts[0] == m_devName ||
+            parts[0] == QString("UUID=%1").arg(m_ctx.devUuid) ||
+            parts[0] == QString("UUID=%1").arg(newUuid)) {
             found = true;
 
-            // 替换行: UUID=<new>  <mount>  <fstype>  <options>  0  2
             QString newLine = QString("UUID=%1  %2  %3  %4  0  2")
                 .arg(newUuid, m_mountPoint, m_ctx.newFsType,
                      m_ctx.mountOpts.isEmpty() ? "defaults" : m_ctx.mountOpts.join(","));
@@ -635,15 +634,9 @@ void FormatDialog::doUpdateFstab()
             appendLog(QString("[FSTAB] 更新行 %1: %2").arg(i + 1).arg(newLine));
             break;
         }
-        // 也检查 UUID= 格式
-        if (parts[0].startsWith("UUID=")) {
-            QString uuid = parts[0].mid(5);
-            // 通过 blkid 检查是否匹配 m_devPath
-        }
     }
 
     if (!found) {
-        // 没找到，追加一行
         QString newLine = QString("UUID=%1  %2  %3  %4  0  2")
             .arg(newUuid, m_mountPoint, m_ctx.newFsType,
                  m_ctx.mountOpts.isEmpty() ? "defaults" : m_ctx.mountOpts.join(","));
@@ -651,29 +644,30 @@ void FormatDialog::doUpdateFstab()
         appendLog(QString("[FSTAB] 追加行: %1").arg(newLine));
     }
 
-    // 写回 fstab
-    // 先备份
+    // 生成新的 fstab 内容（不含换行符，runCmdStep 会 appendLog 命令文本）
+    QString newContent = lines.join('\n') + '\n';
+
+    // 先备份旧 fstab
     QString bakPath = QString("/etc/fstab.formatbak.%1").arg(
         QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
     QFile::copy("/etc/fstab", bakPath);
     appendLog(QString("[FSTAB] 备份到 %1").arg(bakPath));
 
-    QString newContent = lines.join('\n') + '\n';
-    // 用 tee 写
-    QProcess *p = new QProcess(this);
-    p->start("bash", {"-c", QString("cat > /etc/fstab << 'FSTAB_EOF'\n%1\nFSTAB_EOF")
-                                   .arg(newContent)});
-    p->waitForFinished(3000);
-    p->deleteLater();
-
-    appendLog("[OK] fstab 已更新", "green");
-    m_currentStep = StepMount;
-    startStep();
+    // 用 pkexec 写入新 fstab，错误会走 onProcessFinished
+    runCmdStep("FSTAB", "bash", {"-c", QString("cat > /etc/fstab << 'FSTAB_EOF'\n%1\nFSTAB_EOF")
+                                        .arg(newContent)});
 }
 
 void FormatDialog::doMount()
 {
     setProgressText("正在挂载...");
+
+    // 确保挂载点存在
+    if (!QDir(m_mountPoint).exists()) {
+        QDir().mkpath(m_mountPoint);
+        appendLog(QString("[INFO] 创建挂载点: %1").arg(m_mountPoint));
+    }
+
     runCmdStep("MOUNT", "mount", {m_mountPoint});
 }
 
@@ -697,9 +691,10 @@ void FormatDialog::doCleanup()
     setProgressValue(100);
     setProgressText("全部完成！");
     appendLog("=== 格式化完成 ===", "green");
+    Logger::log("FORMAT", QString("格式化任务完成: %1 → %2").arg(m_devPath, m_ctx.newFsType));
 
-    // 清理备份
-    if (!m_ctx.targetDir.isEmpty() && QDir(m_ctx.targetDir).exists()) {
+    // 清理备份（仅在非后台模式或仍可见时询问）
+    if (!m_backgroundMode && !m_ctx.targetDir.isEmpty() && QDir(m_ctx.targetDir).exists()) {
         auto ret = QMessageBox::question(this, "清理备份",
             QString("是否删除临时备份目录？\n%1").arg(m_ctx.targetDir),
             QMessageBox::Yes | QMessageBox::No);
@@ -709,12 +704,21 @@ void FormatDialog::doCleanup()
         } else {
             appendLog("[INFO] 备份保留: " + m_ctx.targetDir);
         }
+    } else if (m_backgroundMode && !m_ctx.targetDir.isEmpty()) {
+        appendLog("[INFO] 备份保留: " + m_ctx.targetDir);
     }
 
-    enableButtons(true);
     m_running = false;
+    enableButtons(true);
 
-    QMessageBox::information(this, "格式化完成",
-        QString("设备 %1 已成功格式化为 %2")
-            .arg(m_devPath, m_ctx.newFsType));
+    if (m_backgroundMode) {
+        // 后台模式：发信号，不弹窗
+        emit formatFinished(true);
+        // 自动关闭对话框
+        accept();
+    } else {
+        QMessageBox::information(this, "格式化完成",
+            QString("设备 %1 已成功格式化为 %2")
+                .arg(m_devPath, m_ctx.newFsType));
+    }
 }
