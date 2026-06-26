@@ -423,12 +423,9 @@ void StorageDevicePage::showFormatDialog()
         m_formatBackground = true;
         setFormatRunning(true);
     });
-    // 进度更新时确保状态栏可见（防止先完成再进后台的边界情况）
-    connect(m_formatDlg, &FormatDialog::formatProgress,
-            this, [this](int, const QString &) {
-        if (!m_formatRunning)
-            setFormatRunning(true);
-    });
+
+    // 对话框打开就禁用父页面操作按钮，防止用户误触
+    setFormatRunning(true);
 
     // 模态运行
     m_formatDlg->exec();
