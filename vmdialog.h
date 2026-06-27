@@ -53,6 +53,9 @@ private:
     // 自动启动
     QCheckBox      *m_autoStartCb;
 
+    // 等待挂载
+    QCheckBox      *m_waitMountCb;
+
     // 硬件直通
     QListWidget    *m_pciList;
     QCheckBox      *m_hugepagesCb;

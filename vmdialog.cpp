@@ -471,6 +471,13 @@ VMDialog::VMDialog(QWidget *parent)
     m_autoStartCb = new QCheckBox("随管理器自动启动");
     m_autoStartCb->setToolTip("应用启动时自动检查并启动此虚机");
     autoLayout->addWidget(m_autoStartCb);
+
+    m_waitMountCb = new QCheckBox("尝试主动等待所有挂载点成功再启动");
+    m_waitMountCb->setToolTip(
+        "勾选后，启动虚机前会检查存储管理中是否有未就绪的挂载点，"
+        "若有则主动尝试挂载。适用于硬盘在开机时无法立即挂载的场景。");
+    autoLayout->addWidget(m_waitMountCb);
+
     rightCol->addWidget(autoGroup);
 
     rightCol->addWidget(advGroup);
@@ -659,6 +666,7 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     // 自动启动
     m_virtioDiskCb->setChecked(vm.virtioDisk);
     m_autoStartCb->setChecked(vm.autoStart);
+    m_waitMountCb->setChecked(vm.waitMount);
 
     // 硬件直通
     m_pciList->clear();
@@ -721,6 +729,7 @@ VMConfig VMDialog::vmConfig() const
     vm.ramfb      = m_ramfbCb->isChecked();
     vm.virtioDisk = m_virtioDiskCb->isChecked();
     vm.autoStart  = m_autoStartCb->isChecked();
+    vm.waitMount  = m_waitMountCb->isChecked();
 
     // 端口转发
     vm.portForwards.clear();

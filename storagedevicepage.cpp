@@ -16,6 +16,8 @@
 #include <QMessageBox>
 #include <QFileInfo>
 #include <QDir>
+#include <QFile>
+#include <QRegularExpression>
 
 // 自定义角色：存储设备类型
 static constexpr int RoleType   = Qt::UserRole + 1;
@@ -34,8 +36,8 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
 
     // ── 树形列表 ──
     m_tree = new QTreeWidget();
-    m_tree->setColumnCount(5);
-    m_tree->setHeaderLabels({"设备", "大小", "类型", "文件系统", "挂载点"});
+    m_tree->setColumnCount(6);
+    m_tree->setHeaderLabels({"设备", "大小", "类型", "文件系统", "挂载点", "状态"});
     m_tree->header()->setStretchLastSection(true);
     m_tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tree->setSelectionMode(QAbstractItemView::SingleSelection);
@@ -138,15 +140,83 @@ QTreeWidgetItem *StorageDevicePage::addDevice(
     item->setData(0, RoleFsType, fstype);
     item->setData(0, RoleMount,  mount);
 
+    // 状态（由外层 buildTree 通过 fstab 对比填充）
+    item->setText(5, "⋯");
+
     // 磁盘节点加粗
     if (type == "disk") {
         QFont f = item->font(0);
         f.setBold(true);
-        for (int c = 0; c < 5; ++c)
+        for (int c = 0; c < 6; ++c)
             item->setFont(c, f);
     }
 
     return item;
+}
+
+// ── 从 lsblk JSON 中递归收集 UUID → 设备名映射 ──
+static QMap<QString, QString> collectUuidMap(const QJsonArray &arr)
+{
+    QMap<QString, QString> map;
+    for (const auto &val : arr) {
+        auto obj = val.toObject();
+        QString name = obj.value("name").toString();
+        auto uuid = obj.value("uuid");
+        if (!uuid.isNull() && !uuid.toString().isEmpty())
+            map[uuid.toString()] = name;
+
+        auto children = obj.value("children").toArray();
+        if (!children.isEmpty()) {
+            auto childMap = collectUuidMap(children);
+            for (auto it = childMap.begin(); it != childMap.end(); ++it)
+                map[it.key()] = it.value();
+        }
+    }
+    return map;
+}
+
+// ── 解析 /etc/fstab，用 lsblk 的 UUID 映射解析出设备路径集合 ──
+static QSet<QString> parseFstabDevices(const QMap<QString, QString> &uuidToName)
+{
+    QSet<QString> fstabDevices;
+
+    QFile fstab("/etc/fstab");
+    if (!fstab.open(QIODevice::ReadOnly | QIODevice::Text))
+        return fstabDevices;
+
+    QTextStream in(&fstab);
+    while (!in.atEnd()) {
+        QString line = in.readLine().trimmed();
+        if (line.isEmpty() || line.startsWith('#')) continue;
+
+        auto parts = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 4) continue;
+
+        QString fsSpec     = parts[0];
+        QString mountPoint = parts[1];
+
+        if (mountPoint == "swap" || mountPoint == "none") continue;
+
+        QString opts = parts[3];
+        if (opts.contains("noauto", Qt::CaseInsensitive)) continue;
+
+        QString devName;
+        if (fsSpec.startsWith("UUID=")) {
+            devName = uuidToName.value(fsSpec.mid(5));
+        } else if (fsSpec.startsWith("PARTUUID=")) {
+            devName = uuidToName.value(fsSpec.mid(9));
+        } else if (fsSpec.startsWith("LABEL=")) {
+            devName = uuidToName.value(fsSpec.mid(6));
+        } else if (fsSpec.startsWith("/dev/")) {
+            devName = fsSpec.mid(5);   // 去掉 "/dev/"
+        }
+
+        if (!devName.isEmpty())
+            fstabDevices.insert("/dev/" + devName);
+    }
+
+    fstab.close();
+    return fstabDevices;
 }
 
 void StorageDevicePage::buildTree(const QString &json)
@@ -160,7 +230,15 @@ void StorageDevicePage::buildTree(const QString &json)
         return;
     }
 
-    // 递归解析 lsblk JSON
+    auto devices = doc.object().value("blockdevices").toArray();
+
+    // 第一步：从 lsblk JSON 中构建 UUID → 设备名映射
+    auto uuidMap = collectUuidMap(devices);
+
+    // 第二步：用这个映射解析 fstab，得到需要挂载的设备路径集合
+    m_fstabDevices = parseFstabDevices(uuidMap);
+
+    // 第三步：递归解析设备树并设置状态
     std::function<void(const QJsonArray &, QTreeWidgetItem *)> parseDevices;
     parseDevices = [this, &parseDevices](const QJsonArray &arr,
                                           QTreeWidgetItem *parent) {
@@ -172,10 +250,33 @@ void StorageDevicePage::buildTree(const QString &json)
             auto fstype    = obj.value("fstype");
             auto mount     = obj.value("mountpoint");
 
+            QString mnt = mount.isNull() ? "" : mount.toString();
             auto *item = addDevice(parent,
                 name, size, type,
                 fstype.isNull() ? "" : fstype.toString(),
-                mount.isNull()  ? "" : mount.toString());
+                mnt);
+
+            // 设置状态：对比 fstab 与实际挂载
+            QString devPath = "/dev/" + name;
+            bool inFstab = m_fstabDevices.contains(devPath);
+            if (inFstab) {
+                if (mnt.isEmpty()) {
+                    item->setText(5, "🔴 未就绪");
+                    item->setForeground(5, QColor("#dc2626"));
+                } else {
+                    item->setText(5, "🟢 就绪");
+                    item->setForeground(5, QColor("#16a34a"));
+                }
+            } else if (type == "part" && !fstype.isNull() && !fstype.toString().isEmpty()) {
+                // 有文件系统的分区但不在 fstab 中
+                item->setText(5, "— 未配置");
+                item->setForeground(5, QColor("#9ca3af"));
+            } else if (type == "disk") {
+                item->setText(5, "");
+            } else {
+                item->setText(5, "—");
+                item->setForeground(5, QColor("#9ca3af"));
+            }
 
             auto children = obj.value("children").toArray();
             if (!children.isEmpty()) {
@@ -185,10 +286,9 @@ void StorageDevicePage::buildTree(const QString &json)
         }
     };
 
-    auto devices = doc.object().value("blockdevices").toArray();
     parseDevices(devices, nullptr);
 
-    for (int c = 0; c < 4; ++c)
+    for (int c = 0; c < 5; ++c)
         m_tree->resizeColumnToContents(c);
 
     m_status->setText(
@@ -228,7 +328,7 @@ void StorageDevicePage::refresh()
     m_formatBtn->setVisible(false);
     m_status->setText("正在检测块设备…");
 
-    runCmd("lsblk", {"-J", "-o", "NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT"},
+    runCmd("lsblk", {"-J", "-o", "NAME,SIZE,TYPE,FSTYPE,MOUNTPOINT,UUID"},
            [this](const QString &out) {
         buildTree(out);
     });

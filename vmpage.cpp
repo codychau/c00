@@ -332,6 +332,32 @@ void VMPage::startVM()
 
     const auto &vm = m_mgr.vms()[row];
 
+    // ── 等待挂载点（可选）──
+    if (vm.waitMount) {
+        m_status->setText("🔄 正在尝试挂载所有 fstab 中未就绪的挂载点…");
+        QCoreApplication::processEvents();
+
+        // mount -a 自动挂载 fstab 中尚未挂载的设备
+        QProcess mountProc;
+        mountProc.start("pkexec", {"mount", "-a"});
+        if (mountProc.waitForFinished(30000)) {
+            if (mountProc.exitCode() == 0) {
+                QString mountOut = QString::fromUtf8(mountProc.readAllStandardOutput()).trimmed();
+                if (!mountOut.isEmpty())
+                    Logger::log("VM", QString("mount -a 输出: %1").arg(mountOut.left(500)));
+                Logger::log("VM", "✅ 等待挂载点完成");
+            } else {
+                QString err = QString::fromUtf8(mountProc.readAllStandardError()).trimmed();
+                Logger::log("VM", QString("⚠️ mount -a 结果: exit=%1, err=%2")
+                    .arg(mountProc.exitCode()).arg(err.left(500)));
+            }
+        } else {
+            Logger::log("VM", "⏰ mount -a 超时");
+        }
+        m_status->setText("✅ 挂载点检查完成，准备启动虚机…");
+        QCoreApplication::processEvents();
+    }
+
     QStringList args;
     args << "-name" << vm.name;
     args << "-smp" << QString::number(vm.cpu);

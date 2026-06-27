@@ -51,6 +51,9 @@ struct VMConfig {
     // 自动随管理器启动
     bool autoStart = false;
 
+    // 尝试主动等待所有挂载点成功再启动
+    bool waitMount = false;
+
     // 硬件直通
     QStringList pciDevices;     // PCI BDF 地址列表
     bool        hugepages = false;

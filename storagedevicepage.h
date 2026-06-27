@@ -7,6 +7,7 @@
 #include <QTreeWidget>
 #include <QPushButton>
 #include <QProcess>
+#include <QSet>
 
 class FormatDialog;
 
@@ -44,6 +45,9 @@ private:
 
     QTreeWidget *m_tree;
     QLabel *m_status;
+
+    // fstab 中标记需要挂载的设备路径集合
+    QSet<QString> m_fstabDevices;
 
     // 后台格式化状态栏（控件在 StoragePage，这里只保留引用以更新按钮状态）
     QPushButton *m_refreshBtn;

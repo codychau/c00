@@ -91,6 +91,7 @@ bool VMConfigManager::load()
 
             // 随管理器启动
             if (auto *v = vmTbl->get("auto_start")) vm.autoStart = v->value_or(false);
+            if (auto *v = vmTbl->get("wait_mount")) vm.waitMount = v->value_or(false);
 
             // 硬件直通
             if (auto *v = vmTbl->get("hugepages"))  vm.hugepages = v->value_or(false);
@@ -148,6 +149,7 @@ bool VMConfigManager::save() const
 
         // 随管理器启动
         tbl.emplace("auto_start", vm.autoStart);
+        tbl.emplace("wait_mount", vm.waitMount);
 
         // 数据盘
         toml::array disksArr;
