@@ -3,9 +3,12 @@
 
 #include <QWidget>
 #include <QLabel>
+#include <QPushButton>
 #include <QTableWidget>
 #include <QTimer>
 #include <QProcess>
+
+class QShowEvent;
 
 class StatusPage : public QWidget
 {
@@ -16,6 +19,10 @@ public:
 
 private slots:
     void refresh();
+    void fetchAllTemps();
+
+protected:
+    void showEvent(QShowEvent *event) override;
 
 private:
     void runCmd(const QString &cmd, const QStringList &args,
@@ -27,8 +34,10 @@ private:
     // 磁盘监控表格
     QTableWidget *m_diskTable;
     QLabel *m_diskStatus;
+    QPushButton *m_tempBtn;
     QTimer *m_timer;
     bool m_disksInited = false;
+    bool m_hasShown = false;
 };
 
 #endif // STATUSPAGE_H

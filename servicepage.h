@@ -7,6 +7,10 @@
 #include <QTableWidget>
 #include <QProcess>
 #include <QStringList>
+#include <QLineEdit>
+#include <QVector>
+
+class QShowEvent;
 
 class ServicePage : public QWidget
 {
@@ -18,18 +22,28 @@ public:
 private slots:
     void refresh();
     void onStartStop();
+    void filterServices(const QString &text);
+
+protected:
+    void showEvent(QShowEvent *event) override;
 
 private:
     void runCmd(const QString &cmd, const QStringList &args,
                 std::function<void(const QString &)> cb);
+    void populateTable();
 
-    struct ServiceInfo {
+    struct ServiceEntry {
         QString name;
-        QString status; // active / inactive / failed
+        QString active;
+        QString sub;
+        QString scope;
+        QString enabled;
+        QString description;
     };
 
-    void parseAndUpdate(const QString &output);
+    QVector<ServiceEntry> m_allServices;
 
+    QLineEdit *m_searchBox;
     QTableWidget *m_table;
     QLabel *m_status;
     QPushButton *m_refreshBtn;

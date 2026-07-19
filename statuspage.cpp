@@ -1,10 +1,12 @@
 #include "statuspage.h"
 
 #include <QVBoxLayout>
+#include <QHBoxLayout>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QScrollArea>
+#include <QShowEvent>
 #include <QRegularExpression>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -79,12 +81,18 @@ StatusPage::StatusPage(QWidget *parent)
     scroll->setWidget(container);
     outerLayout->addWidget(scroll);
 
+    // 温度读取按钮
+    auto *tempRow = new QHBoxLayout();
+    m_tempBtn = new QPushButton("🌡  读取温度");
+    connect(m_tempBtn, &QPushButton::clicked, this, &StatusPage::fetchAllTemps);
+    tempRow->addWidget(m_tempBtn);
+    tempRow->addStretch();
+    diskLayout->addLayout(tempRow);
+
     // ── 定时刷新 ──
     m_timer = new QTimer(this);
     m_timer->setInterval(8000);
     connect(m_timer, &QTimer::timeout, this, &StatusPage::refresh);
-    m_timer->start();
-    refresh();
 }
 
 void StatusPage::runCmd(const QString &cmd, const QStringList &args,
@@ -103,6 +111,16 @@ void StatusPage::setLine(int row, const QString &val, const QString &suffix)
 {
     if (row < 0 || row >= 12) return;
     m_labels[row]->setText(val + suffix);
+}
+
+void StatusPage::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    if (!m_hasShown) {
+        m_hasShown = true;
+        m_timer->start();
+        refresh();
+    }
 }
 
 // ── 获取单块盘的温度 ──
@@ -162,6 +180,18 @@ static void fetchDiskTemp(const QString &devName, int tableRow,
         }
     });
     proc->start("pkexec", {"smartctl", "-A", devPath});
+}
+
+void StatusPage::fetchAllTemps()
+{
+    m_diskStatus->setText("读取温度中…");
+    for (int i = 0; i < m_diskTable->rowCount(); ++i) {
+        auto *item = m_diskTable->item(i, ColDev);
+        if (item) {
+            m_diskTable->setItem(i, ColTemp, new QTableWidgetItem("…"));
+            fetchDiskTemp(item->text(), i, m_diskTable, m_diskStatus);
+        }
+    }
 }
 
 void StatusPage::refresh()
@@ -323,14 +353,6 @@ void StatusPage::refresh()
         }
 
         m_diskStatus->setText(QString("共 %1 块物理磁盘").arg(disks.size()));
-
-        // 温度：只在页面首次加载时读一次（避免频繁弹 pkexec 密码框）
-        if (!m_disksInited) {
-            for (int i = 0; i < disks.size(); ++i) {
-                fetchDiskTemp(disks[i].name, i, m_diskTable, m_diskStatus);
-            }
-            m_disksInited = true;
-        }
 
         // 已用空间：定时刷新（df 轻量，不需要 root）
         for (int i = 0; i < disks.size(); ++i) {
