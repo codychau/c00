@@ -26,15 +26,15 @@ ServicePage::ServicePage(QWidget *parent)
 
     m_table = new QTableWidget(0, 4);
     m_table->setHorizontalHeaderLabels({"服务名称", "状态", "作用域", "描述"});
-    m_table->horizontalHeader()->setStretchLastSection(true);
+    m_table->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Stretch);
+    m_table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_table->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
     m_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     m_table->setSelectionMode(QAbstractItemView::SingleSelection);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_table->verticalHeader()->hide();
     m_table->setContextMenuPolicy(Qt::CustomContextMenu);
-    m_table->setColumnWidth(0, 220);
-    m_table->setColumnWidth(1, 80);
-    m_table->setColumnWidth(2, 65);
     connect(m_table, &QTableWidget::itemSelectionChanged, this, [this]() {
         int r = m_table->currentRow();
         if (r >= 0 && !m_table->isRowHidden(r)) {
@@ -247,17 +247,28 @@ void ServicePage::populateTable()
     for (const auto &e : m_allServices) {
         int row = m_table->rowCount();
         m_table->insertRow(row);
-        m_table->setItem(row, 0, new QTableWidgetItem(e.name));
-        m_table->setItem(row, 1, new QTableWidgetItem(e.active));
-        m_table->setItem(row, 2, new QTableWidgetItem(e.scope));
-        m_table->setItem(row, 3, new QTableWidgetItem(e.description));
 
+        auto *nameItem = new QTableWidgetItem(e.name);
+        nameItem->setToolTip(e.name);
+        m_table->setItem(row, 0, nameItem);
+
+        auto *actItem = new QTableWidgetItem(e.active);
+        actItem->setToolTip(e.active);
         if (e.active == "active")
-            m_table->item(row, 1)->setForeground(QColor("#27ae60"));
+            actItem->setForeground(QColor("#27ae60"));
         else if (e.active == "failed")
-            m_table->item(row, 1)->setForeground(QColor("#e74c3c"));
+            actItem->setForeground(QColor("#e74c3c"));
         else
-            m_table->item(row, 1)->setForeground(QColor("#95a5a6"));
+            actItem->setForeground(QColor("#95a5a6"));
+        m_table->setItem(row, 1, actItem);
+
+        auto *scopeItem = new QTableWidgetItem(e.scope);
+        scopeItem->setToolTip(e.scope);
+        m_table->setItem(row, 2, scopeItem);
+
+        auto *descItem = new QTableWidgetItem(e.description);
+        descItem->setToolTip(e.description);
+        m_table->setItem(row, 3, descItem);
     }
 }
 
