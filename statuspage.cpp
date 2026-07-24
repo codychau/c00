@@ -86,6 +86,11 @@ StatusPage::StatusPage(QWidget *parent)
     m_tempBtn = new QPushButton("🌡  读取温度");
     connect(m_tempBtn, &QPushButton::clicked, this, &StatusPage::fetchAllTemps);
     tempRow->addWidget(m_tempBtn);
+
+    auto *exitBtn = new QPushButton("🚪 退出程序");
+    connect(exitBtn, &QPushButton::clicked, qApp, []() { qApp->quit(); });
+    tempRow->addWidget(exitBtn);
+
     tempRow->addStretch();
     diskLayout->addLayout(tempRow);
 

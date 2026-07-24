@@ -2,74 +2,87 @@
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QGroupBox>
+#include <QScrollArea>
 #include <QFrame>
-#include <QProcess>
 #include <QRegularExpression>
+#include <QDir>
+#include <QFile>
+#include <QTextStream>
+#include <QMessageBox>
+#include <QComboBox>
+#include <QEvent>
+
+// ── 阻止鼠标滚轮改变控件值 ──
+class NoWheelFilter : public QObject
+{
+public:
+    using QObject::QObject;
+protected:
+    bool eventFilter(QObject *obj, QEvent *event) override
+    {
+        if (event->type() == QEvent::Wheel)
+            return true;
+        return QObject::eventFilter(obj, event);
+    }
+};
 
 AIPage::AIPage(QWidget *parent)
     : QWidget(parent)
 {
-    auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 16, 16, 16);
+    m_nowheel = new NoWheelFilter(this);
+    m_configDir = QDir::homePath() + "/.config/systemd/user";
+
+    auto *outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+
+    auto *scroll = new QScrollArea();
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+
+    auto *inner = new QWidget();
+    auto *layout = new QVBoxLayout(inner);
+    layout->setContentsMargins(16, 8, 16, 8);
     layout->setSpacing(10);
 
-    // ── 标题 ──
-    auto *title = new QLabel("🤖 AI 服务状态");
-    QFont f = title->font(); f.setPointSize(14); f.setBold(true);
-    title->setFont(f);
+    // title
+    auto *title = new QLabel("🤖 AI 选项");
+    QFont tf = title->font(); tf.setPointSize(14); tf.setBold(true);
+    title->setFont(tf);
     layout->addWidget(title);
 
-    // ── 三个服务卡片（水平排列） ──
-    auto *cards = new QHBoxLayout();
-    cards->setSpacing(12);
-    cards->setContentsMargins(0, 0, 0, 0);
-
-    auto createCard = [&](const QString &name, QLabel *&status,
-                          QLabel *&detail) -> QFrame * {
-        auto *frame = new QFrame();
-        frame->setFrameShape(QFrame::StyledPanel);
-        auto *vl = new QVBoxLayout(frame);
-        vl->setSpacing(6);
-
-        // 名称
-        auto *nameLbl = new QLabel(name);
-        QFont bf = nameLbl->font(); bf.setBold(true); bf.setPointSize(12);
-        nameLbl->setFont(bf);
-        vl->addWidget(nameLbl);
-
-        // 状态
-        status = new QLabel("检测中…");
-        status->setStyleSheet("font-size: 13px;");
-        vl->addWidget(status);
-
-        // 详情
-        detail = new QLabel("");
-        detail->setWordWrap(true);
-        detail->setStyleSheet("color: #888; font-size: 11px;");
-        detail->setMinimumHeight(30);
-        vl->addWidget(detail, 1);
-
-        return frame;
-    };
-
-    auto *ollamaCard   = createCard("Ollama",    m_ollamaStatus,   m_ollamaDetail);
-    auto *llamacppCard = createCard("llama.cpp", m_llamacppStatus, m_llamacppDetail);
-    auto *vllmCard     = createCard("vLLM",      m_vllmStatus,     m_vllmDetail);
-
-    cards->addWidget(ollamaCard,   1);
-    cards->addWidget(llamacppCard, 1);
-    cards->addWidget(vllmCard,     1);
-    layout->addLayout(cards);
-
-    // ── 汇总信息 ──
-    m_info = new QLabel("");
-    m_info->setWordWrap(true);
+    m_info = new QLabel("检测中…");
     m_info->setStyleSheet("color: #666; font-size: 12px;");
     layout->addWidget(m_info);
 
+    // define 3 services
+    m_cards.resize(3);
+    m_cards[0].name       = "Ollama";
+    m_cards[0].systemdSvc = "ollama.service";
+    m_cards[0].procName   = "ollama";
+    m_cards[0].port       = 11434;
+    m_cards[1].name       = "llama.cpp";
+    m_cards[1].systemdSvc = "llama-server.service";
+    m_cards[1].procName   = "llama-server";
+    m_cards[1].port       = 8080;
+    m_cards[2].name       = "vLLM";
+    m_cards[2].systemdSvc = "vllm.service";
+    m_cards[2].procName   = "vllm";
+    m_cards[2].port       = 8000;
+
+    for (int i = 0; i < 3; ++i)
+        buildCard(i);
+
+    auto *cardsRow = new QHBoxLayout();
+    cardsRow->setSpacing(10);
+    for (auto &c : m_cards)
+        cardsRow->addWidget(
+            static_cast<QGroupBox *>(c.controlsWidget->parentWidget()), 1);
+    layout->addLayout(cardsRow);
+
     layout->addStretch();
 
-    // ── 刷新 ──
+    // refresh button
     auto *row = new QHBoxLayout();
     m_refreshBtn = new QPushButton("刷新状态");
     connect(m_refreshBtn, &QPushButton::clicked, this, &AIPage::refresh);
@@ -77,7 +90,10 @@ AIPage::AIPage(QWidget *parent)
     row->addWidget(m_refreshBtn);
     layout->addLayout(row);
 
-    // ── 定时刷新（每 15 秒）──
+    scroll->setWidget(inner);
+    outer->addWidget(scroll);
+
+    // timer
     m_timer = new QTimer(this);
     connect(m_timer, &QTimer::timeout, this, &AIPage::refresh);
     m_timer->start(15000);
@@ -85,111 +101,852 @@ AIPage::AIPage(QWidget *parent)
     refresh();
 }
 
-// ── 通用服务检测 ──
-void AIPage::checkService(const QString &name, const QString &systemdSvc,
-                          const QString &procName, int port,
-                          QLabel *statusLbl, QLabel *detailLbl)
+// ──────────────────────────────────────────────────────────
+//  buildCard
+// ──────────────────────────────────────────────────────────
+
+void AIPage::buildCard(int idx)
 {
-    auto setStatus = [statusLbl, detailLbl](const QString &emoji,
-                                             const QString &text,
-                                             const QString &detail) {
-        statusLbl->setText(QString("%1 %2").arg(emoji, text));
-        detailLbl->setText(detail);
-    };
+    auto &card = m_cards[idx];
 
-    // 优先 systemd 检测
-    QProcess *p = new QProcess(this);
-    connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [=](int exit, QProcess::ExitStatus) {
-        QString out = QString::fromUtf8(p->readAllStandardOutput()).trimmed();
-        p->deleteLater();
+    // parameter definitions per service
+    QList<ParamDef> defs;
+    if (idx == 0) {
+        ParamDef o1, o2, o3, o4, o5, o6;
+        o1  = {"OLLAMA_HOST",          "",    "监听地址",      WT_String, "127.0.0.1:11434"};
+        o2  = {"OLLAMA_MODELS",        "",    "模型目录",      WT_String, "~/.ollama/models"};
+        o3  = {"OLLAMA_NUM_PARALLEL",  "",    "并行请求数",    WT_Int,    "1",   1, 16};
+        o4  = {"OLLAMA_KEEP_ALIVE",    "",    "连接保持时间",  WT_String, "5m"};
+        o5  = {"OLLAMA_MAX_LOADED_MODELS", "", "最大加载模型数", WT_Int, "3", 1, 100};
+        o6  = {"OLLAMA_MAX_QUEUE",     "",    "最大队列请求数", WT_Int,  "512", 1, 10000};
+        defs = {o1, o2, o3, o4, o5, o6};
+    } else if (idx == 1) {
+        auto a = [](const QString &k, const QString &sk, const QString &l,
+                     WidgetType wt, const QString &dv, int imin = 0, int imax = 0,
+                     double dmin = 0, double dmax = 0, int dec = 2, double st = 0.05,
+                     const QStringList &ch = {}, bool tog = false) {
+            ParamDef p;
+            p.key = k; p.shortKey = sk; p.label = l; p.wtype = wt;
+            p.defaultValue = dv; p.intMin = imin; p.intMax = imax;
+            p.dblMin = dmin; p.dblMax = dmax; p.decimals = dec; p.step = st;
+            p.choices = ch; p.isToggle = tog;
+            return p;
+        };
 
-        // systemd 直接返回 active / inactive
-        if (exit == 0 && out == "active") {
-            // 拿到 PID 和运行时长
-            QProcess *up = new QProcess(this);
-            up->start("systemctl", {"--user", "show", "-P", "MainPID",
-                                    "-P", "ActiveEnterTimestamp", systemdSvc});
-            connect(up, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                    this, [=](int, QProcess::ExitStatus) {
-                QString info = QString::fromUtf8(up->readAllStandardOutput()).trimmed();
-                up->deleteLater();
-                QStringList lines = info.split('\n');
-                QString pid  = lines.value(0);
-                QString ts   = lines.value(1);
+        defs = {
+            // ── 基本 ──
+            a("host",         "host",  "监听地址",     WT_String, "127.0.0.1"),
+            a("port",         "port",  "端口",         WT_Int,    "8080",    1, 65535),
+            a("model",        "m",     "模型路径",     WT_String, ""),
+            a("n-gpu-layers", "ngl",   "GPU 层数",    WT_Int,    "-1",     -1, 999),
+            a("ctx-size",     "c",     "上下文大小",   WT_Int,    "4096",  512, 131072),
+            a("threads",      "t",     "线程数",       WT_Int,    "4",       1, 128),
 
-                QString detail = QString("PID: %1").arg(pid);
-                if (!ts.isEmpty() && ts != "n/a") {
-                    detail += QString("\n启动: %1").arg(ts.mid(0, 19));
-                }
-                setStatus("🟢", "运行中", detail);
-            });
-            up->start();
-            return;
-        }
+            // ── 批处理 ──
+            a("batch-size",   "b",     "批处理大小",   WT_Int,    "2048",   1, 2048),
+            a("ubatch-size",  "ub",    "微批处理大小", WT_Int,    "512",    1, 2048),
 
-        // systemd 未找到 → 回落进程检测
-        QProcess *pg = new QProcess(this);
-        connect(pg, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                this, [=](int, QProcess::ExitStatus) {
-            QString pidStr = QString::fromUtf8(pg->readAllStandardOutput()).trimmed();
-            pg->deleteLater();
+            // ── 采样 ──
+            a("temp",               "temp",              "采样温度",       WT_Double, "0.80", 0, 0, 0, 2.0, 2, 0.1),
+            a("repeat-penalty",     "repeat-penalty",    "重复惩罚",       WT_Double, "1.00", 0, 0, 0, 2.0, 2, 0.05),
+            a("top-k",              "top-k",             "Top-K",          WT_Int,    "40",   0, 100),
+            a("top-p",              "top-p",             "Top-P",          WT_Double, "0.95", 0, 0, 0, 1.0, 2, 0.05),
+            a("min-p",              "min-p",             "Min-P",          WT_Double, "0.05", 0, 0, 0, 1.0, 2, 0.05),
+            a("typical-p",          "typical",           "Typical-P",      WT_Double, "1.00", 0, 0, 0, 1.0, 2, 0.05),
+            a("tfs-z",              "tfs-z",             "TFS-Z",          WT_Double, "1.00", 0, 0, 0, 10.0, 2, 0.1),
+            a("seed",               "s",                 "随机种子",       WT_Int,    "-1", -1, 2147483647),
+            a("mirostat",           "mirostat",          "Mirostat 模式",  WT_Int,    "0",    0, 2),
+            a("mirostat-lr",        "mirostat-lr",       "Mirostat 学习率", WT_Double, "0.10", 0, 0, 0, 1.0, 2, 0.05),
+            a("mirostat-ent",       "mirostat-ent",      "Mirostat 目标熵", WT_Double, "5.00", 0, 0, 0, 10.0, 2, 0.1),
+            a("repeat-last-n",      "repeat-last-n",     "重复惩罚范围",   WT_Int,    "64",   -1, 65536),
+            a("presence-penalty",   "presence-penalty",  "存在惩罚",       WT_Double, "0.00", 0, 0, 0, 2.0, 2, 0.05),
+            a("frequency-penalty",  "frequency-penalty", "频率惩罚",       WT_Double, "0.00", 0, 0, 0, 2.0, 2, 0.05),
 
-            if (!pidStr.isEmpty()) {
-                setStatus("🟢", "运行中",
-                          QString("PID: %1\n(无 systemd 服务)").arg(pidStr));
-            } else {
-                setStatus("⚪", "未运行",
-                          QString("systemd: %1 未激活\n进程: %2 未找到")
-                              .arg(systemdSvc, procName));
-            }
-        });
+            // ── KV 缓存 ──
+            a("flash-attn",          "fa",    "Flash Attention",    WT_String, "auto", 0, 0, 0, 0, 0, 0,
+               {"auto", "off", "on"}),
+            a("cache-type-k",        "ctk",   "K 缓存类型",         WT_String, "f16",  0, 0, 0, 0, 0, 0,
+               {"f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}),
+            a("cache-type-v",        "ctv",   "V 缓存类型",         WT_String, "f16",  0, 0, 0, 0, 0, 0,
+               {"f16", "f32", "bf16", "q8_0", "q4_0", "q4_1", "iq4_nl", "q5_0", "q5_1"}),
+            a("no-kv-offload",       "nkvo",  "禁止 KV 卸载",       WT_String, "off",  0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+            a("mlock",               "mlock", "内存锁定",            WT_String, "off",  0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+            a("no-mmap",             "nmmap", "禁用内存映射",        WT_String, "off",  0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+            a("numa",                "numa",  "NUMA 优化",           WT_String, "off",  0, 0, 0, 0, 0, 0,
+               {"off", "distribute", "isolate", "numactl"}),
 
-        // pgrep 同时匹配进程名和端口
-        QString pgArg = procName;
-        if (!procName.isEmpty()) {
-            pg->start("pgrep", {"-f", procName});
-        } else {
-            pg->start("pgrep", {"-f", name.toLower()});
-        }
+            // ── 推测解码 ──
+            a("spec-type",                "spec-type",           "推测解码类型",     WT_String, "none", 0, 0, 0, 0, 0, 0,
+               {"none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash",
+                "ngram-simple", "ngram-map-k", "ngram-cache"}),
+            a("model-draft",              "md",                  "草稿模型路径",     WT_String, ""),
+            a("n-gpu-layers-draft",       "ngld",                "草稿 GPU 层数",    WT_Int,    "-1", -1, 999),
+            a("spec-draft-n-max",         "spec-draft-n-max",    "草稿生成长度",     WT_Int,    "3",   1, 20),
+            a("spec-draft-p-split",       "draft-p-split",       "草稿拆分概率",     WT_Double, "0.10", 0, 0, 0, 1.0, 2, 0.05),
+
+            // ── 服务器 ──
+            a("threads-http",        "threads-http",  "HTTP 线程数",   WT_Int,    "-1",   -1, 128),
+            a("parallel",            "np",            "并行槽位数",     WT_Int,    "-1",   -1, 256),
+            a("timeout",             "to",            "超时秒数",       WT_Int,    "3600",  1, 86400),
+            a("cont-batching",       "cb",            "连续批处理",     WT_String, "off",   0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+            a("jinja",               "jinja",          "Jinja 模板",     WT_String, "off",   0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+            a("embedding",           "embedding",      "嵌入模式",       WT_String, "off",   0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+        };
+    } else {
+        ParamDef v1, v2, v3, v4, v5, v6, v7, v8;
+        v1 = {"host",                 "host",    "监听地址",          WT_String, "127.0.0.1"};
+        v2 = {"port",                 "port",    "端口",              WT_Int,    "8000", 1, 65535};
+        v3 = {"model",                "model",   "模型名称",          WT_String, ""};
+        v4 = {"tensor-parallel-size", "tensor-parallel-size", "张量并行数", WT_Int, "1", 1, 8};
+        v5.key = "gpu-memory-utilization"; v5.shortKey = "gpu-memory-utilization";
+        v5.label = "GPU 内存利用率";
+        v5.wtype = WT_Double;
+        v5.defaultValue = "0.9";
+        v5.dblMin = 0.0; v5.dblMax = 1.0;
+        v5.decimals = 2; v5.step = 0.05;
+        v6 = {"max-model-len",        "max-model-len", "最大模型长度",  WT_Int, "8192", 64, 524288};
+        v7 = {"max-num-seqs",         "max-num-seqs",  "最大并行序列数", WT_Int, "256", 1, 10000};
+        v8.key = "dtype"; v8.shortKey = "dtype"; v8.label = "数据类型"; v8.wtype = WT_String;
+        v8.defaultValue = "auto";
+        defs = {v1, v2, v3, v4, v5, v6, v7, v8};
+    }
+
+    auto *box = new QGroupBox();
+    auto *vl  = new QVBoxLayout(box);
+    vl->setSpacing(6);
+
+    // header row: name + status + method badge
+    auto *hdr = new QHBoxLayout();
+    auto *nameLbl = new QLabel(card.name);
+    QFont nf = nameLbl->font(); nf.setBold(true); nf.setPointSize(12);
+    nameLbl->setFont(nf);
+    hdr->addWidget(nameLbl);
+
+    card.statusLbl = new QLabel("检测中…");
+    card.statusLbl->setStyleSheet("font-size: 13px;");
+    hdr->addWidget(card.statusLbl);
+
+    card.methodLbl = new QLabel("");
+    card.methodLbl->setStyleSheet(
+        "background: #888; color: white; border-radius: 4px;"
+        "padding: 1px 8px; font-size: 11px; font-weight: bold;");
+    hdr->addWidget(card.methodLbl);
+
+    hdr->addStretch();
+    vl->addLayout(hdr);
+
+    // detail label
+    card.detailLbl = new QLabel("");
+    card.detailLbl->setWordWrap(true);
+    card.detailLbl->setStyleSheet("color: #888; font-size: 11px;");
+    vl->addWidget(card.detailLbl);
+
+    // separator
+    auto *sep = new QFrame();
+    sep->setFrameShape(QFrame::HLine);
+    sep->setFrameShadow(QFrame::Sunken);
+    vl->addWidget(sep);
+
+    // parameter controls
+    card.controlsWidget = new QWidget();
+    auto *cl = new QVBoxLayout(card.controlsWidget);
+    cl->setContentsMargins(0, 0, 0, 0);
+    cl->setSpacing(4);
+
+    card.paramDefs = defs;
+    for (auto &p : card.paramDefs) {
+        auto *row2 = new QHBoxLayout();
+        auto *ll = new QLabel(p.label + ":");
+        ll->setFixedWidth(110);
+        row2->addWidget(ll);
+
+        QWidget *w = createParamWidget(p, p.defaultValue);
+        p.widget = w;
+        row2->addWidget(w, 1);
+
+        cl->addLayout(row2);
+    }
+
+    vl->addWidget(card.controlsWidget);
+    vl->addStretch();
+
+    // button row
+    auto *btnRow = new QHBoxLayout();
+    btnRow->addStretch();
+
+    card.applyBtn = new QPushButton("应用");
+    card.applyBtn->setFixedWidth(80);
+    int idxCaptured = idx;
+    connect(card.applyBtn, &QPushButton::clicked, this, [this, idxCaptured]() {
+        onApply(idxCaptured);
     });
+    btnRow->addWidget(card.applyBtn);
 
-    // 按顺序: 系统级 systemctl → 用户级 → 回落
-    QStringList svcCmd = {"is-active", systemdSvc};
-    p->start("systemctl", svcCmd);
+    card.resetBtn = new QPushButton("复原");
+    card.resetBtn->setFixedWidth(80);
+    connect(card.resetBtn, &QPushButton::clicked, this, [this, idxCaptured]() {
+        onReset(idxCaptured);
+    });
+    btnRow->addWidget(card.resetBtn);
+
+    vl->addLayout(btnRow);
 }
 
-// ── 刷新全部 ──
+// ──────────────────────────────────────────────────────────
+//  parameter widget helpers
+// ──────────────────────────────────────────────────────────
+
+QWidget *AIPage::createParamWidget(ParamDef &def, const QString &value)
+{
+    QWidget *w = nullptr;
+    if (!def.choices.isEmpty()) {
+        auto *cb = new QComboBox();
+        cb->addItems(def.choices);
+        int idx = cb->findText(value);
+        if (idx >= 0) cb->setCurrentIndex(idx);
+        cb->setMinimumHeight(26);
+        w = cb;
+    } else if (def.wtype == WT_Int) {
+        auto *sp = new QSpinBox();
+        sp->setRange(def.intMin, def.intMax);
+        sp->setValue(value.toInt());
+        sp->setMinimumHeight(26);
+        w = sp;
+    } else if (def.wtype == WT_Double) {
+        auto *sp = new QDoubleSpinBox();
+        sp->setRange(def.dblMin, def.dblMax);
+        sp->setDecimals(def.decimals);
+        sp->setSingleStep(def.step);
+        sp->setValue(value.toDouble());
+        sp->setMinimumHeight(26);
+        w = sp;
+    } else {
+        auto *le = new QLineEdit(value);
+        le->setMinimumHeight(26);
+        w = le;
+    }
+    w->installEventFilter(m_nowheel);
+    return w;
+}
+
+QString AIPage::getParamValue(const ParamDef &def)
+{
+    if (!def.choices.isEmpty())
+        return static_cast<QComboBox *>(def.widget)->currentText();
+    if (def.wtype == WT_Int)
+        return QString::number(static_cast<QSpinBox *>(def.widget)->value());
+    if (def.wtype == WT_Double)
+        return QString::number(
+            static_cast<QDoubleSpinBox *>(def.widget)->value(), 'f', def.decimals);
+    return static_cast<QLineEdit *>(def.widget)->text();
+}
+
+void AIPage::setParamValue(ParamDef &def, const QString &value)
+{
+    if (!def.choices.isEmpty()) {
+        auto *cb = static_cast<QComboBox *>(def.widget);
+        int idx = cb->findText(value);
+        if (idx >= 0) cb->setCurrentIndex(idx);
+        return;
+    }
+    if (def.wtype == WT_Int)
+        static_cast<QSpinBox *>(def.widget)->setValue(value.toInt());
+    else if (def.wtype == WT_Double)
+        static_cast<QDoubleSpinBox *>(def.widget)->setValue(value.toDouble());
+    else
+        static_cast<QLineEdit *>(def.widget)->setText(value);
+}
+
+// ──────────────────────────────────────────────────────────
+//  runCmd helper
+// ──────────────────────────────────────────────────────────
+
+void AIPage::runCmd(const QString &cmd, const QStringList &args,
+                    std::function<void(const QString &, int)> cb)
+{
+    auto *p = new QProcess(this);
+    auto handler = [p, cb](int code, QProcess::ExitStatus) {
+        cb(QString::fromUtf8(p->readAllStandardOutput()).trimmed(), code);
+        p->deleteLater();
+    };
+    connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            this, handler);
+    p->setProcessChannelMode(QProcess::MergedChannels);
+    p->start(cmd, args);
+}
+
+// ──────────────────────────────────────────────────────────
+//  status detection
+// ──────────────────────────────────────────────────────────
+
+void AIPage::checkService(int idx)
+{
+    auto &card = m_cards[idx];
+    card.statusLbl->setText("检测中…");
+    card.detailLbl->setText("");
+    card.methodLbl->setText("");
+    card.svcFilePath.clear();
+    updateControlStates(idx);
+
+    // 1) systemd --user
+    runCmd("systemctl", {"--user", "is-active", card.systemdSvc},
+           [this, idx](const QString &out, int code) {
+        if (code == 0 && out == "active") {
+            finishSystemdCheck(idx, true);
+            return;
+        }
+        // 2) systemd system-level
+        runCmd("systemctl", {"is-active", m_cards[idx].systemdSvc},
+               [this, idx](const QString &out2, int code2) {
+            if (code2 == 0 && out2 == "active") {
+                finishSystemdCheck(idx, false);
+                return;
+            }
+            // 3) fallback: pgrep + try to find service file anyway
+            finishProcessCheck(idx);
+        });
+    });
+}
+
+void AIPage::finishSystemdCheck(int idx, bool userScope)
+{
+    auto &c = m_cards[idx];
+    c.running = true;
+    c.startMethod = "service";
+    c.statusLbl->setStyleSheet("color: #2e7d32; font-size: 13px;");
+    c.statusLbl->setText("🟢 运行中");
+    c.methodLbl->setStyleSheet(
+        "background: #2e7d32; color: white; border-radius: 4px;"
+        "padding: 1px 8px; font-size: 11px; font-weight: bold;");
+    c.methodLbl->setText("systemd");
+
+    QStringList showArgs = {"show", "-P", "MainPID", "-P", "FragmentPath",
+                            c.systemdSvc};
+    if (userScope)
+        showArgs.prepend("--user");
+
+    runCmd("systemctl", showArgs, [this, idx](const QString &out, int) {
+        auto &c2 = m_cards[idx];
+        QStringList lines = out.split('\n');
+        // systemctl outputs -P values alphabetically (FragmentPath before MainPID)
+        c2.svcFilePath = lines.value(0);
+        c2.pidStr = lines.value(1);
+        QString detail = QString("PID: %1").arg(c2.pidStr);
+        if (!c2.svcFilePath.isEmpty())
+            detail += QString("\n服务文件: %1").arg(c2.svcFilePath);
+        else
+            tryFindServiceFile(idx);
+        c2.detailLbl->setText(detail);
+        if (!c2.svcFilePath.isEmpty())
+            readServiceFile(idx);
+        updateControlStates(idx);
+    });
+}
+
+void AIPage::finishProcessCheck(int idx)
+{
+    auto &c = m_cards[idx];
+
+    // try to find service file for param reading even in process mode
+    tryFindServiceFile(idx);
+
+    runCmd("pgrep", {"-f", c.procName},
+           [this, idx](const QString &out, int) {
+        auto &c2 = m_cards[idx];
+        QString pidStr = out.trimmed();
+        if (!pidStr.isEmpty()) {
+            c2.running = true;
+            c2.startMethod = "process";
+            c2.pidStr = pidStr.split('\n').first();
+            c2.statusLbl->setStyleSheet("color: #2e7d32; font-size: 13px;");
+            c2.statusLbl->setText("🟢 运行中");
+            c2.methodLbl->setStyleSheet(
+                "background: #e65100; color: white; border-radius: 4px;"
+                "padding: 1px 8px; font-size: 11px; font-weight: bold;");
+            c2.methodLbl->setText("进程");
+            QString detail = QString("PID: %1\n(非 systemd 启动)").arg(c2.pidStr);
+            if (!c2.svcFilePath.isEmpty())
+                detail += QString("\n服务文件: %1").arg(c2.svcFilePath);
+            c2.detailLbl->setText(detail);
+        } else {
+            c2.running = false;
+            c2.startMethod = "unknown";
+            c2.pidStr.clear();
+            c2.statusLbl->setStyleSheet("color: #888; font-size: 13px;");
+            c2.statusLbl->setText("⚪ 未运行");
+            c2.methodLbl->setStyleSheet(
+                "background: #888; color: white; border-radius: 4px;"
+                "padding: 1px 8px; font-size: 11px; font-weight: bold;");
+            c2.methodLbl->setText("未启动");
+            c2.detailLbl->setText("");
+        }
+        updateControlStates(idx);
+    });
+}
+
+void AIPage::tryFindServiceFile(int idx)
+{
+    auto &c = m_cards[idx];
+    if (!c.svcFilePath.isEmpty()) return;
+
+    // try systemctl --user show FragmentPath
+    runCmd("systemctl", {"--user", "show", "-P", "FragmentPath", c.systemdSvc},
+           [this, idx](const QString &out, int) {
+        auto &c2 = m_cards[idx];
+        QString path = out.trimmed();
+        if (!path.isEmpty() && QFile::exists(path)) {
+            c2.svcFilePath = path;
+            readServiceFile(idx);
+            return;
+        }
+        // fallback to common paths
+        QStringList candidates = {
+            m_configDir + "/" + c2.systemdSvc,
+            "/etc/systemd/system/" + c2.systemdSvc,
+            "/usr/lib/systemd/system/" + c2.systemdSvc
+        };
+        for (const auto &p : candidates) {
+            if (QFile::exists(p)) {
+                c2.svcFilePath = p;
+                readServiceFile(idx);
+                return;
+            }
+        }
+    });
+}
+
+// ──────────────────────────────────────────────────────────
+//  read service file parameters
+// ──────────────────────────────────────────────────────────
+
+void AIPage::readServiceFile(int idx)
+{
+    auto &card = m_cards[idx];
+    if (card.svcFilePath.isEmpty()) return;
+
+    QFile f(card.svcFilePath);
+    if (!f.open(QIODevice::ReadOnly)) return;
+
+    QString content = QString::fromUtf8(f.readAll());
+    f.close();
+
+    // Join continuation lines so multi-line ExecStart can be parsed
+    content.replace(QRegularExpression(R"(\\\s*\n\s*)"), " ");
+
+    bool isOllama = (idx == 0);
+
+    for (auto &p : card.paramDefs) {
+        QString found;
+        if (isOllama) {
+            QString pattern = QStringLiteral(
+                R"re(Environment="%1=(.*)")re")
+                    .arg(QRegularExpression::escape(p.key));
+            QRegularExpression re(pattern);
+            auto m = re.match(content);
+            if (m.hasMatch())
+                found = m.captured(1).trimmed();
+        } else {
+            // Try long form: --key value
+            QString escKey = QRegularExpression::escape(p.key);
+            QString pattern = QStringLiteral(
+                R"re(--%1\s+(\S+))re").arg(escKey);
+            QRegularExpression re(pattern);
+            auto m = re.match(content);
+            if (m.hasMatch()) {
+                found = m.captured(1).trimmed();
+            }
+            // Try short form: -shortKey value (with whitespace before dash)
+            if (found.isEmpty() && !p.shortKey.isEmpty()
+                                  && p.shortKey != p.key) {
+                QString escShort = QRegularExpression::escape(p.shortKey);
+                QString shortPattern = QStringLiteral(
+                    R"re(\s-%1\s+(\S+))re").arg(escShort);
+                QRegularExpression shortRe(shortPattern);
+                auto sm = shortRe.match(content);
+                if (sm.hasMatch())
+                    found = sm.captured(1).trimmed();
+            }
+            // Toggle flag: --key or -shortKey present without value → "on"
+            if (found.isEmpty() && p.isToggle) {
+                QStringList toTry;
+                toTry << QStringLiteral(R"re(\s--%1(?:\s|\\|\n|$))re").arg(escKey);
+                if (!p.shortKey.isEmpty() && p.shortKey != p.key) {
+                    QString escS = QRegularExpression::escape(p.shortKey);
+                    toTry << QStringLiteral(R"re(\s-%1(?:\s|\\|\n|$))re").arg(escS);
+                }
+                for (const auto &pat : toTry) {
+                    if (QRegularExpression(pat).match(content).hasMatch()) {
+                        found = "on";
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found.isEmpty())
+            setParamValue(p, found);
+    }
+}
+
+// ──────────────────────────────────────────────────────────
+//  apply via service
+// ──────────────────────────────────────────────────────────
+
+void AIPage::applyService(int idx)
+{
+    auto &card = m_cards[idx];
+    if (card.svcFilePath.isEmpty()) {
+        findServiceFile(idx);
+        if (card.svcFilePath.isEmpty()) {
+            QMessageBox::warning(this, "错误",
+                QString("找不到 %1 的服务文件").arg(card.name));
+            return;
+        }
+    }
+
+    QFile f(card.svcFilePath);
+    if (!f.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, "错误",
+            QString("无法读取服务文件: %1").arg(card.svcFilePath));
+        return;
+    }
+    QString content = QString::fromUtf8(f.readAll());
+    f.close();
+
+    // Join continuation lines for consistent matching
+    QString flat = content;
+    flat.replace(QRegularExpression(R"(\\\s*\n\s*)"), " ");
+
+    bool isOllama = (idx == 0);
+
+    for (const auto &p : card.paramDefs) {
+        QString newVal = getParamValue(p);
+
+        if (isOllama) {
+            QString escKey = QRegularExpression::escape(p.key);
+            QString pattern = QStringLiteral(
+                R"re(Environment="%1=.*)re").arg(escKey);
+            QRegularExpression re(pattern);
+            QString replacement = QStringLiteral(
+                "Environment=\"%1=%2\"").arg(p.key, newVal);
+            if (content.contains(re)) {
+                content.replace(re, replacement);
+            } else {
+                int svcPos = content.indexOf("[Service]");
+                if (svcPos >= 0) {
+                    int lineEnd = content.indexOf('\n', svcPos);
+                    if (lineEnd < 0) lineEnd = svcPos;
+                    content.insert(lineEnd + 1, replacement + "\n");
+                }
+            }
+        } else {
+            QString escKey = QRegularExpression::escape(p.key);
+
+            // ── Toggle flag: --key present/absent, no value ──
+            if (p.isToggle) {
+                // Check long and short forms
+                bool hasFlag = false;
+                QStringList flagPats;
+                flagPats << QStringLiteral(R"re(\s--%1(?:\s|\\|\n|$))re").arg(escKey);
+                if (!p.shortKey.isEmpty() && p.shortKey != p.key) {
+                    QString escS = QRegularExpression::escape(p.shortKey);
+                    flagPats << QStringLiteral(R"re(\s-%1(?:\s|\\|\n|$))re").arg(escS);
+                }
+                for (const auto &pat : flagPats) {
+                    if (QRegularExpression(pat).match(flat).hasMatch()) {
+                        hasFlag = true;
+                        break;
+                    }
+                }
+
+                if (newVal == "on" && !hasFlag) {
+                    QRegularExpression esRe(QStringLiteral("ExecStart=.+"));
+                    auto m = esRe.match(flat);
+                    if (m.hasMatch()) {
+                        int lastCont = content.lastIndexOf(" \\\n");
+                        QString add = QString(" \\\n    --%1").arg(p.key);
+                        if (lastCont >= 0)
+                            content.insert(lastCont + 3, add.mid(3));
+                        else
+                            content.replace(m.captured(0),
+                                m.captured(0) + " " + add.trimmed());
+                    }
+                } else if (newVal == "off" && hasFlag) {
+                    for (const auto &pat : flagPats)
+                        content.remove(QRegularExpression(pat));
+                }
+                continue;
+            }
+
+            // ── Value-based param: --key value ──
+            QString replacement = QStringLiteral(
+                "--%1 %2").arg(p.key, newVal);
+            bool found = false;
+
+            // Try long form: --key value
+            QString longPat = QStringLiteral(
+                R"re(--%1\s+\S+)re").arg(escKey);
+            QRegularExpression longRe(longPat);
+            if (flat.contains(longRe)) {
+                found = true;
+                QString origMatch;
+                auto mi = longRe.match(flat);
+                if (mi.hasMatch()) origMatch = mi.captured(0);
+                flat.replace(longRe, replacement);
+                if (!origMatch.isEmpty())
+                    content.replace(origMatch, replacement);
+                else
+                    content.replace(longRe, replacement);
+            }
+
+            // Try short form: -shortKey value
+            if (!found && !p.shortKey.isEmpty()
+                       && p.shortKey != p.key) {
+                QString escShort = QRegularExpression::escape(p.shortKey);
+                QString shortPat = QStringLiteral(
+                    R"re(\s-%1\s+\S+)re").arg(escShort);
+                QRegularExpression shortRe(shortPat);
+                if (flat.contains(shortRe)) {
+                    found = true;
+                    QString origMatch;
+                    auto mi = shortRe.match(flat);
+                    if (mi.hasMatch()) origMatch = mi.captured(0);
+                    flat.replace(shortRe,
+                        QString(" %1").arg(replacement));
+                    QString escOrig = QRegularExpression::escape(origMatch);
+                    content.replace(
+                        QRegularExpression(escOrig),
+                        QString(" %1").arg(replacement));
+                }
+            }
+
+            if (!found) {
+                QRegularExpression esRe(QStringLiteral("ExecStart=.+"));
+                auto m = esRe.match(flat);
+                if (m.hasMatch()) {
+                    QString appendStr = QString(" \\\n    %1").arg(replacement);
+                    int lastCont = content.lastIndexOf(" \\\n");
+                    if (lastCont >= 0)
+                        content.insert(lastCont + 3, appendStr.mid(3));
+                    else
+                        content.replace(m.captured(0),
+                            m.captured(0) + " " + replacement);
+                }
+            }
+        }
+    }
+
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, "错误",
+            QString("无法写入服务文件: %1").arg(card.svcFilePath));
+        return;
+    }
+    f.write(content.toUtf8());
+    f.close();
+
+    // reload & restart
+    runCmd("systemctl", {"--user", "daemon-reload"},
+           [this, idx](const QString &, int) {
+        auto &c = m_cards[idx];
+        runCmd("systemctl", {"--user", "restart", c.systemdSvc},
+               [this, idx](const QString &out, int code) {
+            auto &c2 = m_cards[idx];
+            if (code == 0)
+                QMessageBox::information(this, "成功",
+                    QString("%1 已重新启动").arg(c2.name));
+            else
+                QMessageBox::warning(this, "错误",
+                    QString("重启 %1 失败:\n%2").arg(c2.name, out));
+            QTimer::singleShot(2000, this, &AIPage::refresh);
+        });
+    });
+}
+
+// ──────────────────────────────────────────────────────────
+//  apply via process (kill + restart)
+// ──────────────────────────────────────────────────────────
+
+void AIPage::applyProcess(int idx)
+{
+    auto &card = m_cards[idx];
+
+    if (card.pidStr.isEmpty()) {
+        QMessageBox::warning(this, "错误",
+            QString("%1 未运行，无法重启").arg(card.name));
+        return;
+    }
+
+    // kill
+    runCmd("kill", {card.pidStr}, [this, idx](const QString &, int) {
+        QTimer::singleShot(600, this, [this, idx]() {
+            auto &c2 = m_cards[idx];
+            QProcess proc;
+
+            if (idx == 0) {
+                // Ollama: env vars + ollama serve
+                auto penv = QProcessEnvironment::systemEnvironment();
+                for (const auto &p : c2.paramDefs)
+                    penv.insert(p.key, getParamValue(p));
+                proc.setProcessEnvironment(penv);
+                proc.setProgram("ollama");
+                proc.setArguments({"serve"});
+            } else if (idx == 1) {
+                // llama-server --flag value ...
+                QStringList args;
+                args << "llama-server";
+                for (const auto &p : c2.paramDefs) {
+                    args << QString("--%1").arg(p.key);
+                    args << getParamValue(p);
+                }
+                proc.setProgram(args.first());
+                args.removeFirst();
+                proc.setArguments(args);
+            } else {
+                // vllm serve --flag value ...
+                QStringList args;
+                args << "vllm" << "serve";
+                for (const auto &p : c2.paramDefs) {
+                    args << QString("--%1").arg(p.key);
+                    args << getParamValue(p);
+                }
+                proc.setProgram(args.first());
+                args.removeFirst();
+                proc.setArguments(args);
+            }
+
+            proc.setProcessChannelMode(QProcess::ForwardedChannels);
+            if (!proc.startDetached()) {
+                QMessageBox::warning(this, "错误",
+                    QString("启动 %1 失败").arg(c2.name));
+                return;
+            }
+
+            QMessageBox::information(this, "成功",
+                QString("%1 已重新启动").arg(c2.name));
+            QTimer::singleShot(2000, this, &AIPage::refresh);
+        });
+    });
+}
+
+// ──────────────────────────────────────────────────────────
+//  find service file
+// ──────────────────────────────────────────────────────────
+
+void AIPage::findServiceFile(int idx)
+{
+    auto &card = m_cards[idx];
+    QString svcName = card.systemdSvc;
+
+    // try systemctl show first
+    runCmd("systemctl", {"--user", "show", "-P", "FragmentPath", svcName},
+           [this, idx](const QString &out, int) {
+        auto &c = m_cards[idx];
+        QString path = out.trimmed();
+        if (!path.isEmpty() && QFile::exists(path)) {
+            c.svcFilePath = path;
+            readServiceFile(idx);
+            return;
+        }
+        // fallback
+        QStringList candidates = {
+            m_configDir + "/" + c.systemdSvc,
+            "/etc/systemd/system/" + c.systemdSvc,
+            "/usr/lib/systemd/system/" + c.systemdSvc
+        };
+        for (const auto &p : candidates) {
+            if (QFile::exists(p)) {
+                c.svcFilePath = p;
+                readServiceFile(idx);
+                return;
+            }
+        }
+    });
+}
+
+// ──────────────────────────────────────────────────────────
+//  apply button
+// ──────────────────────────────────────────────────────────
+
+void AIPage::onApply(int idx)
+{
+    auto &card = m_cards[idx];
+
+    if (!card.running) {
+        if (!card.svcFilePath.isEmpty() || card.startMethod == "service") {
+            applyService(idx);
+        } else {
+            QMessageBox::information(this, "提示",
+                QString("%1 未运行。请先启动后再使用应用功能。")
+                    .arg(card.name));
+        }
+        return;
+    }
+
+    auto ret = QMessageBox::question(this, "确认",
+        QString("%1 正在运行。\n修改参数将重启该服务，是否继续？")
+            .arg(card.name),
+        QMessageBox::Yes | QMessageBox::No);
+
+    if (ret != QMessageBox::Yes) return;
+
+    if (card.startMethod == "service")
+        applyService(idx);
+    else
+        applyProcess(idx);
+}
+
+// ──────────────────────────────────────────────────────────
+//  reset button
+// ──────────────────────────────────────────────────────────
+
+void AIPage::onReset(int idx)
+{
+    auto &card = m_cards[idx];
+
+    for (auto &p : card.paramDefs)
+        setParamValue(p, p.defaultValue);
+
+    if (!card.svcFilePath.isEmpty())
+        readServiceFile(idx);
+}
+
+// ──────────────────────────────────────────────────────────
+//  update control enabled state
+// ──────────────────────────────────────────────────────────
+
+void AIPage::updateControlStates(int idx)
+{
+    auto &card = m_cards[idx];
+    card.controlsWidget->setEnabled(card.running);
+    card.applyBtn->setEnabled(card.running);
+}
+
+// ──────────────────────────────────────────────────────────
+//  refresh all
+// ──────────────────────────────────────────────────────────
+
 void AIPage::refresh()
 {
-    m_ollamaStatus->setText("检测中…");
-    m_ollamaDetail->setText("");
-    m_llamacppStatus->setText("检测中…");
-    m_llamacppDetail->setText("");
-    m_vllmStatus->setText("检测中…");
-    m_vllmDetail->setText("");
+    for (auto &c : m_cards) {
+        c.running = false;
+        c.startMethod = "unknown";
+        c.pidStr.clear();
+    }
+
     m_info->setText("正在检查服务状态…");
 
-    // ── Ollama ──
-    checkService("Ollama", "ollama.service", "ollama", 11434,
-                 m_ollamaStatus, m_ollamaDetail);
+    for (int i = 0; i < 3; ++i)
+        checkService(i);
 
-    // ── llama.cpp ──
-    checkService("llama.cpp", "llama.service", "llama-server", 8080,
-                 m_llamacppStatus, m_llamacppDetail);
-
-    // ── vLLM ──
-    checkService("vLLM", "vllm.service", "vllm", 8000,
-                 m_vllmStatus, m_vllmDetail);
-
-    // ── 收集汇总信息 ──
-    // （延迟一点等上面的异步结果，用单个一次性 timer 兜底）
-    QTimer::singleShot(2000, this, [this]() {
+    QTimer::singleShot(2500, this, [this]() {
         int running = 0;
-        if (m_ollamaStatus->text().contains("🟢"))   running++;
-        if (m_llamacppStatus->text().contains("🟢")) running++;
-        if (m_vllmStatus->text().contains("🟢"))     running++;
-        m_info->setText(QString("AI 后端: %1 / 3 运行中")
-                        .arg(running));
+        for (const auto &c : m_cards)
+            if (c.running) ++running;
+        m_info->setText(QString("AI 后端: %1 / 3 运行中").arg(running));
     });
 }
