@@ -41,6 +41,7 @@ private:
         double step = 0.05;
         QStringList choices;
         bool isToggle = false;
+        bool envVar = false;
         QWidget *widget = nullptr;
     };
 

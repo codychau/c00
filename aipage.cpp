@@ -55,8 +55,8 @@ AIPage::AIPage(QWidget *parent)
     m_info->setStyleSheet("color: #666; font-size: 12px;");
     layout->addWidget(m_info);
 
-    // define 3 services
-    m_cards.resize(3);
+    // define 4 services
+    m_cards.resize(4);
     m_cards[0].name       = "Ollama";
     m_cards[0].systemdSvc = "ollama.service";
     m_cards[0].procName   = "ollama";
@@ -69,8 +69,12 @@ AIPage::AIPage(QWidget *parent)
     m_cards[2].systemdSvc = "vllm.service";
     m_cards[2].procName   = "vllm";
     m_cards[2].port       = 8000;
+    m_cards[3].name       = "LocalAI";
+    m_cards[3].systemdSvc = "local-ai.service";
+    m_cards[3].procName   = "local-ai";
+    m_cards[3].port       = 8080;
 
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < 4; ++i)
         buildCard(i);
 
     auto *cardsRow = new QHBoxLayout();
@@ -198,7 +202,7 @@ void AIPage::buildCard(int idx)
             a("embedding",           "embedding",      "嵌入模式",       WT_String, "off",   0, 0, 0, 0, 0, 0,
                {"off", "on"}, true),
         };
-    } else {
+    } else if (idx == 2) {
         ParamDef v1, v2, v3, v4, v5, v6, v7, v8;
         v1 = {"host",                 "host",    "监听地址",          WT_String, "127.0.0.1"};
         v2 = {"port",                 "port",    "端口",              WT_Int,    "8000", 1, 65535};
@@ -215,6 +219,34 @@ void AIPage::buildCard(int idx)
         v8.key = "dtype"; v8.shortKey = "dtype"; v8.label = "数据类型"; v8.wtype = WT_String;
         v8.defaultValue = "auto";
         defs = {v1, v2, v3, v4, v5, v6, v7, v8};
+    } else if (idx == 3) {
+        auto a = [](const QString &k, const QString &sk, const QString &l,
+                     WidgetType wt, const QString &dv, int imin = 0, int imax = 0,
+                     double dmin = 0, double dmax = 0, int dec = 2, double st = 0.05,
+                     const QStringList &ch = {}, bool tog = false, bool env = false) {
+            ParamDef p;
+            p.key = k; p.shortKey = sk; p.label = l; p.wtype = wt;
+            p.defaultValue = dv; p.intMin = imin; p.intMax = imax;
+            p.dblMin = dmin; p.dblMax = dmax; p.decimals = dec; p.step = st;
+            p.choices = ch; p.isToggle = tog; p.envVar = env;
+            return p;
+        };
+        defs = {
+            a("address",          "address",    "监听地址",       WT_String, ":8080"),
+            a("models-path",      "models-path","模型路径",       WT_String, ""),
+            a("config-dir",       "config-dir", "配置目录",       WT_String, ""),
+            a("context-size",     "context-size","上下文大小",     WT_Int,    "512", 512, 131072),
+            a("f16",              "f16",         "GPU 加速",       WT_String, "off",  0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+            a("upload-limit",     "upload-limit","上传限制(MB)",   WT_Int,    "15",   1, 1000),
+            a("preload-models",   "preload-models","预加载模型",   WT_String, ""),
+            a("cors",             "cors",         "CORS",           WT_String, "off",  0, 0, 0, 0, 0, 0,
+               {"off", "on"}, true),
+            a("galleries",        "galleries",   "模型库地址",     WT_String, ""),
+            // Environment variable (not a CLI flag)
+            a("CUDA_VISIBLE_DEVICES", "", "CUDA 设备", WT_String, "0", 0, 0, 0, 0, 0, 0,
+              {}, false, true),
+        };
     }
 
     auto *box = new QGroupBox();
@@ -552,14 +584,26 @@ void AIPage::readServiceFile(int idx)
             if (m.hasMatch())
                 found = m.captured(1).trimmed();
         } else {
-            // Try long form: --key value
             QString escKey = QRegularExpression::escape(p.key);
-            QString pattern = QStringLiteral(
-                R"re(--%1\s+(\S+))re").arg(escKey);
-            QRegularExpression re(pattern);
-            auto m = re.match(content);
-            if (m.hasMatch()) {
-                found = m.captured(1).trimmed();
+
+            // Environment variable: Environment="KEY=VALUE"
+            if (p.envVar) {
+                QString pat = QStringLiteral(
+                    R"re(Environment="%1=(.*)")re").arg(escKey);
+                auto m2 = QRegularExpression(pat).match(content);
+                if (m2.hasMatch())
+                    found = m2.captured(1).trimmed();
+            }
+
+            // Try long form: --key value
+            if (found.isEmpty()) {
+                QString pattern = QStringLiteral(
+                    R"re(--%1\s+(\S+))re").arg(escKey);
+                QRegularExpression re(pattern);
+                auto m = re.match(content);
+                if (m.hasMatch()) {
+                    found = m.captured(1).trimmed();
+                }
             }
             // Try short form: -shortKey value (with whitespace before dash)
             if (found.isEmpty() && !p.shortKey.isEmpty()
@@ -646,6 +690,25 @@ void AIPage::applyService(int idx)
             }
         } else {
             QString escKey = QRegularExpression::escape(p.key);
+
+            // ── Environment variable: Environment="KEY=VALUE" ──
+            if (p.envVar) {
+                QString pat = QStringLiteral(
+                    R"re(Environment="%1=.*)re").arg(escKey);
+                QString repl = QStringLiteral(
+                    "Environment=\"%1=%2\"").arg(p.key, newVal);
+                if (content.contains(QRegularExpression(pat)))
+                    content.replace(QRegularExpression(pat), repl);
+                else {
+                    int svcPos = content.indexOf("[Service]");
+                    if (svcPos >= 0) {
+                        int le = content.indexOf('\n', svcPos);
+                        if (le < 0) le = svcPos;
+                        content.insert(le + 1, repl + "\n");
+                    }
+                }
+                continue;
+            }
 
             // ── Toggle flag: --key present/absent, no value ──
             if (p.isToggle) {
