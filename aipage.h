@@ -42,6 +42,8 @@ private:
         QStringList choices;
         bool isToggle = false;
         bool envVar = false;
+        bool browse = false;    // show browse button
+        bool browseDir = false; // browse directory vs file
         QWidget *widget = nullptr;
     };
 

@@ -12,6 +12,7 @@
 #include <QMessageBox>
 #include <QComboBox>
 #include <QEvent>
+#include <QFileDialog>
 
 // ── 阻止鼠标滚轮改变控件值 ──
 class NoWheelFilter : public QObject
@@ -119,6 +120,7 @@ void AIPage::buildCard(int idx)
         ParamDef o1, o2, o3, o4, o5, o6;
         o1  = {"OLLAMA_HOST",          "",    "监听地址",      WT_String, "127.0.0.1:11434"};
         o2  = {"OLLAMA_MODELS",        "",    "模型目录",      WT_String, "~/.ollama/models"};
+        o2.browse = true; o2.browseDir = true;
         o3  = {"OLLAMA_NUM_PARALLEL",  "",    "并行请求数",    WT_Int,    "1",   1, 16};
         o4  = {"OLLAMA_KEEP_ALIVE",    "",    "连接保持时间",  WT_String, "5m"};
         o5  = {"OLLAMA_MAX_LOADED_MODELS", "", "最大加载模型数", WT_Int, "3", 1, 100};
@@ -128,12 +130,14 @@ void AIPage::buildCard(int idx)
         auto a = [](const QString &k, const QString &sk, const QString &l,
                      WidgetType wt, const QString &dv, int imin = 0, int imax = 0,
                      double dmin = 0, double dmax = 0, int dec = 2, double st = 0.05,
-                     const QStringList &ch = {}, bool tog = false) {
+                     const QStringList &ch = {}, bool tog = false,
+                     bool br = false, bool brDir = false) {
             ParamDef p;
             p.key = k; p.shortKey = sk; p.label = l; p.wtype = wt;
             p.defaultValue = dv; p.intMin = imin; p.intMax = imax;
             p.dblMin = dmin; p.dblMax = dmax; p.decimals = dec; p.step = st;
             p.choices = ch; p.isToggle = tog;
+            p.browse = br; p.browseDir = brDir;
             return p;
         };
 
@@ -141,7 +145,7 @@ void AIPage::buildCard(int idx)
             // ── 基本 ──
             a("host",         "host",  "监听地址",     WT_String, "127.0.0.1"),
             a("port",         "port",  "端口",         WT_Int,    "8080",    1, 65535),
-            a("model",        "m",     "模型路径",     WT_String, ""),
+            a("model",        "m",     "模型路径",     WT_String, "", 0, 0, 0, 0, 2, 0.05, {}, false, true, false),
             a("n-gpu-layers", "ngl",   "GPU 层数",    WT_Int,    "-1",     -1, 999),
             a("ctx-size",     "c",     "上下文大小",   WT_Int,    "4096",  512, 131072),
             a("threads",      "t",     "线程数",       WT_Int,    "4",       1, 128),
@@ -186,7 +190,7 @@ void AIPage::buildCard(int idx)
             a("spec-type",                "spec-type",           "推测解码类型",     WT_String, "none", 0, 0, 0, 0, 0, 0,
                {"none", "draft-simple", "draft-eagle3", "draft-mtp", "draft-dflash",
                 "ngram-simple", "ngram-map-k", "ngram-cache"}),
-            a("model-draft",              "md",                  "草稿模型路径",     WT_String, ""),
+            a("model-draft",              "md",                  "草稿模型路径",     WT_String, "", 0, 0, 0, 0, 2, 0.05, {}, false, true, false),
             a("n-gpu-layers-draft",       "ngld",                "草稿 GPU 层数",    WT_Int,    "-1", -1, 999),
             a("spec-draft-n-max",         "spec-draft-n-max",    "草稿生成长度",     WT_Int,    "3",   1, 20),
             a("spec-draft-p-split",       "draft-p-split",       "草稿拆分概率",     WT_Double, "0.10", 0, 0, 0, 1.0, 2, 0.05),
@@ -223,18 +227,20 @@ void AIPage::buildCard(int idx)
         auto a = [](const QString &k, const QString &sk, const QString &l,
                      WidgetType wt, const QString &dv, int imin = 0, int imax = 0,
                      double dmin = 0, double dmax = 0, int dec = 2, double st = 0.05,
-                     const QStringList &ch = {}, bool tog = false, bool env = false) {
+                     const QStringList &ch = {}, bool tog = false, bool env = false,
+                     bool br = false, bool brDir = false) {
             ParamDef p;
             p.key = k; p.shortKey = sk; p.label = l; p.wtype = wt;
             p.defaultValue = dv; p.intMin = imin; p.intMax = imax;
             p.dblMin = dmin; p.dblMax = dmax; p.decimals = dec; p.step = st;
             p.choices = ch; p.isToggle = tog; p.envVar = env;
+            p.browse = br; p.browseDir = brDir;
             return p;
         };
         defs = {
             a("address",          "address",    "监听地址",       WT_String, ":8080"),
-            a("models-path",      "models-path","模型路径",       WT_String, ""),
-            a("config-dir",       "config-dir", "配置目录",       WT_String, ""),
+            a("models-path",      "models-path","模型路径",       WT_String, "", 0, 0, 0, 0, 2, 0.05, {}, false, false, true, true),
+            a("config-dir",       "config-dir", "配置目录",       WT_String, "", 0, 0, 0, 0, 2, 0.05, {}, false, false, true, true),
             a("context-size",     "context-size","上下文大小",     WT_Int,    "512", 512, 131072),
             a("f16",              "f16",         "GPU 加速",       WT_String, "off",  0, 0, 0, 0, 0, 0,
                {"off", "on"}, true),
@@ -301,6 +307,28 @@ void AIPage::buildCard(int idx)
         QWidget *w = createParamWidget(p, p.defaultValue);
         p.widget = w;
         row2->addWidget(w, 1);
+
+        if (p.browse) {
+            auto *browseBtn = new QPushButton("…");
+            browseBtn->setFixedWidth(28);
+            browseBtn->setFixedHeight(26);
+            connect(browseBtn, &QPushButton::clicked, this, [this, &p]() {
+                auto *le = qobject_cast<QLineEdit *>(p.widget);
+                if (!le) return;
+                QString start = le->text().isEmpty()
+                    ? QDir::homePath() : le->text();
+                QString path;
+                if (p.browseDir)
+                    path = QFileDialog::getExistingDirectory(
+                        this, "选择目录", start);
+                else
+                    path = QFileDialog::getOpenFileName(
+                        this, "选择文件", start,
+                        "模型文件 (*.gguf);;所有文件 (*)");
+                if (!path.isEmpty()) le->setText(path);
+            });
+            row2->addWidget(browseBtn);
+        }
 
         cl->addLayout(row2);
     }
