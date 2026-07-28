@@ -56,6 +56,78 @@ AIPage::AIPage(QWidget *parent)
     m_info->setStyleSheet("color: #666; font-size: 12px;");
     layout->addWidget(m_info);
 
+    // Automatic degradation rule section
+    m_degradeGroup = new QGroupBox("自动降级规则");
+    auto *degradeLayout = new QVBoxLayout(m_degradeGroup);
+    degradeLayout->setContentsMargins(8, 8, 8, 8);
+    degradeLayout->setSpacing(6);
+
+    // Proxy port and model base path setting (same row)
+    auto *proxyPathRow = new QHBoxLayout();
+    proxyPathRow->addWidget(new QLabel("代理端口:"));
+    m_proxyPortInput = new QLineEdit("8081");
+    m_proxyPortInput->setMinimumHeight(26);
+    m_proxyPortInput->installEventFilter(m_nowheel);
+    proxyPathRow->addWidget(m_proxyPortInput);
+
+    proxyPathRow->addWidget(new QLabel(" 模型基础路径:"));
+    m_modelBasePathInput = new QLineEdit("");
+    m_modelBasePathInput->setMinimumHeight(26);
+    m_modelBasePathInput->installEventFilter(m_nowheel);
+    proxyPathRow->addWidget(m_modelBasePathInput, 1);
+
+    auto *browseBtn = new QPushButton("…");
+    browseBtn->setFixedWidth(28);
+    browseBtn->setFixedHeight(26);
+    connect(browseBtn, &QPushButton::clicked, this, [this]() {
+        QString path = QFileDialog::getExistingDirectory(
+            this, "选择模型基础路径", QDir::homePath());
+        if (!path.isEmpty()) {
+            m_modelBasePathInput->setText(path);
+        }
+    });
+    proxyPathRow->addWidget(browseBtn);
+
+    degradeLayout->addLayout(proxyPathRow);
+
+    // Startup program and action row with checkbox
+    auto *startupRow = new QHBoxLayout();
+    m_startupProgramCheckbox = new QCheckBox();
+    startupRow->addWidget(m_startupProgramCheckbox);
+    startupRow->addWidget(new QLabel("当某个程序启动时:"));
+    m_startupProgramInput = new QLineEdit("");
+    m_startupProgramInput->setMinimumHeight(26);
+    m_startupProgramInput->installEventFilter(m_nowheel);
+    startupRow->addWidget(m_startupProgramInput, 1);
+
+    startupRow->addWidget(new QLabel(" 就会 "));
+
+    m_actionDropdown = new QComboBox();
+    m_actionDropdown->addItems({"切换到某个模型"});
+    m_actionDropdown->setMinimumHeight(26);
+    startupRow->addWidget(m_actionDropdown);
+
+    startupRow->addWidget(new QLabel(" 模型文件名:"));
+    m_modelNameInput = new QLineEdit("");
+    m_modelNameInput->setMinimumHeight(26);
+    m_modelNameInput->installEventFilter(m_nowheel);
+    startupRow->addWidget(m_modelNameInput, 1);
+
+    degradeLayout->addLayout(startupRow);
+
+    // Model change row with checkbox and dropdown
+    auto *modelChangeRow = new QHBoxLayout();
+    m_modelChangeCheckbox = new QCheckBox();
+    modelChangeRow->addWidget(m_modelChangeCheckbox);
+    modelChangeRow->addWidget(new QLabel("模型变化时，则"));
+    m_modelChangeDropdown = new QComboBox();
+    m_modelChangeDropdown->addItems({"自动根据模型名称重载服务", "使用备选模型代替"});
+    m_modelChangeDropdown->setMinimumHeight(26);
+    modelChangeRow->addWidget(m_modelChangeDropdown, 1);
+    degradeLayout->addLayout(modelChangeRow);
+
+    layout->addWidget(m_degradeGroup);
+
     // define 4 services
     m_cards.resize(4);
     m_cards[0].name       = "Ollama";

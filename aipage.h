@@ -11,6 +11,9 @@
 #include <QProcess>
 #include <QList>
 #include <QString>
+#include <QGroupBox>
+#include <QComboBox>
+#include <QCheckBox>
 
 class NoWheelFilter;
 
@@ -89,6 +92,17 @@ private:
     QPushButton *m_refreshBtn;
     QTimer *m_timer;
     QString m_configDir;
+
+    // Automatic degradation rule UI elements
+    QGroupBox *m_degradeGroup;
+    QLineEdit *m_proxyPortInput;
+    QLineEdit *m_modelBasePathInput;
+    QCheckBox *m_startupProgramCheckbox;
+    QLineEdit *m_startupProgramInput;
+    QComboBox *m_actionDropdown;
+    QLineEdit *m_modelNameInput;
+    QCheckBox *m_modelChangeCheckbox;
+    QComboBox *m_modelChangeDropdown;
 };
 
 #endif
