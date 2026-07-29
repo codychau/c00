@@ -526,17 +526,24 @@ async fn main() {
     let listener = TcpListener::bind(&addr).await.unwrap();
 
     loop {
-        let (stream, _) = listener.accept().await.unwrap();
+        let (stream, peer) = listener.accept().await.unwrap();
+        eprintln!("[proxy] accept: {}", peer);
         let state_for_conn = state.clone();
 
         tokio::spawn(async move {
             let service = service_fn(move |req| {
                 let st = state_for_conn.clone();
+                let method = req.method().clone();
+                let path = req.uri().path().to_string();
+                eprintln!("[proxy] >>> {} {} from {}", method, path, peer);
                 async move {
                     match proxy_handler(st, req).await {
-                        Ok(resp) => Ok::<_, hyper::Error>(resp),
+                        Ok(resp) => {
+                            eprintln!("[proxy] <<< {} {} (status {})", method, path, resp.status().as_u16());
+                            Ok::<_, hyper::Error>(resp)
+                        }
                         Err(e) => {
-                            eprintln!("[proxy] error: {}", e);
+                            eprintln!("[proxy] !!! {} {} error: {}", method, path, e);
                             Ok(Response::builder()
                                 .status(502)
                                 .body(Body::from(e.to_string()))
@@ -546,7 +553,11 @@ async fn main() {
                 }
             });
 
-            let _ = Http::new().serve_connection(stream, service).await;
+            if let Err(e) = Http::new().serve_connection(stream, service).await {
+                eprintln!("[proxy] conn closed {}: {}", peer, e);
+            } else {
+                eprintln!("[proxy] conn done {}", peer);
+            }
         });
     }
 }
