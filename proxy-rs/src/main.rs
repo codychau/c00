@@ -4,6 +4,7 @@ use hyper::server::conn::Http;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use serde_json::Value;
+use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,17 +137,28 @@ fn wait_upstream(port: u16) -> Result<(), String> {
     let mut tried = 0;
     loop {
         tried += 1;
-        match TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            std::time::Duration::from_secs(5),
-        ) {
-            Ok(_) => {
-                eprintln!("[proxy] upstream {} ready after {} tries", addr, tried);
+        // HTTP GET /health and check for 200
+        let healthy = (|| -> Result<bool, std::io::Error> {
+            let mut stream = TcpStream::connect_timeout(
+                &addr.parse().unwrap(),
+                std::time::Duration::from_secs(5),
+            )?;
+            use std::io::Write;
+            stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")?;
+            let mut buf = [0u8; 4096];
+            let n = stream.read(&mut buf).unwrap_or(0);
+            let resp = String::from_utf8_lossy(&buf[..n]);
+            Ok(resp.starts_with("HTTP/1.") && resp.contains(" 200 "))
+        })();
+
+        match healthy {
+            Ok(true) => {
+                eprintln!("[proxy] upstream {} healthy after {} tries", addr, tried);
                 return Ok(());
             }
-            Err(e) => {
+            _ => {
                 if std::time::Instant::now() > deadline {
-                    return Err(format!("upstream {} not ready after {} tries: {}", addr, tried, e));
+                    return Err(format!("upstream {} not healthy after {} tries (last: {:?})", addr, tried, healthy.err()));
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
