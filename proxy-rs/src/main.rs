@@ -4,7 +4,7 @@ use hyper::server::conn::Http;
 use hyper::service::service_fn;
 use hyper::{Request, Response};
 use serde_json::Value;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -130,11 +130,36 @@ fn replace_model_flag(content: &str, flags: &[&str], new_value: &str) -> Result<
     Err(format!("none of flags {:?} found in service file", flags))
 }
 
+fn wait_upstream(port: u16) -> Result<(), String> {
+    let addr = format!("127.0.0.1:{}", port);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    let mut tried = 0;
+    loop {
+        tried += 1;
+        match TcpStream::connect_timeout(
+            &addr.parse().unwrap(),
+            std::time::Duration::from_secs(5),
+        ) {
+            Ok(_) => {
+                eprintln!("[proxy] upstream {} ready after {} tries", addr, tried);
+                return Ok(());
+            }
+            Err(e) => {
+                if std::time::Instant::now() > deadline {
+                    return Err(format!("upstream {} not ready after {} tries: {}", addr, tried, e));
+                }
+                std::thread::sleep(std::time::Duration::from_secs(2));
+            }
+        }
+    }
+}
+
 fn perform_switch_blocking(
     base_path: &str,
     new_model: &str,
     svc_name: &str,
     svc_type: &str,
+    upstream_port: u16,
 ) -> Result<(), String> {
     let model_path = find_model_file(base_path, new_model)?;
 
@@ -203,10 +228,12 @@ fn perform_switch_blocking(
                 .map_err(|e| format!("sudo restart: {}", e))?;
             if r.status.success() {
                 eprintln!("[proxy] {} (root) restarted with model {}", svc_name, model_path);
+                wait_upstream(upstream_port)?;
                 return Ok(());
             }
             return Err(format!("service file not found and root restart failed for {}", svc_name));
         }
+        wait_upstream(upstream_port)?;
         return Ok(());
     }
 
@@ -235,6 +262,7 @@ fn perform_switch_blocking(
     }
 
     eprintln!("[proxy] {} restarted with model {}", svc_name, model_path);
+    wait_upstream(upstream_port)?;
     Ok(())
 }
 
@@ -265,9 +293,10 @@ async fn handle_model_switch(state: &AppState, new_model: &str) {
             let base_path = state.model_base_path.clone().unwrap();
             let svc_name = state.service_svc.clone().unwrap();
             let svc_type = state.service_type.clone().unwrap();
+            let up_port = state.upstream_port;
 
             let result = tokio::task::spawn_blocking(move || {
-                perform_switch_blocking(&base_path, &new_model_owned, &svc_name, &svc_type)
+                perform_switch_blocking(&base_path, &new_model_owned, &svc_name, &svc_type, up_port)
             }).await;
 
             match result {
