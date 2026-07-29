@@ -130,7 +130,10 @@ AIPage::AIPage(QWidget *parent)
     auto *openclawRow = new QHBoxLayout();
     m_openclawFormatCheckbox = new QCheckBox();
     openclawRow->addWidget(m_openclawFormatCheckbox);
-    openclawRow->addWidget(new QLabel("适配Openclaw发送格式"));
+    auto *openclawLabel = new QLabel("适配Openclaw发送格式");
+    openclawLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    openclawRow->addWidget(openclawLabel);
+    openclawRow->addStretch();
     degradeLayout->addLayout(openclawRow);
 
     layout->addWidget(m_degradeGroup);
