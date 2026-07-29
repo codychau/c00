@@ -103,6 +103,7 @@ private:
     QLineEdit *m_modelNameInput;
     QCheckBox *m_modelChangeCheckbox;
     QComboBox *m_modelChangeDropdown;
+    QCheckBox *m_openclawFormatCheckbox;
 };
 
 #endif

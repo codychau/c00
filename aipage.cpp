@@ -126,6 +126,13 @@ AIPage::AIPage(QWidget *parent)
     modelChangeRow->addWidget(m_modelChangeDropdown, 1);
     degradeLayout->addLayout(modelChangeRow);
 
+    // Openclaw format row with checkbox
+    auto *openclawRow = new QHBoxLayout();
+    m_openclawFormatCheckbox = new QCheckBox();
+    openclawRow->addWidget(m_openclawFormatCheckbox);
+    openclawRow->addWidget(new QLabel("适配Openclaw发送格式"));
+    degradeLayout->addLayout(openclawRow);
+
     layout->addWidget(m_degradeGroup);
 
     // define 4 services
