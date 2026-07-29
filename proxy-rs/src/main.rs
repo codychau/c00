@@ -135,6 +135,29 @@ fn current_flag_value(content: &str, flags: &[&str]) -> Option<String> {
     None
 }
 
+fn restart_service(svc_name: &str) -> Result<(), String> {
+    let kill = Command::new("systemctl")
+        .args(["--user", "kill", svc_name, "--signal=SIGKILL"])
+        .output()
+        .map_err(|e| format!("kill: {}", e))?;
+    if !kill.status.success() {
+        let stderr = String::from_utf8_lossy(&kill.stderr);
+        // If service is not running, that's fine
+        if !stderr.contains("not loaded") {
+            return Err(format!("kill {}: {}", svc_name, stderr));
+        }
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let start = Command::new("systemctl")
+        .args(["--user", "start", svc_name])
+        .output()
+        .map_err(|e| format!("start: {}", e))?;
+    if !start.status.success() {
+        return Err(format!("start {}: {}", svc_name, String::from_utf8_lossy(&start.stderr)));
+    }
+    Ok(())
+}
+
 fn wait_upstream(port: u16) -> Result<(), String> {
     let addr = format!("127.0.0.1:{}", port);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
@@ -223,13 +246,7 @@ fn perform_switch_blocking(
                 if !r.status.success() {
                     return Err(format!("daemon-reload: {}", String::from_utf8_lossy(&r.stderr)));
                 }
-                let r = Command::new("systemctl")
-                    .args(["--user", "restart", svc_name])
-                    .output()
-                    .map_err(|e| format!("restart: {}", e))?;
-                if !r.status.success() {
-                    return Err(format!("restart {}: {}", svc_name, String::from_utf8_lossy(&r.stderr)));
-                }
+                restart_service(svc_name)?;
                 eprintln!("[proxy] {} restarted with model {}", svc_name, model_path);
                 wait_upstream(upstream_port)?;
                 return Ok(());
@@ -291,14 +308,7 @@ fn perform_switch_blocking(
             return Err(format!("daemon-reload: {}", String::from_utf8_lossy(&r.stderr)));
         }
 
-        let r = Command::new("systemctl")
-            .args(["--user", "restart", svc_name])
-            .output()
-            .map_err(|e| format!("restart: {}", e))?;
-        if !r.status.success() {
-            return Err(format!("restart {}: {}", svc_name, String::from_utf8_lossy(&r.stderr)));
-        }
-
+        restart_service(svc_name)?;
         eprintln!("[proxy] {} restarted (attempt {})", svc_name, attempt + 1);
 
         match wait_upstream(upstream_port) {
@@ -315,12 +325,12 @@ fn perform_switch_blocking(
     Err("unexpected error in switch".into())
 }
 
-async fn handle_model_switch(state: &AppState, new_model: &str) {
+async fn handle_model_switch(state: Arc<AppState>, new_model: String) {
     if new_model.is_empty() {
         return;
     }
 
-    let action = state.model_change_action.as_deref().unwrap_or("");
+    let action = state.model_change_action.as_deref().unwrap_or("").to_string();
     let auto_reload = action.starts_with("自动根据模型名称重载服务")
         && state.model_base_path.is_some()
         && state.service_type.is_some()
@@ -340,31 +350,41 @@ async fn handle_model_switch(state: &AppState, new_model: &str) {
         }
 
         if state.switch_in_progress.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
-            let new_model_owned = new_model.to_string();
+            let new_model_clone = new_model.clone();
             let base_path = state.model_base_path.clone().unwrap();
             let svc_name = state.service_svc.clone().unwrap();
             let svc_type = state.service_type.clone().unwrap();
             let up_port = state.upstream_port;
+            let state_clone = state.clone();
 
-            let result = tokio::task::spawn_blocking(move || {
-                perform_switch_blocking(&base_path, &new_model_owned, &svc_name, &svc_type, up_port, retry_ngl)
-            }).await;
+            let model_for_log = new_model_clone.clone();
+            let model_for_update = new_model_clone.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
-            match result {
-                Ok(Ok(())) => {
-                    eprintln!("[proxy] model switched: {}", new_model);
-                    *state.current_model.lock().await = new_model.to_string();
-                }
-                Ok(Err(e)) => {
-                    eprintln!("[proxy] switch failed: {}", e);
-                }
-                Err(e) => {
-                    eprintln!("[proxy] switch task panicked: {}", e);
-                }
-            }
+            tokio::spawn(async move {
+                let result = tokio::task::spawn_blocking(move || {
+                    perform_switch_blocking(
+                        &base_path, &new_model_clone, &svc_name, &svc_type, up_port, retry_ngl,
+                    )
+                })
+                .await
+                .unwrap_or(Err("switch task panicked".into()));
 
-            state.switch_in_progress.store(false, Ordering::SeqCst);
-            state.switch_notify.notify_waiters();
+                match &result {
+                    Ok(()) => eprintln!("[proxy] model switched: {}", model_for_log),
+                    Err(e) => eprintln!("[proxy] switch failed: {}", e),
+                }
+
+                if result.is_ok() {
+                    *state_clone.current_model.lock().await = model_for_update;
+                }
+
+                state_clone.switch_in_progress.store(false, Ordering::SeqCst);
+                state_clone.switch_notify.notify_waiters();
+                let _ = tx.send(result);
+            });
+
+            let _ = rx.await;
             return;
         }
 
@@ -397,12 +417,13 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
     }
 
     let mut modified = false;
-    let modified_body;
+    let mut body_modified: Option<String> = None;
     let mut request_model: Option<String> = None;
 
     if content_type_str.contains("json") && body_len > 0 {
         let body_bytes: Vec<u8> = chunks.concat();
         let body_str = String::from_utf8_lossy(&body_bytes);
+        let body_owned = body_str.to_string();
 
         if let Ok(mut parsed) = serde_json::from_str::<Value>(&body_str) {
             request_model = parsed.get("model")
@@ -435,46 +456,53 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
             }
 
             if modified {
-                let modified_str = serde_json::to_string(&parsed).unwrap_or_else(|_| body_str.to_string());
-                modified_body = Body::from(modified_str.into_bytes());
-            } else {
-                modified_body = Body::from(chunks.concat());
+                body_modified = Some(serde_json::to_string(&parsed).unwrap_or_else(|_| body_owned.clone()));
             }
-        } else {
-            let body_bytes: Vec<u8> = chunks.concat();
-            modified_body = Body::from(body_bytes);
         }
-    } else {
-        let body_bytes: Vec<u8> = chunks.concat();
-        modified_body = Body::from(body_bytes);
     }
 
     if let Some(ref model_name) = request_model {
-        handle_model_switch(&state, model_name).await;
+        handle_model_switch(state.clone(), model_name.clone()).await;
     }
 
+    let client = hyper::Client::new();
     let upstream_addr = format!("{}:{}", UPSTREAM_HOST, state.upstream_port);
     let upstream_url = format!("http://{}{}", upstream_addr, uri_path);
 
-    let mut upstream_req_builder = Request::builder()
-        .method(method)
-        .uri(upstream_url)
-        .header("host", UPSTREAM_HOST);
+    let body_bytes: Vec<u8> = if let Some(ref s) = body_modified {
+        s.clone().into_bytes()
+    } else {
+        chunks.concat()
+    };
 
-    for (header_key, header_value) in headers_map.iter() {
-        let key_str = header_key.to_string();
-        if key_str != "host" && key_str != "content-length" && key_str != "transfer-encoding" {
-            upstream_req_builder = upstream_req_builder.header(header_key, header_value);
+    let res = 'retry: {
+        for retry in 0..5 {
+            let mut upstream_req_builder = Request::builder()
+                .method(method.clone())
+                .uri(&upstream_url)
+                .header("host", UPSTREAM_HOST);
+
+            for (header_key, header_value) in headers_map.iter() {
+                let key_str = header_key.to_string();
+                if key_str != "host" && key_str != "content-length" && key_str != "transfer-encoding" {
+                    upstream_req_builder = upstream_req_builder.header(header_key, header_value);
+                }
+            }
+            upstream_req_builder = upstream_req_builder.header("content-length", body_bytes.len().to_string());
+
+            match client.request(upstream_req_builder.body(Body::from(body_bytes.clone())).unwrap()).await {
+                Ok(r) => break 'retry r,
+                Err(e) => {
+                    if retry < 4 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                    } else {
+                        break 'retry Err(e)?;
+                    }
+                }
+            }
         }
-    }
-
-    let body_size = body_len;
-    upstream_req_builder = upstream_req_builder.header("content-length", body_size.to_string());
-
-    let upstream_req = upstream_req_builder.body(modified_body).unwrap();
-
-    let client = hyper::Client::new();
-    let res = client.request(upstream_req).await?;
+        unreachable!()
+    };
 
     let status = res.status().as_u16();
     let res_headers: Vec<(hyper::header::HeaderName, hyper::header::HeaderValue)> = res
