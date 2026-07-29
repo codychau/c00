@@ -108,27 +108,31 @@ fn find_model_file(base_path: &str, model_id: &str) -> Result<String, String> {
     Err(format!("model `{}` not found in `{}`", model_id, base_path))
 }
 
-fn replace_model_flag(content: &str, flags: &[&str], new_value: &str) -> Result<String, String> {
+fn replace_flag(flags: &[&str], old_val: &str, new_val: &str, content: &str) -> Result<String, String> {
+    for flag in flags {
+        let search = format!("{} {}", flag, old_val);
+        if content.contains(&search) {
+            let replacement = format!("{} {}", flag, new_val);
+            if search == replacement {
+                return Ok(content.to_string());
+            }
+            return Ok(content.replace(&search, &replacement));
+        }
+    }
+    Err(format!("flag {:?} with value {} not found", flags, old_val))
+}
+
+fn current_flag_value(content: &str, flags: &[&str]) -> Option<String> {
     for flag in flags {
         let search = format!("{} ", flag);
         if let Some(pos) = content.find(&search) {
-            let after_flag = &content[pos + search.len()..];
-            let value_end = after_flag.find(|c| c == ' ' || c == '\t' || c == '\n' || c == '\\')
-                .unwrap_or(after_flag.len());
-            let old_value = &after_flag[..value_end];
-
-            let old_str = format!("{}{}", search, old_value);
-            let new_str = format!("{}{}", search, new_value);
-
-            if old_str == new_str {
-                return Ok(content.to_string());
-            }
-
-            return Ok(content.replace(&old_str, &new_str));
+            let after = &content[pos + search.len()..];
+            let end = after.find(|c| c == ' ' || c == '\t' || c == '\n' || c == '\\')
+                .unwrap_or(after.len());
+            return Some(after[..end].to_string());
         }
     }
-
-    Err(format!("none of flags {:?} found in service file", flags))
+    None
 }
 
 fn wait_upstream(port: u16) -> Result<(), String> {
@@ -172,6 +176,7 @@ fn perform_switch_blocking(
     svc_name: &str,
     svc_type: &str,
     upstream_port: u16,
+    retry_ngl: bool,
 ) -> Result<(), String> {
     let model_path = find_model_file(base_path, new_model)?;
 
@@ -185,6 +190,10 @@ fn perform_switch_blocking(
         "vllm" => &["--model"],
         _ => &["--model"],
     };
+    let ngl_flags: &[&str] = match svc_type {
+        "llamacpp" => &["-ngl", "--n-gpu-layers"],
+        _ => &["--n-gpu-layers"],
+    };
 
     let output = Command::new("systemctl")
         .args(["--user", "show", "-P", "FragmentPath", svc_name])
@@ -193,19 +202,20 @@ fn perform_switch_blocking(
 
     let svc_file = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if svc_file.is_empty() || !std::path::Path::new(&svc_file).exists() {
+        // Fallback paths don't support ngl retry
         let candidates = [
             format!("/etc/systemd/system/{}", svc_name),
             format!("/usr/lib/systemd/system/{}", svc_name),
         ];
-        let mut found = false;
         for c in &candidates {
             if std::path::Path::new(c).exists() {
                 let content = std::fs::read_to_string(c)
                     .map_err(|e| format!("read {}: {}", c, e))?;
-                let new_content = replace_model_flag(&content, model_flags, &model_path)?;
+                let current_model = current_flag_value(&content, model_flags)
+                    .ok_or_else(|| "model flag not found".to_string())?;
+                let new_content = replace_flag(model_flags, &current_model, &model_path, &content)?;
                 std::fs::write(c, &new_content)
                     .map_err(|e| format!("write {}: {}", c, e))?;
-                // try systemctl restart
                 let r = Command::new("systemctl")
                     .args(["--user", "daemon-reload"])
                     .output()
@@ -221,61 +231,88 @@ fn perform_switch_blocking(
                     return Err(format!("restart {}: {}", svc_name, String::from_utf8_lossy(&r.stderr)));
                 }
                 eprintln!("[proxy] {} restarted with model {}", svc_name, model_path);
-                found = true;
-                break;
-            }
-        }
-        if !found {
-            // Try root service
-            let r = Command::new("sudo")
-                .args(["systemctl", "daemon-reload"])
-                .output()
-                .map_err(|e| format!("sudo daemon-reload: {}", e))?;
-            if !r.status.success() {
-                return Err(format!("service file not found for {}", svc_name));
-            }
-            let r = Command::new("sudo")
-                .args(["systemctl", "restart", svc_name])
-                .output()
-                .map_err(|e| format!("sudo restart: {}", e))?;
-            if r.status.success() {
-                eprintln!("[proxy] {} (root) restarted with model {}", svc_name, model_path);
                 wait_upstream(upstream_port)?;
                 return Ok(());
             }
-            return Err(format!("service file not found and root restart failed for {}", svc_name));
         }
-        wait_upstream(upstream_port)?;
-        return Ok(());
+        let r = Command::new("sudo")
+            .args(["systemctl", "daemon-reload"])
+            .output()
+            .map_err(|e| format!("sudo daemon-reload: {}", e))?;
+        if !r.status.success() {
+            return Err(format!("service file not found for {}", svc_name));
+        }
+        let r = Command::new("sudo")
+            .args(["systemctl", "restart", svc_name])
+            .output()
+            .map_err(|e| format!("sudo restart: {}", e))?;
+        if r.status.success() {
+            eprintln!("[proxy] {} (root) restarted with model {}", svc_name, model_path);
+            wait_upstream(upstream_port)?;
+            return Ok(());
+        }
+        return Err(format!("service file not found and root restart failed for {}", svc_name));
     }
 
     let content = std::fs::read_to_string(&svc_file)
         .map_err(|e| format!("read {}: {}", svc_file, e))?;
 
-    let new_content = replace_model_flag(&content, model_flags, &model_path)?;
+    let current_model = current_flag_value(&content, model_flags)
+        .ok_or_else(|| "model flag not found".to_string())?;
+    let mut working = replace_flag(model_flags, &current_model, &model_path, &content)?;
 
-    std::fs::write(&svc_file, &new_content)
-        .map_err(|e| format!("write {}: {}", svc_file, e))?;
+    let ngl_initial = if retry_ngl {
+        current_flag_value(&working, ngl_flags)
+    } else {
+        None
+    };
 
-    let output = Command::new("systemctl")
-        .args(["--user", "daemon-reload"])
-        .output()
-        .map_err(|e| format!("daemon-reload: {}", e))?;
-    if !output.status.success() {
-        return Err(format!("daemon-reload: {}", String::from_utf8_lossy(&output.stderr)));
+    let max_attempts = if retry_ngl { 3 } else { 1 };
+
+    for attempt in 0..max_attempts {
+        if attempt > 0 && retry_ngl {
+            if let Some(ref current_ngl) = ngl_initial {
+                let ngl_val: i32 = current_ngl.parse().unwrap_or(0);
+                let new_ngl = (ngl_val - attempt as i32 * 5).max(0);
+                eprintln!("[proxy] ngl reduction attempt {}: {} → {}", attempt, ngl_val, new_ngl);
+                working = replace_flag(ngl_flags, current_ngl, &new_ngl.to_string(), &working)
+                    .map_err(|e| format!("ngl replacement failed: {}", e))?;
+            }
+        }
+
+        std::fs::write(&svc_file, &working)
+            .map_err(|e| format!("write {}: {}", svc_file, e))?;
+
+        let r = Command::new("systemctl")
+            .args(["--user", "daemon-reload"])
+            .output()
+            .map_err(|e| format!("daemon-reload: {}", e))?;
+        if !r.status.success() {
+            return Err(format!("daemon-reload: {}", String::from_utf8_lossy(&r.stderr)));
+        }
+
+        let r = Command::new("systemctl")
+            .args(["--user", "restart", svc_name])
+            .output()
+            .map_err(|e| format!("restart: {}", e))?;
+        if !r.status.success() {
+            return Err(format!("restart {}: {}", svc_name, String::from_utf8_lossy(&r.stderr)));
+        }
+
+        eprintln!("[proxy] {} restarted (attempt {})", svc_name, attempt + 1);
+
+        match wait_upstream(upstream_port) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt + 1 >= max_attempts {
+                    return Err(format!("switch failed after {} attempts: {}", max_attempts, e));
+                }
+                eprintln!("[proxy] retrying ngl reduction...");
+            }
+        }
     }
 
-    let output = Command::new("systemctl")
-        .args(["--user", "restart", svc_name])
-        .output()
-        .map_err(|e| format!("restart: {}", e))?;
-    if !output.status.success() {
-        return Err(format!("restart {}: {}", svc_name, String::from_utf8_lossy(&output.stderr)));
-    }
-
-    eprintln!("[proxy] {} restarted with model {}", svc_name, model_path);
-    wait_upstream(upstream_port)?;
-    Ok(())
+    Err("unexpected error in switch".into())
 }
 
 async fn handle_model_switch(state: &AppState, new_model: &str) {
@@ -283,12 +320,14 @@ async fn handle_model_switch(state: &AppState, new_model: &str) {
         return;
     }
 
-    let should_monitor = state.model_change_action.as_deref() == Some("自动根据模型名称重载服务")
+    let action = state.model_change_action.as_deref().unwrap_or("");
+    let auto_reload = action.starts_with("自动根据模型名称重载服务")
         && state.model_base_path.is_some()
         && state.service_type.is_some()
         && state.service_svc.is_some();
+    let retry_ngl = action == "自动根据模型名称重载服务并且自动降低GPU中加载的层数";
 
-    if !should_monitor {
+    if !auto_reload {
         return;
     }
 
@@ -308,7 +347,7 @@ async fn handle_model_switch(state: &AppState, new_model: &str) {
             let up_port = state.upstream_port;
 
             let result = tokio::task::spawn_blocking(move || {
-                perform_switch_blocking(&base_path, &new_model_owned, &svc_name, &svc_type, up_port)
+                perform_switch_blocking(&base_path, &new_model_owned, &svc_name, &svc_type, up_port, retry_ngl)
             }).await;
 
             match result {

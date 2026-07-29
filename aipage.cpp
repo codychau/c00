@@ -149,7 +149,7 @@ AIPage::AIPage(QWidget *parent)
     modelChangeRow->addWidget(m_modelChangeCheckbox);
     modelChangeRow->addWidget(new QLabel("模型变化时，则"));
     m_modelChangeDropdown = new QComboBox();
-    m_modelChangeDropdown->addItems({"自动根据模型名称重载服务", "使用备选模型代替"});
+    m_modelChangeDropdown->addItems({"自动根据模型名称重载服务", "自动根据模型名称重载服务并且自动降低GPU中加载的层数", "使用备选模型代替"});
     m_modelChangeDropdown->setMinimumHeight(26);
     modelChangeRow->addWidget(m_modelChangeDropdown, 1);
     degradeLayout->addLayout(modelChangeRow);
