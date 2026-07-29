@@ -1315,32 +1315,35 @@ void AIPage::generateServiceFile(bool rootUser)
     f.write(serviceContent.toUtf8());
     f.close();
 
+    auto ret = QMessageBox::question(this, "重启服务",
+        "服务文件已更新。是否立即重启代理服务？",
+        QMessageBox::Yes | QMessageBox::No);
+
+    if (ret != QMessageBox::Yes)
+        return;
+
     if (rootUser) {
         runCmd("sudo", {"systemctl", "daemon-reload"},
-               [this, svcFilePath](const QString &, int) {
-            runCmd("sudo", {"systemctl", "enable", "--now", "proxy-rs.service"},
-                   [this, svcFilePath](const QString &out, int code) {
-                if (code == 0) {
-                    QMessageBox::information(this, "成功",
-                        QString("服务文件已生成并安装到根用户:\n%1").arg(svcFilePath));
-                } else {
+               [this](const QString &, int) {
+            runCmd("sudo", {"systemctl", "restart", "proxy-rs.service"},
+                   [this](const QString &out, int code) {
+                if (code == 0)
+                    QMessageBox::information(this, "成功", "代理服务已重启");
+                else
                     QMessageBox::warning(this, "错误",
-                        QString("安装服务文件失败:\n%1").arg(out));
-                }
+                        QString("重启代理服务失败:\n%1").arg(out));
             });
         });
     } else {
         runCmd("systemctl", {"--user", "daemon-reload"},
-               [this, svcFilePath](const QString &, int) {
-            runCmd("systemctl", {"--user", "enable", "--now", "proxy-rs.service"},
-                   [this, svcFilePath](const QString &out, int code) {
-                if (code == 0) {
-                    QMessageBox::information(this, "成功",
-                        QString("服务文件已生成并安装到当前用户:\n%1").arg(svcFilePath));
-                } else {
+               [this](const QString &, int) {
+            runCmd("systemctl", {"--user", "restart", "proxy-rs.service"},
+                   [this](const QString &out, int code) {
+                if (code == 0)
+                    QMessageBox::information(this, "成功", "代理服务已重启");
+                else
                     QMessageBox::warning(this, "错误",
-                        QString("安装服务文件失败:\n%1").arg(out));
-                }
+                        QString("重启代理服务失败:\n%1").arg(out));
             });
         });
     }
