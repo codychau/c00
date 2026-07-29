@@ -421,7 +421,7 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
 
 #[tokio::main]
 async fn main() {
-    let bind_host = "127.0.0.1";
+    let bind_host = std::env::var("PROXY_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
     let bind_port: u16 = std::env::var("PROXY_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
