@@ -85,6 +85,9 @@ private:
     void updateControlStates(int idx);
     void runCmd(const QString &cmd, const QStringList &args,
                 std::function<void(const QString &, int)> cb);
+    void generateServiceFile(bool rootUser);
+    void saveAIConfig();
+    void loadAIConfig();
 
     NoWheelFilter *m_nowheel;
     QList<AICard> m_cards;
@@ -96,6 +99,7 @@ private:
     // Automatic degradation rule UI elements
     QGroupBox *m_degradeGroup;
     QLineEdit *m_proxyPortInput;
+    QPushButton *m_generateServiceBtn;
     QLineEdit *m_modelBasePathInput;
     QCheckBox *m_startupProgramCheckbox;
     QLineEdit *m_startupProgramInput;

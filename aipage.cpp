@@ -8,11 +8,18 @@
 #include <QRegularExpression>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTextStream>
 #include <QMessageBox>
 #include <QComboBox>
 #include <QEvent>
 #include <QFileDialog>
+#include <QMenu>
+#include <QAction>
+#include <QStandardPaths>
+
+#include <toml++/toml.h>
+#include <fstream>
 
 // ── 阻止鼠标滚轮改变控件值 ──
 class NoWheelFilter : public QObject
@@ -69,6 +76,27 @@ AIPage::AIPage(QWidget *parent)
     m_proxyPortInput->setMinimumHeight(26);
     m_proxyPortInput->installEventFilter(m_nowheel);
     proxyPathRow->addWidget(m_proxyPortInput);
+
+    m_generateServiceBtn = new QPushButton("生成服务文件");
+    m_generateServiceBtn->setMinimumHeight(26);
+    connect(m_generateServiceBtn, &QPushButton::clicked, this, [this]() {
+        QMenu *menu = new QMenu(this);
+        QAction *installUser = new QAction("安装到当前用户", this);
+        QAction *installRoot = new QAction("安装到根用户", this);
+        menu->addAction(installUser);
+        menu->addAction(installRoot);
+
+        connect(installUser, &QAction::triggered, this, [this]() {
+            generateServiceFile(false);
+        });
+        connect(installRoot, &QAction::triggered, this, [this]() {
+            generateServiceFile(true);
+        });
+
+        QPoint pos = m_generateServiceBtn->mapToGlobal(QPoint(0, m_generateServiceBtn->height()));
+        menu->exec(pos);
+    });
+    proxyPathRow->addWidget(m_generateServiceBtn);
 
     proxyPathRow->addWidget(new QLabel(" 模型基础路径:"));
     m_modelBasePathInput = new QLineEdit("");
@@ -184,6 +212,18 @@ AIPage::AIPage(QWidget *parent)
     m_timer = new QTimer(this);
     connect(m_timer, &QTimer::timeout, this, &AIPage::refresh);
     m_timer->start(15000);
+
+    loadAIConfig();
+
+    connect(m_proxyPortInput, &QLineEdit::textChanged, this, &AIPage::saveAIConfig);
+    connect(m_modelBasePathInput, &QLineEdit::textChanged, this, &AIPage::saveAIConfig);
+    connect(m_startupProgramCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
+    connect(m_startupProgramInput, &QLineEdit::textChanged, this, &AIPage::saveAIConfig);
+    connect(m_actionDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
+    connect(m_modelNameInput, &QLineEdit::textChanged, this, &AIPage::saveAIConfig);
+    connect(m_modelChangeCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
+    connect(m_modelChangeDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
+    connect(m_openclawFormatCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
 
     refresh();
 }
@@ -1122,4 +1162,186 @@ void AIPage::refresh()
             if (c.running) ++running;
         m_info->setText(QString("AI 后端: %1 / 3 运行中").arg(running));
     });
+}
+
+// ──────────────────────────────────────────────────────────
+//  save / load degradation rule config (ai.toml)
+// ──────────────────────────────────────────────────────────
+
+void AIPage::saveAIConfig()
+{
+    toml::table root;
+    root.emplace("proxy_port", m_proxyPortInput->text().toStdString());
+    root.emplace("model_base_path", m_modelBasePathInput->text().toStdString());
+    root.emplace("startup_program_checked", m_startupProgramCheckbox->isChecked());
+    root.emplace("startup_program", m_startupProgramInput->text().toStdString());
+    root.emplace("action", m_actionDropdown->currentText().toStdString());
+    root.emplace("model_name", m_modelNameInput->text().toStdString());
+    root.emplace("model_change_checked", m_modelChangeCheckbox->isChecked());
+    root.emplace("model_change_action", m_modelChangeDropdown->currentText().toStdString());
+    root.emplace("openclaw_format", m_openclawFormatCheckbox->isChecked());
+
+    QString path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/ai.toml";
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    std::ofstream ofs(path.toStdString());
+    if (ofs) ofs << root << "\n";
+}
+
+void AIPage::loadAIConfig()
+{
+    QString path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/ai.toml";
+    if (!QFile::exists(path)) return;
+
+    try {
+        auto tbl = toml::parse_file(path.toStdString());
+
+        if (auto *v = tbl.get("proxy_port"))
+            m_proxyPortInput->setText(QString::fromStdString(v->value_or("")));
+        if (auto *v = tbl.get("model_base_path"))
+            m_modelBasePathInput->setText(QString::fromStdString(v->value_or("")));
+        if (auto *v = tbl.get("startup_program_checked"))
+            m_startupProgramCheckbox->setChecked(v->value_or(false));
+        if (auto *v = tbl.get("startup_program"))
+            m_startupProgramInput->setText(QString::fromStdString(v->value_or("")));
+        if (auto *v = tbl.get("action")) {
+            QString val = QString::fromStdString(v->value_or(""));
+            int idx = m_actionDropdown->findText(val);
+            if (idx >= 0) m_actionDropdown->setCurrentIndex(idx);
+        }
+        if (auto *v = tbl.get("model_name"))
+            m_modelNameInput->setText(QString::fromStdString(v->value_or("")));
+        if (auto *v = tbl.get("model_change_checked"))
+            m_modelChangeCheckbox->setChecked(v->value_or(false));
+        if (auto *v = tbl.get("model_change_action")) {
+            QString val = QString::fromStdString(v->value_or(""));
+            int idx = m_modelChangeDropdown->findText(val);
+            if (idx >= 0) m_modelChangeDropdown->setCurrentIndex(idx);
+        }
+        if (auto *v = tbl.get("openclaw_format"))
+            m_openclawFormatCheckbox->setChecked(v->value_or(false));
+    } catch (const toml::parse_error &) {
+    }
+}
+
+// ──────────────────────────────────────────────────────────
+//  generate service file for proxy-rs
+// ──────────────────────────────────────────────────────────
+
+void AIPage::generateServiceFile(bool rootUser)
+{
+    QString proxyPort = m_proxyPortInput->text();
+    QString modelBasePath = m_modelBasePathInput->text();
+    bool startupProgramChecked = m_startupProgramCheckbox->isChecked();
+    QString startupProgram = m_startupProgramInput->text();
+    QString action = m_actionDropdown->currentText();
+    QString modelName = m_modelNameInput->text();
+    bool modelChangeChecked = m_modelChangeCheckbox->isChecked();
+    QString modelChangeAction = m_modelChangeDropdown->currentText();
+    bool openclawFormatChecked = m_openclawFormatCheckbox->isChecked();
+
+    // Detect running AI service for upstream port, type, and service name
+    QString upstreamPort = "8082"; // default fallback
+    QString serviceType;
+    QString serviceSvc;
+    for (const auto &card : m_cards) {
+        if (card.running) {
+            upstreamPort = QString::number(card.port);
+            if (card.name == "llama.cpp")
+                serviceType = "llamacpp";
+            else if (card.name == "vLLM")
+                serviceType = "vllm";
+            else if (card.name == "Ollama")
+                serviceType = "ollama";
+            else if (card.name == "LocalAI")
+                serviceType = "localai";
+            serviceSvc = card.systemdSvc;
+            break;
+        }
+    }
+
+    QString serviceContent = "[Unit]\n";
+    serviceContent += "Description=Proxy-rs Transparent Proxy Service\n";
+    serviceContent += "After=network.target\n\n";
+
+    serviceContent += "[Service]\n";
+    serviceContent += "Environment=PROXY_PORT=" + proxyPort + "\n";
+    serviceContent += "Environment=UPSTREAM_PORT=" + upstreamPort + "\n";
+    if (!serviceType.isEmpty()) {
+        serviceContent += "Environment=SERVICE_TYPE=" + serviceType + "\n";
+    }
+    if (!serviceSvc.isEmpty()) {
+        serviceContent += "Environment=SERVICE_SVC=" + serviceSvc + "\n";
+    }
+    if (!modelBasePath.isEmpty()) {
+        serviceContent += "Environment=MODEL_BASE_PATH=" + modelBasePath + "\n";
+    }
+    if (startupProgramChecked && !startupProgram.isEmpty()) {
+        serviceContent += "Environment=STARTUP_PROGRAM=" + startupProgram + "\n";
+    }
+    if (!action.isEmpty() && action != "切换到某个模型") {
+        serviceContent += "Environment=ACTION=" + action + "\n";
+    }
+    if (!modelName.isEmpty()) {
+        serviceContent += "Environment=MODEL_NAME=" + modelName + "\n";
+    }
+    if (modelChangeChecked) {
+        serviceContent += "Environment=MODEL_CHANGE_ACTION=" + modelChangeAction + "\n";
+    }
+    if (openclawFormatChecked) {
+        serviceContent += "Environment=OPENCLAW_FORMAT=true\n";
+    }
+    serviceContent += "ExecStart=" + QDir::homePath() + "/.local/bin/llama-proxy\n";
+    serviceContent += "Restart=on-failure\n\n";
+
+    serviceContent += "[Install]\n";
+    if (rootUser) {
+        serviceContent += "WantedBy=multi-user.target\n";
+    } else {
+        serviceContent += "WantedBy=default.target\n";
+    }
+
+    QString svcFilePath;
+    if (rootUser) {
+        svcFilePath = "/etc/systemd/system/proxy-rs.service";
+    } else {
+        svcFilePath = QDir::homePath() + "/.config/systemd/user/proxy-rs.service";
+    }
+
+    QFile f(svcFilePath);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, "错误", QString("无法写入服务文件: %1").arg(svcFilePath));
+        return;
+    }
+    f.write(serviceContent.toUtf8());
+    f.close();
+
+    if (rootUser) {
+        runCmd("sudo", {"systemctl", "daemon-reload"},
+               [this, svcFilePath](const QString &, int) {
+            runCmd("sudo", {"systemctl", "enable", "--now", "proxy-rs.service"},
+                   [this, svcFilePath](const QString &out, int code) {
+                if (code == 0) {
+                    QMessageBox::information(this, "成功",
+                        QString("服务文件已生成并安装到根用户:\n%1").arg(svcFilePath));
+                } else {
+                    QMessageBox::warning(this, "错误",
+                        QString("安装服务文件失败:\n%1").arg(out));
+                }
+            });
+        });
+    } else {
+        runCmd("systemctl", {"--user", "daemon-reload"},
+               [this, svcFilePath](const QString &, int) {
+            runCmd("systemctl", {"--user", "enable", "--now", "proxy-rs.service"},
+                   [this, svcFilePath](const QString &out, int code) {
+                if (code == 0) {
+                    QMessageBox::information(this, "成功",
+                        QString("服务文件已生成并安装到当前用户:\n%1").arg(svcFilePath));
+                } else {
+                    QMessageBox::warning(this, "错误",
+                        QString("安装服务文件失败:\n%1").arg(out));
+                }
+            });
+        });
+    }
 }

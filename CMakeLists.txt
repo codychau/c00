@@ -50,3 +50,9 @@ target_link_libraries(server-toolbox PRIVATE
     Qt6::Widgets
     Qt6::Network
 )
+
+# Build Rust proxy subproject
+add_custom_target(build-proxy-rs
+    COMMAND cargo build --release --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/proxy-rs/Cargo.toml
+    WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/proxy-rs
+)
