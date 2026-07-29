@@ -1245,7 +1245,25 @@ void AIPage::generateServiceFile(bool rootUser)
     QString serviceSvc;
     for (const auto &card : m_cards) {
         if (card.running) {
+            // Read actual port from the card's parameter widgets, not the hardcoded default
             upstreamPort = QString::number(card.port);
+            for (const auto &p : card.paramDefs) {
+                if (p.key == "port" || p.key == "OLLAMA_HOST" || p.key == "address") {
+                    QString val = getParamValue(p);
+                    if (val.isEmpty()) continue;
+                    int colonPos = val.lastIndexOf(':');
+                    if (colonPos >= 0) {
+                        QString portStr = val.mid(colonPos + 1).trimmed();
+                        bool ok;
+                        int pv = portStr.toInt(&ok);
+                        if (ok && pv > 0) { upstreamPort = portStr; break; }
+                    } else {
+                        bool ok;
+                        int pv = val.toInt(&ok);
+                        if (ok && pv > 0) { upstreamPort = val; break; }
+                    }
+                }
+            }
             if (card.name == "llama.cpp")
                 serviceType = "llamacpp";
             else if (card.name == "vLLM")
