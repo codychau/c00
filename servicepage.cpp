@@ -1,4 +1,5 @@
 #include "servicepage.h"
+#include "serviceeditdialog.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -7,6 +8,7 @@
 #include <QRegularExpression>
 #include <QMenu>
 #include <QSharedPointer>
+#include <QFile>
 
 ServicePage::ServicePage(QWidget *parent)
     : QWidget(parent)
@@ -76,6 +78,7 @@ ServicePage::ServicePage(QWidget *parent)
         QAction *actEnable = menu.addAction(enableLabel);
         if (entry.enabled == "static" || entry.enabled == "indirect")
             actEnable->setEnabled(false);
+        QAction *actEdit = menu.addAction("✏️  编辑");
 
         QAction *chosen = menu.exec(m_table->mapToGlobal(pos));
         if (!chosen) return;
@@ -97,6 +100,8 @@ ServicePage::ServicePage(QWidget *parent)
                 runCmd("systemctl", {"--user", action, name}, onDone);
             else
                 runCmd("pkexec", {"systemctl", action, name}, onDone);
+        } else if (chosen == actEdit) {
+            onEditService(name, entry.scope);
         }
     });
     layout->addWidget(m_table);
@@ -319,4 +324,35 @@ void ServicePage::onStartStop()
                    refresh();
                });
     }
+}
+
+void ServicePage::onEditService(const QString &name, const QString &scope)
+{
+    QStringList args;
+    if (scope == "user") args << "--user";
+    args << "show" << "--property=FragmentPath" << name;
+
+    m_status->setText(QString("正在读取 %1…").arg(name));
+    runCmd("systemctl", args, [this, name, scope](const QString &out) {
+        QString path;
+        for (const auto &line : out.split('\n', Qt::SkipEmptyParts)) {
+            if (line.startsWith("FragmentPath=")) {
+                path = line.mid(13).trimmed();
+                break;
+            }
+        }
+        if (path.isEmpty() || !QFile::exists(path)) {
+            m_status->setText(QString("⚠️  找不到 %1 的单元文件").arg(name));
+            return;
+        }
+
+        auto *dlg = new ServiceEditDialog(name, path, scope, this);
+        dlg->setAttribute(Qt::WA_DeleteOnClose);
+        connect(dlg, &ServiceEditDialog::saved,
+                this, [this](const QString &n) {
+                    m_status->setText(QString("✅ 已保存 %1").arg(n));
+                    refresh();
+                });
+        dlg->open();
+    });
 }

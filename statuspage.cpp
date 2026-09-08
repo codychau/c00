@@ -1,4 +1,5 @@
 #include "statuspage.h"
+#include "shutdowndialog.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -86,6 +87,30 @@ StatusPage::StatusPage(QWidget *parent)
     m_tempBtn = new QPushButton("🌡  读取温度");
     connect(m_tempBtn, &QPushButton::clicked, this, &StatusPage::fetchAllTemps);
     tempRow->addWidget(m_tempBtn);
+
+    m_shutdownBtn = new QPushButton("🔌 关机");
+    connect(m_shutdownBtn, &QPushButton::clicked, this, [this]() {
+        ShutdownDialog dialog("关机", this);
+        if (dialog.exec() == QDialog::Accepted && dialog.isContinue()) {
+            auto *proc = new QProcess(this);
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                    this, [proc](int, QProcess::ExitStatus) { proc->deleteLater(); });
+            proc->start("pkexec", {"shutdown", "-h", "now"});
+        }
+    });
+    tempRow->addWidget(m_shutdownBtn);
+
+    m_restartBtn = new QPushButton("🔄 重启");
+    connect(m_restartBtn, &QPushButton::clicked, this, [this]() {
+        ShutdownDialog dialog("重启", this);
+        if (dialog.exec() == QDialog::Accepted && dialog.isContinue()) {
+            auto *proc = new QProcess(this);
+            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                    this, [proc](int, QProcess::ExitStatus) { proc->deleteLater(); });
+            proc->start("pkexec", {"reboot"});
+        }
+    });
+    tempRow->addWidget(m_restartBtn);
 
     auto *exitBtn = new QPushButton("🚪 退出程序");
     connect(exitBtn, &QPushButton::clicked, qApp, []() { qApp->quit(); });

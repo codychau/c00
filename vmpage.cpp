@@ -10,6 +10,8 @@
 #include <QDir>
 #include <QRegularExpression>
 #include <QFileInfo>
+#include <QFile>
+#include <QSet>
 #include <QColor>
 #include <QBrush>
 #include <QStandardPaths>
@@ -318,6 +320,57 @@ void VMPage::deleteVM()
 
 // ── 启动 ──
 
+// 检查 /etc/fstab 中是否还有 `mount -a` 需要处理的未就绪挂载点。
+// 全部已挂载时返回 false，此时无需触发 pkexec 提权。
+static bool fstabHasPendingMounts()
+{
+    // 1) 收集当前已挂载的挂载点
+    QSet<QString> mounted;
+    QFile mnt("/proc/self/mounts");
+    if (mnt.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        while (!mnt.atEnd()) {
+            const QString line = QString::fromUtf8(mnt.readLine()).trimmed();
+            if (line.isEmpty()) continue;
+            const QStringList f = line.split(' ', Qt::SkipEmptyParts);
+            if (f.size() < 2) continue;
+            QString mp = f[1];
+            // mount 表中的空格等转义字符还原
+            mp.replace("\\040", " ").replace("\\011", "\t")
+              .replace("\\012", "\n").replace("\\134", "\\");
+            const QFileInfo info(mp);
+            if (info.exists()) mp = info.canonicalFilePath();
+            mounted.insert(mp);
+        }
+    }
+
+    // 2) 遍历 fstab，凡是 mount -a 仍会尝试挂载的条目都算“未就绪”
+    QFile fstab("/etc/fstab");
+    if (!fstab.open(QIODevice::ReadOnly | QIODevice::Text))
+        return false;
+
+    const QRegularExpression ws("\\s+");
+    while (!fstab.atEnd()) {
+        const QString line = QString::fromUtf8(fstab.readLine()).trimmed();
+        if (line.isEmpty() || line.startsWith('#'))
+            continue;
+        const QStringList f = line.split(ws, Qt::SkipEmptyParts);
+        if (f.size() < 4) continue;
+        const QString &target = f[1];
+        const QString &type   = f[2];
+        const QString &opts   = f[3];
+
+        if (type == "swap") continue;              // swap 不参与挂载点检查
+        if (opts.split(',').contains("noauto")) continue; // mount -a 不会处理
+
+        QString mp = target;
+        const QFileInfo info(target);
+        if (info.exists()) mp = info.canonicalFilePath();
+        if (!mounted.contains(mp))
+            return true;                           // 还有未挂载的
+    }
+    return false;
+}
+
 void VMPage::startVM()
 {
     int row = m_table->currentRow();
@@ -334,25 +387,34 @@ void VMPage::startVM()
 
     // ── 等待挂载点（可选）──
     if (vm.waitMount) {
-        m_status->setText("🔄 正在尝试挂载所有 fstab 中未就绪的挂载点…");
+        m_status->setText("🔄 正在检查 fstab 中未就绪的挂载点…");
         QCoreApplication::processEvents();
 
-        // mount -a 自动挂载 fstab 中尚未挂载的设备
-        QProcess mountProc;
-        mountProc.start("pkexec", {"mount", "-a"});
-        if (mountProc.waitForFinished(30000)) {
-            if (mountProc.exitCode() == 0) {
-                QString mountOut = QString::fromUtf8(mountProc.readAllStandardOutput()).trimmed();
-                if (!mountOut.isEmpty())
-                    Logger::log("VM", QString("mount -a 输出: %1").arg(mountOut.left(500)));
-                Logger::log("VM", "✅ 等待挂载点完成");
+        // 只有确实存在未挂载的条目时才提权执行 mount -a；
+        // 全部就绪时直接跳过，避免每次都弹出授权框
+        if (fstabHasPendingMounts()) {
+            m_status->setText("🔄 检测到未就绪的挂载点，正在尝试挂载…");
+            QCoreApplication::processEvents();
+
+            // mount -a 自动挂载 fstab 中尚未挂载的设备
+            QProcess mountProc;
+            mountProc.start("pkexec", {"mount", "-a"});
+            if (mountProc.waitForFinished(30000)) {
+                if (mountProc.exitCode() == 0) {
+                    QString mountOut = QString::fromUtf8(mountProc.readAllStandardOutput()).trimmed();
+                    if (!mountOut.isEmpty())
+                        Logger::log("VM", QString("mount -a 输出: %1").arg(mountOut.left(500)));
+                    Logger::log("VM", "✅ 等待挂载点完成");
+                } else {
+                    QString err = QString::fromUtf8(mountProc.readAllStandardError()).trimmed();
+                    Logger::log("VM", QString("⚠️ mount -a 结果: exit=%1, err=%2")
+                        .arg(mountProc.exitCode()).arg(err.left(500)));
+                }
             } else {
-                QString err = QString::fromUtf8(mountProc.readAllStandardError()).trimmed();
-                Logger::log("VM", QString("⚠️ mount -a 结果: exit=%1, err=%2")
-                    .arg(mountProc.exitCode()).arg(err.left(500)));
+                Logger::log("VM", "⏰ mount -a 超时");
             }
         } else {
-            Logger::log("VM", "⏰ mount -a 超时");
+            Logger::log("VM", "✅ fstab 中所有挂载点已就绪，跳过提权挂载");
         }
         m_status->setText("✅ 挂载点检查完成，准备启动虚机…");
         QCoreApplication::processEvents();
@@ -525,14 +587,47 @@ void VMPage::stopVM()
         }
     } else {
         Logger::log("VM", QString("极速停止: %1").arg(vm.name));
-        // 直接杀 QEMU 进程
+        bool killed = false;
+
+        // 优先从跟踪表杀
         if (m_runningProcs.contains(vm.name)) {
-            m_runningProcs[vm.name]->kill();
-            m_runningProcs[vm.name]->waitForFinished(2000);
-        } else {
-            // 不在跟踪表中，用 pidof/pkill
-            QProcess::execute("pkill", {"-9", "-f",
-                QString("qemu.*-name.*%1").arg(QRegularExpression::escape(vm.name))});
+            QProcess *p = m_runningProcs[vm.name];
+            if (p->state() != QProcess::NotRunning) {
+                Logger::log("VM", QString("杀掉跟踪的 QEMU 进程 (PID %1)").arg(p->processId()));
+                p->kill();
+                p->waitForFinished(2000);
+                killed = true;
+            }
+            m_runningProcs.remove(vm.name);
+            p->deleteLater();
+        }
+
+        // 不在跟踪表中，用 ps 查找并杀掉 QEMU 进程
+        if (!killed) {
+            QProcess psProc;
+            psProc.start("ps", {"-ef"});
+            if (psProc.waitForFinished(3000)) {
+                QString output = QString::fromUtf8(psProc.readAllStandardOutput());
+                for (const auto &line : output.split('\n')) {
+                    if (line.contains("qemu-system-") && line.contains(vm.name) && line.contains("-name")) {
+                        QStringList fields = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+                        if (fields.size() >= 2) {
+                            int pid = fields[1].toInt();
+                            if (pid > 0) {
+                                Logger::log("VM", QString("杀掉 QEMU PID %1 (虚机 %2)").arg(pid).arg(vm.name));
+                                QProcess::execute("kill", {"-9", QString::number(pid)});
+                                killed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!killed) {
+            QString warn = QString("未找到虚机「%1」的 QEMU 进程，可能已退出").arg(vm.name);
+            Logger::log("VM", warn);
+            QMessageBox::warning(this, "极速停止", warn);
         }
     }
 
@@ -542,22 +637,56 @@ void VMPage::stopVM()
 void VMPage::sendQemuPowerdown(const QString &vmName)
 {
     QString sockPath = qmpSocketPath(vmName);
-
     auto *socket = new QLocalSocket(this);
     socket->connectToServer(sockPath, QIODevice::ReadWrite);
 
-    if (socket->waitForConnected(2000)) {
-        // QMP 协议: 先发送 capabilities 握手，再发送 system_powerdown
-        QByteArray cmd = R"({"execute":"qmp_capabilities"}
-{"execute":"system_powerdown"}
-)";
-        socket->write(cmd);
-        socket->waitForBytesWritten(1000);
-        socket->waitForReadyRead(1000);  // 读取响应（不关心内容）
-        socket->disconnectFromServer();
-    } else {
+    if (!socket->waitForConnected(2000)) {
         Logger::log("VM", QString("QMP socket 连接失败: %1").arg(sockPath));
+        socket->deleteLater();
+        return;
     }
+
+    // 1. 读取 QEMU 发送的 QMP 问候
+    if (!socket->waitForReadyRead(2000)) {
+        Logger::log("VM", "QMP 读取问候超时");
+        socket->disconnectFromServer();
+        socket->deleteLater();
+        return;
+    }
+    QByteArray greeting = socket->readAll();
+    Logger::log("VM", QString("QMP 问候: %1").arg(QString::fromUtf8(greeting.left(200))));
+
+    // 2. 发送 qmp_capabilities 握手
+    QByteArray capCmd = "{\"execute\":\"qmp_capabilities\"}\n";
+    socket->write(capCmd);
+    if (!socket->waitForBytesWritten(1000)) {
+        Logger::log("VM", "QMP 写入 capabilities 失败");
+        socket->disconnectFromServer();
+        socket->deleteLater();
+        return;
+    }
+    if (!socket->waitForReadyRead(2000)) {
+        Logger::log("VM", "QMP 读取 capabilities 响应超时");
+        socket->disconnectFromServer();
+        socket->deleteLater();
+        return;
+    }
+    QByteArray capResp = socket->readAll();
+    Logger::log("VM", QString("QMP capabilities 响应: %1").arg(QString::fromUtf8(capResp.left(200))));
+
+    // 3. 发送 system_powerdown
+    QByteArray pdCmd = "{\"execute\":\"system_powerdown\",\"id\":\"pd1\"}\n";
+    socket->write(pdCmd);
+    if (!socket->waitForBytesWritten(1000)) {
+        Logger::log("VM", "QMP 写入 system_powerdown 失败");
+    } else {
+        if (socket->waitForReadyRead(2000)) {
+            QByteArray pdResp = socket->readAll();
+            Logger::log("VM", QString("QMP system_powerdown 响应: %1").arg(QString::fromUtf8(pdResp.left(200))));
+        }
+    }
+
+    socket->disconnectFromServer();
     socket->deleteLater();
 }
 

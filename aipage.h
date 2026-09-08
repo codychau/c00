@@ -82,6 +82,8 @@ private:
     void readServiceFile(int idx);
     void applyService(int idx);
     void applyProcess(int idx);
+    bool skipLlamaArg(const ParamDef &p);
+    void removeLlamaArg(QString &content, const ParamDef &p);
     void updateControlStates(int idx);
     void runCmd(const QString &cmd, const QStringList &args,
                 std::function<void(const QString &, int)> cb);
@@ -108,6 +110,7 @@ private:
     QCheckBox *m_modelChangeCheckbox;
     QComboBox *m_modelChangeDropdown;
     QCheckBox *m_openclawFormatCheckbox;
+    QCheckBox *m_modelShortnameCheckbox;
 };
 
 #endif

@@ -23,6 +23,7 @@ private slots:
     void refresh();
     void onStartStop();
     void filterServices(const QString &text);
+    void onEditService(const QString &name, const QString &scope);
 
 protected:
     void showEvent(QShowEvent *event) override;

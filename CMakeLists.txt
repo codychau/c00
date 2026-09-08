@@ -37,12 +37,16 @@ add_executable(server-toolbox
     aipage.h
     servicepage.cpp
     servicepage.h
+    serviceeditdialog.cpp
+    serviceeditdialog.h
     aboutpage.cpp
     aboutpage.h
     logger.cpp
     logger.h
     logpage.cpp
     logpage.h
+    shutdowndialog.cpp
+    shutdowndialog.h
 )
 
 target_link_libraries(server-toolbox PRIVATE

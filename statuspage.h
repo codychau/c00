@@ -35,6 +35,8 @@ private:
     QTableWidget *m_diskTable;
     QLabel *m_diskStatus;
     QPushButton *m_tempBtn;
+    QPushButton *m_shutdownBtn;
+    QPushButton *m_restartBtn;
     QTimer *m_timer;
     bool m_disksInited = false;
     bool m_hasShown = false;

@@ -6,13 +6,16 @@ use hyper::{Request, Response};
 use serde_json::Value;
 use std::io::Read;
 use std::net::{SocketAddr, TcpStream};
+use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 
-const UPSTREAM_HOST: &str = "127.0.0.1";
+const MIN_MODEL_MATCH_LEN: usize = 10;
+const MODEL_LIST_TTL_SECS: u64 = 30;
 
 const STRIP_KEYS: &[&str] = &[
     "pattern",
@@ -50,6 +53,8 @@ struct AppState {
     service_type: Option<String>,
     service_svc: Option<String>,
     model_change_action: Option<String>,
+    model_shortname_match: bool,
+    model_list_cache: Mutex<(Instant, Vec<String>)>,
     current_model: Mutex<String>,
     switch_in_progress: AtomicBool,
     switch_notify: Notify,
@@ -108,6 +113,173 @@ fn find_model_file(base_path: &str, model_id: &str) -> Result<String, String> {
     Err(format!("model `{}` not found in `{}`", model_id, base_path))
 }
 
+fn scan_model_files(base_path: &str) -> Vec<String> {
+    fn walk(dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                walk(&p, out);
+            } else if p.is_file() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if [".gguf", ".ggml", ".safetensors", ".bin"]
+                    .iter()
+                    .any(|ext| name.ends_with(ext))
+                {
+                    out.push(p.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+
+    let mut ids = Vec::new();
+    walk(Path::new(base_path), &mut ids);
+    ids
+}
+
+async fn get_known_model_ids(state: &AppState, upstream_host: &str) -> Vec<String> {
+    {
+        let cache = state.model_list_cache.lock().await;
+        if !cache.1.is_empty() && cache.0.elapsed().as_secs() < MODEL_LIST_TTL_SECS {
+            return cache.1.clone();
+        }
+    }
+
+    let mut ids = Vec::new();
+
+    if let Some(ref bp) = state.model_base_path {
+        let bp = bp.clone();
+        if let Ok(files) = tokio::task::spawn_blocking(move || scan_model_files(&bp)).await {
+            ids.extend(files);
+        }
+    }
+
+    let url = format!(
+        "http://{}:{}/v1/models",
+        upstream_host, state.upstream_port
+    );
+    if let Ok(res) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        hyper::Client::new().get(url.parse().unwrap()),
+    )
+    .await
+    {
+        if let Ok(res) = res {
+            if res.status() == 200 {
+                if let Ok(bytes) = hyper::body::to_bytes(res.into_body()).await {
+                    if let Ok(val) = serde_json::from_slice::<Value>(&bytes) {
+                        if let Some(data) = val.get("data").and_then(|d| d.as_array()) {
+                            for item in data {
+                                if let Some(id) = item.get("id").and_then(|i| i.as_str()) {
+                                    ids.push(id.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    ids.sort();
+    ids.dedup();
+    *state.model_list_cache.lock().await = (Instant::now(), ids.clone());
+    ids
+}
+
+fn is_model_match(full: &str, short: &str) -> bool {
+    if full == short {
+        return true;
+    }
+    if full.ends_with(short) {
+        return true;
+    }
+    let base = Path::new(full)
+        .file_name()
+        .map(|b| b.to_string_lossy().to_string())
+        .unwrap_or_default();
+    if base == short {
+        return true;
+    }
+    if base.ends_with(short) {
+        return true;
+    }
+    if let Some(wit) = base.strip_suffix(".gguf").or_else(|| base.strip_suffix(".ggml")) {
+        if wit == short || wit.ends_with(short) {
+            return true;
+        }
+    }
+    false
+}
+
+// Expand a short model name/suffix (>= MIN_MODEL_MATCH_LEN chars) to the full
+// model ID. Multiple candidates choose the shortest full ID.
+fn resolve_full_model(ids: &[String], short: &str) -> Option<String> {
+    if short.len() < MIN_MODEL_MATCH_LEN {
+        return None;
+    }
+    let mut candidates: Vec<String> = ids
+        .iter()
+        .filter(|id| is_model_match(id, short))
+        .cloned()
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    match candidates.len() {
+        0 => None,
+        1 => Some(candidates.remove(0)),
+        _ => {
+            candidates.sort_by_key(|a| a.len());
+            Some(candidates.remove(0))
+        }
+    }
+}
+
+// Non-destructive rewrite of the GET /v1/models response: for every model
+// id containing a directory path (i.e. has "/"), also advertise an extra id
+// which is the part after the last slash (the short basename). Long ids
+// without directory depth are left untouched.
+fn inject_short_model_ids(parsed: &mut Value) -> bool {
+    let Some(data) = parsed.get_mut("data").and_then(|d| d.as_array_mut()) else {
+        return false;
+    };
+    let mut known: Vec<String> = data
+        .iter()
+        .filter_map(|item| item.get("id").and_then(|i| i.as_str()))
+        .map(|s| s.to_string())
+        .collect();
+
+    let mut injections = Vec::new();
+    for item in data.iter() {
+        let Some(id) = item.get("id").and_then(|i| i.as_str()) else { continue };
+        let Some(slash) = id.rfind('/') else { continue };
+        let short = &id[slash + 1..];
+        if short.is_empty() {
+            continue;
+        }
+        if known.iter().any(|k| k == short) {
+            continue;
+        }
+        let mut new_item = item.clone();
+        new_item["id"] = Value::String(short.to_string());
+        if let Some(aliases) = new_item.get_mut("aliases").and_then(|a| a.as_array_mut()) {
+            for alias in aliases.iter_mut() {
+                if alias.as_str() == Some(id) {
+                    *alias = Value::String(short.to_string());
+                }
+            }
+        }
+        injections.push(new_item);
+        known.push(short.to_string());
+    }
+
+    if injections.is_empty() {
+        return false;
+    }
+    data.splice(0..0, injections);
+    true
+}
+
 fn replace_flag(flags: &[&str], old_val: &str, new_val: &str, content: &str) -> Result<String, String> {
     for flag in flags {
         let search = format!("{} {}", flag, old_val);
@@ -158,8 +330,8 @@ fn restart_service(svc_name: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn wait_upstream(port: u16) -> Result<(), String> {
-    let addr = format!("127.0.0.1:{}", port);
+fn wait_upstream(port: u16, upstream_host: &str) -> Result<(), String> {
+    let addr = format!("{}:{}", upstream_host, port);
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
     let mut tried = 0;
     loop {
@@ -171,7 +343,7 @@ fn wait_upstream(port: u16) -> Result<(), String> {
                 std::time::Duration::from_secs(5),
             )?;
             use std::io::Write;
-            stream.write_all(b"GET /health HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")?;
+            stream.write_all(&format!("GET /health HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n", upstream_host).as_bytes())?;
             let mut buf = [0u8; 4096];
             let n = stream.read(&mut buf).unwrap_or(0);
             let resp = String::from_utf8_lossy(&buf[..n]);
@@ -200,6 +372,7 @@ fn perform_switch_blocking(
     svc_type: &str,
     upstream_port: u16,
     retry_ngl: bool,
+    upstream_host: &str,
 ) -> Result<(), String> {
     let model_path = find_model_file(base_path, new_model)?;
 
@@ -248,7 +421,7 @@ fn perform_switch_blocking(
                 }
                 restart_service(svc_name)?;
                 eprintln!("[proxy] {} restarted with model {}", svc_name, model_path);
-                wait_upstream(upstream_port)?;
+                wait_upstream(upstream_port, upstream_host)?;
                 return Ok(());
             }
         }
@@ -265,7 +438,7 @@ fn perform_switch_blocking(
             .map_err(|e| format!("sudo restart: {}", e))?;
         if r.status.success() {
             eprintln!("[proxy] {} (root) restarted with model {}", svc_name, model_path);
-            wait_upstream(upstream_port)?;
+            wait_upstream(upstream_port, upstream_host)?;
             return Ok(());
         }
         return Err(format!("service file not found and root restart failed for {}", svc_name));
@@ -311,7 +484,7 @@ fn perform_switch_blocking(
         restart_service(svc_name)?;
         eprintln!("[proxy] {} restarted (attempt {})", svc_name, attempt + 1);
 
-        match wait_upstream(upstream_port) {
+        match wait_upstream(upstream_port, upstream_host) {
             Ok(()) => return Ok(()),
             Err(e) => {
                 if attempt + 1 >= max_attempts {
@@ -362,9 +535,10 @@ async fn handle_model_switch(state: Arc<AppState>, new_model: String) {
             let (tx, rx) = tokio::sync::oneshot::channel::<Result<(), String>>();
 
             tokio::spawn(async move {
+                let upstream_host_env = std::env::var("UPSTREAM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
                 let result = tokio::task::spawn_blocking(move || {
                     perform_switch_blocking(
-                        &base_path, &new_model_clone, &svc_name, &svc_type, up_port, retry_ngl,
+                        &base_path, &new_model_clone, &svc_name, &svc_type, up_port, retry_ngl, &upstream_host_env,
                     )
                 })
                 .await
@@ -430,6 +604,21 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string());
 
+            if state.model_shortname_match {
+                if let Some(short) = request_model.clone() {
+                    let upstream_host = std::env::var("UPSTREAM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+                    let ids = get_known_model_ids(&state, &upstream_host).await;
+                    if let Some(full) = resolve_full_model(&ids, &short) {
+                        if full != short {
+                            eprintln!("[proxy] model resolved: {} → {}", short, full);
+                            parsed["model"] = Value::String(full.clone());
+                            modified = true;
+                            request_model = Some(full);
+                        }
+                    }
+                }
+            }
+
             if let Some(response_format) = parsed.get_mut("response_format") {
                 if let Some(type_val) = response_format.get("type") {
                     if type_val == "json_schema" {
@@ -466,7 +655,9 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
     }
 
     let client = hyper::Client::new();
-    let upstream_addr = format!("{}:{}", UPSTREAM_HOST, state.upstream_port);
+    let upstream_host = std::env::var("UPSTREAM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let upstream_port = std::env::var("UPSTREAM_PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(8082);
+    let upstream_addr = format!("{}:{}", upstream_host, upstream_port);
     let upstream_url = format!("http://{}{}", upstream_addr, uri_path);
 
     let body_bytes: Vec<u8> = if let Some(ref s) = body_modified {
@@ -479,8 +670,7 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
         for retry in 0..5 {
             let mut upstream_req_builder = Request::builder()
                 .method(method.clone())
-                .uri(&upstream_url)
-                .header("host", UPSTREAM_HOST);
+                .uri(&upstream_url);
 
             for (header_key, header_value) in headers_map.iter() {
                 let key_str = header_key.to_string();
@@ -488,6 +678,7 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
                     upstream_req_builder = upstream_req_builder.header(header_key, header_value);
                 }
             }
+            upstream_req_builder = upstream_req_builder.header("host", &upstream_host);
             upstream_req_builder = upstream_req_builder.header("content-length", body_bytes.len().to_string());
 
             match client.request(upstream_req_builder.body(Body::from(body_bytes.clone())).unwrap()).await {
@@ -510,17 +701,36 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let res_body_bytes = hyper::body::to_bytes(res.into_body()).await.unwrap_or_default();
+    let mut res_body_bytes = hyper::body::to_bytes(res.into_body()).await.unwrap_or_default();
 
     if status >= 400 {
         let body_str = String::from_utf8_lossy(&res_body_bytes);
         eprintln!("[proxy] {} {}: {}", status, upstream_addr, body_str.chars().take(300).collect::<String>());
     }
 
+    if status == 200 && uri_path == "/v1/models" {
+        if let Ok(mut parsed) = serde_json::from_slice::<Value>(&res_body_bytes) {
+            if inject_short_model_ids(&mut parsed) {
+                if let Ok(new_bytes) = serde_json::to_vec(&parsed) {
+                    res_body_bytes = new_bytes.into();
+                    eprintln!("[proxy] /v1/models injected short model ids");
+                }
+            }
+        }
+    }
+
     let mut res_builder = Response::builder().status(status);
     for (header_key, header_value) in res_headers.iter() {
+        let key_str = header_key.as_str();
+        // Body is fully buffered and re-sent with a fresh content-length;
+        // forwarding the upstream transfer-encoding (e.g. chunked for SSE)
+        // alongside content-length makes hyper reject the response.
+        if key_str == "content-length" || key_str == "transfer-encoding" {
+            continue;
+        }
         res_builder = res_builder.header(header_key, header_value);
     }
+    res_builder = res_builder.header("content-length", res_body_bytes.len());
 
     let res = res_builder.body(Body::from(res_body_bytes)).unwrap();
 
@@ -535,6 +745,7 @@ async fn main() {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8084);
 
+    let upstream_host = std::env::var("UPSTREAM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let upstream_port: u16 = std::env::var("UPSTREAM_PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -548,10 +759,11 @@ async fn main() {
     let service_type: Option<String> = std::env::var("SERVICE_TYPE").ok();
     let service_svc: Option<String> = std::env::var("SERVICE_SVC").ok();
     let model_change_action: Option<String> = std::env::var("MODEL_CHANGE_ACTION").ok();
+    let model_shortname_match: bool = std::env::var("MODEL_SHORTNAME_MATCH").ok().filter(|s| s == "true").is_some();
 
     let addr: SocketAddr = format!("{}:{}", bind_host, bind_port).parse().unwrap();
 
-    println!("proxy on {}:{} → {}:{}", bind_host, bind_port, UPSTREAM_HOST, upstream_port);
+    println!("proxy on {}:{} → {}:{}", bind_host, bind_port, upstream_host, upstream_port);
     if let Some(ref mbp) = model_base_path {
         println!("  model_base_path: {}", mbp);
     }
@@ -576,6 +788,9 @@ async fn main() {
     if let Some(ref mca) = model_change_action {
         println!("  model_change_action: {}", mca);
     }
+    if model_shortname_match {
+        println!("  model_shortname_match: true");
+    }
 
     let initial_model = model_name.unwrap_or_default();
 
@@ -585,6 +800,8 @@ async fn main() {
         service_type,
         service_svc,
         model_change_action,
+        model_shortname_match,
+        model_list_cache: Mutex::new((Instant::now(), Vec::new())),
         current_model: Mutex::new(initial_model),
         switch_in_progress: AtomicBool::new(false),
         switch_notify: Notify::new(),

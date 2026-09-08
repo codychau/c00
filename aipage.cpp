@@ -164,6 +164,16 @@ AIPage::AIPage(QWidget *parent)
     openclawRow->addStretch();
     degradeLayout->addLayout(openclawRow);
 
+    // Model shortname auto recognition row with checkbox
+    auto *shortnameRow = new QHBoxLayout();
+    m_modelShortnameCheckbox = new QCheckBox();
+    shortnameRow->addWidget(m_modelShortnameCheckbox);
+    auto *shortnameLabel = new QLabel("自动对模型简称或依赖后缀进行识别");
+    shortnameLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    shortnameRow->addWidget(shortnameLabel);
+    shortnameRow->addStretch();
+    degradeLayout->addLayout(shortnameRow);
+
     layout->addWidget(m_degradeGroup);
 
     // define 4 services
@@ -224,6 +234,7 @@ AIPage::AIPage(QWidget *parent)
     connect(m_modelChangeCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
     connect(m_modelChangeDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
     connect(m_openclawFormatCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
+    connect(m_modelShortnameCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
 
     refresh();
 }
@@ -283,7 +294,6 @@ void AIPage::buildCard(int idx)
             a("top-p",              "top-p",             "Top-P",          WT_Double, "0.95", 0, 0, 0, 1.0, 2, 0.05),
             a("min-p",              "min-p",             "Min-P",          WT_Double, "0.05", 0, 0, 0, 1.0, 2, 0.05),
             a("typical-p",          "typical",           "Typical-P",      WT_Double, "1.00", 0, 0, 0, 1.0, 2, 0.05),
-            a("tfs-z",              "tfs-z",             "TFS-Z",          WT_Double, "1.00", 0, 0, 0, 10.0, 2, 0.1),
             a("seed",               "s",                 "随机种子",       WT_Int,    "-1", -1, 2147483647),
             a("mirostat",           "mirostat",          "Mirostat 模式",  WT_Int,    "0",    0, 2),
             a("mirostat-lr",        "mirostat-lr",       "Mirostat 学习率", WT_Double, "0.10", 0, 0, 0, 1.0, 2, 0.05),
@@ -306,7 +316,7 @@ void AIPage::buildCard(int idx)
             a("no-mmap",             "nmmap", "禁用内存映射",        WT_String, "off",  0, 0, 0, 0, 0, 0,
                {"off", "on"}, true),
             a("numa",                "numa",  "NUMA 优化",           WT_String, "off",  0, 0, 0, 0, 0, 0,
-               {"off", "distribute", "isolate", "numactl"}),
+               {"off", "distribute", "isolate"}),
 
             // ── 推测解码 ──
             a("spec-type",                "spec-type",           "推测解码类型",     WT_String, "none", 0, 0, 0, 0, 0, 0,
@@ -816,6 +826,14 @@ void AIPage::applyService(int idx)
     QString flat = content;
     flat.replace(QRegularExpression(R"(\\\s*\n\s*)"), " ");
 
+    // Strip llama.cpp flags that were removed upstream so stale configs
+    // do not keep breaking the service.
+    if (idx == 1) {
+        QString tfs = QStringLiteral(R"re(\s*--tfs-z\s+\S+)re");
+        content.remove(QRegularExpression(tfs));
+        flat.remove(QRegularExpression(tfs));
+    }
+
     bool isOllama = (idx == 0);
 
     for (const auto &p : card.paramDefs) {
@@ -897,6 +915,14 @@ void AIPage::applyService(int idx)
             }
 
             // ── Value-based param: --key value ──
+            // llama.cpp: drop off/invalid/empty options (e.g. --numa off,
+            // blank --model-draft) instead of emitting a broken command line.
+            if (idx == 1 && skipLlamaArg(p)) {
+                removeLlamaArg(content, p);
+                removeLlamaArg(flat, p);
+                continue;
+            }
+
             QString replacement = QStringLiteral(
                 "--%1 %2").arg(p.key, newVal);
             bool found = false;
@@ -1013,6 +1039,7 @@ void AIPage::applyProcess(int idx)
                 QStringList args;
                 args << "llama-server";
                 for (const auto &p : c2.paramDefs) {
+                    if (skipLlamaArg(p)) continue;
                     args << QString("--%1").arg(p.key);
                     args << getParamValue(p);
                 }
@@ -1044,6 +1071,36 @@ void AIPage::applyProcess(int idx)
             QTimer::singleShot(2000, this, &AIPage::refresh);
         });
     });
+}
+
+// ──────────────────────────────────────────────────────────
+//  llama.cpp param helpers
+// ──────────────────────────────────────────────────────────
+
+// Options that must not be written into the command line: flags removed
+// upstream (--tfs-z), invalid values (--numa off), or empty values such
+// as a blank draft model path (--model-draft).
+bool AIPage::skipLlamaArg(const ParamDef &p)
+{
+    if (p.key == "tfs-z") return true;
+    QString v = getParamValue(p).trimmed();
+    if (v.isEmpty()) return true;
+    if (p.key == "numa" && v == "off") return true;
+    return false;
+}
+
+// Strip an existing "--key value" (or short form) occurrence so old
+// configs are healed instead of keeping broken args around.
+void AIPage::removeLlamaArg(QString &content, const ParamDef &p)
+{
+    QStringList pats;
+    pats << QStringLiteral(R"re(\s*--%1\s+\S+)re")
+                .arg(QRegularExpression::escape(p.key));
+    if (!p.shortKey.isEmpty() && p.shortKey != p.key)
+        pats << QStringLiteral(R"re(\s-%1\s+\S+)re")
+                    .arg(QRegularExpression::escape(p.shortKey));
+    for (const auto &pat : pats)
+        content.remove(QRegularExpression(pat));
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1180,6 +1237,7 @@ void AIPage::saveAIConfig()
     root.emplace("model_change_checked", m_modelChangeCheckbox->isChecked());
     root.emplace("model_change_action", m_modelChangeDropdown->currentText().toStdString());
     root.emplace("openclaw_format", m_openclawFormatCheckbox->isChecked());
+    root.emplace("model_shortname_match", m_modelShortnameCheckbox->isChecked());
 
     QString path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/ai.toml";
     QDir().mkpath(QFileInfo(path).absolutePath());
@@ -1219,6 +1277,8 @@ void AIPage::loadAIConfig()
         }
         if (auto *v = tbl.get("openclaw_format"))
             m_openclawFormatCheckbox->setChecked(v->value_or(false));
+        if (auto *v = tbl.get("model_shortname_match"))
+            m_modelShortnameCheckbox->setChecked(v->value_or(false));
     } catch (const toml::parse_error &) {
     }
 }
@@ -1238,6 +1298,7 @@ void AIPage::generateServiceFile(bool rootUser)
     bool modelChangeChecked = m_modelChangeCheckbox->isChecked();
     QString modelChangeAction = m_modelChangeDropdown->currentText();
     bool openclawFormatChecked = m_openclawFormatCheckbox->isChecked();
+    bool modelShortnameChecked = m_modelShortnameCheckbox->isChecked();
 
     // Detect running AI service for upstream port, type, and service name
     QString upstreamPort = "8082"; // default fallback
@@ -1307,6 +1368,9 @@ void AIPage::generateServiceFile(bool rootUser)
     }
     if (openclawFormatChecked) {
         serviceContent += "Environment=OPENCLAW_FORMAT=true\n";
+    }
+    if (modelShortnameChecked) {
+        serviceContent += "Environment=MODEL_SHORTNAME_MATCH=true\n";
     }
     serviceContent += "ExecStart=" + QDir::homePath() + "/.local/bin/llama-proxy\n";
     serviceContent += "Restart=on-failure\n\n";
