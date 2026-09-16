@@ -12,6 +12,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QFile>
+#include <QTemporaryFile>
+#include <QLineEdit>
+#include <QMessageBox>
+#include <QInputDialog>
 
 // ── 列索引 ──
 enum DiskCol { ColDev = 0, ColModel, ColTemp, ColSize, ColUsed, ColMount, ColDiskCount };
@@ -154,14 +159,14 @@ void StatusPage::showEvent(QShowEvent *event)
 }
 
 // ── 获取单块盘的温度 ──
-static void fetchDiskTemp(const QString &devName, int tableRow,
-                          QTableWidget *table, QLabel *status)
+void StatusPage::fetchDiskTemp(const QString &devName, int tableRow)
 {
     QString devPath = QString("/dev/%1").arg(devName);
+    const QString cacheKey = devName;
 
     auto *proc = new QProcess();
     QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                     proc, [proc, devName, devPath, table, row = tableRow, status](
+                     proc, [proc, devName, devPath, row = tableRow, cacheKey, this](
                                int, QProcess::ExitStatus) {
         proc->deleteLater();
 
@@ -176,9 +181,11 @@ static void fetchDiskTemp(const QString &devName, int tableRow,
         }
 
         // ATA: Temperature_Celsius + raw value
+        //  194 Temperature_Celsius     0x0022   107   100   000    Old_age   Always   -       45
+        //  末尾为温度值，且可能带 (Min/Max …) 后缀
         if (tempStr.isEmpty()) {
             static QRegularExpression ataRe(
-                R"(Temperature_Celsius\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+))");
+                R"(Temperature_Celsius\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+(-?\d+))");
             auto am = ataRe.match(out);
             if (am.hasMatch()) {
                 tempStr = QString("%1°C").arg(am.captured(1));
@@ -196,7 +203,7 @@ static void fetchDiskTemp(const QString &devName, int tableRow,
 
         if (tempStr.isEmpty()) tempStr = "N/A";
 
-        if (auto *item = table->item(row, ColTemp)) {
+        if (auto *item = m_diskTable->item(row, ColTemp)) {
             item->setText(tempStr);
             // 高温警告
             int degreePos = tempStr.indexOf(QString("°"));
@@ -208,18 +215,87 @@ static void fetchDiskTemp(const QString &devName, int tableRow,
                     item->setForeground(QColor("#eab308"));
             }
         }
+        m_tempCache[cacheKey] = tempStr;
     });
-    proc->start("pkexec", {"smartctl", "-A", devPath});
+    proc->start("sudo", {"-n", "smartctl", "-A", devPath});
+}
+
+bool StatusPage::hasPasswordlessSmartctl() const
+{
+    QProcess check;
+    check.start("sudo", {"-n", "smartctl", "-V"});
+    if (!check.waitForFinished(5000)) return false;
+    return check.exitStatus() == QProcess::NormalExit && check.exitCode() == 0;
+}
+
+bool StatusPage::setupSmartctlSudo(const QString &password)
+{
+    QString user = qEnvironmentVariable("USER");
+    if (user.isEmpty()) user = "root";
+    QString content = QString("%1 ALL=(root) NOPASSWD: /usr/bin/smartctl\n").arg(user);
+
+    auto *tmp = new QTemporaryFile("/tmp/smartctl-sudoers-XXXXXX", this);
+    tmp->setAutoRemove(true);
+    if (!tmp->open()) return false;
+    tmp->write(content.toUtf8());
+    tmp->flush();
+    QString tmpPath = tmp->fileName();
+    tmp->close();
+
+    QString cmd = QString("install -o root -g root -m 0440 '%1' /etc/sudoers.d/smartctl")
+                      .arg(tmpPath);
+
+    QProcess p;
+    p.setProcessChannelMode(QProcess::MergedChannels);
+    p.start("sudo", {"-S", "-k", "-p", "", "sh", "-c", cmd});
+    if (!p.waitForStarted(5000)) return false;
+    p.write((password + "\n").toUtf8());
+    p.closeWriteChannel();
+    if (!p.waitForFinished(15000)) return false;
+    QString errOut = QString::fromUtf8(p.readAll()).trimmed();
+    bool ok = p.exitCode() == 0;
+
+    // 无论成败都清理临时文件
+    QFile::remove(tmpPath);
+    delete tmp;
+
+    if (!ok) {
+        QMessageBox::warning(this, "智能磁盘免密配置失败",
+            QString("无法写入 /etc/sudoers.d/smartctl。\n\n%1").arg(errOut));
+        return false;
+    }
+    m_smartSetupDone = true;
+    m_diskStatus->setText("✅ 已配置 smartctl 免密读取");
+    return true;
 }
 
 void StatusPage::fetchAllTemps()
 {
+    // 首次：若 sudo -n smartctl 不可用，则询问一次管理员密码并配置免密
+    if (!m_smartSetupDone && !m_smartSetupAsked) {
+        m_smartSetupAsked = true;
+
+        if (hasPasswordlessSmartctl()) {
+            m_smartSetupDone = true; // 已配置过，直接读取
+        } else {
+            bool ok = false;
+            QString password = QInputDialog::getText(
+                this, "首次授权（一次性）",
+                "读取硬盘温度需要调用 smartctl。\n"
+                "请输入管理员(root)密码，将自动配置免密权限（仅一次），\n"
+                "之后每次打开本软件都能直接显示硬盘温度。",
+                QLineEdit::Password, QString(), &ok);
+            if (ok) setupSmartctlSudo(password);
+            else m_diskStatus->setText("未授权，硬盘温度可能无法读取");
+        }
+    }
+
     m_diskStatus->setText("读取温度中…");
     for (int i = 0; i < m_diskTable->rowCount(); ++i) {
         auto *item = m_diskTable->item(i, ColDev);
         if (item) {
             m_diskTable->setItem(i, ColTemp, new QTableWidgetItem("…"));
-            fetchDiskTemp(item->text(), i, m_diskTable, m_diskStatus);
+            fetchDiskTemp(item->text(), i);
         }
     }
 }
@@ -371,7 +447,9 @@ void StatusPage::refresh()
             const auto &d = disks[i];
             m_diskTable->setItem(i, ColDev,   new QTableWidgetItem(d.name));
             m_diskTable->setItem(i, ColModel, new QTableWidgetItem(d.model.isEmpty() ? "—" : d.model));
-            m_diskTable->setItem(i, ColTemp,  new QTableWidgetItem("…"));
+            // 优先复用缓存的温度，避免每次刷新清空
+            m_diskTable->setItem(i, ColTemp,  new QTableWidgetItem(
+                m_tempCache.value(d.name, "…")));
             m_diskTable->setItem(i, ColSize,  new QTableWidgetItem(d.size));
 
             // 已用空间 / 挂载点：用 df 取
@@ -383,6 +461,12 @@ void StatusPage::refresh()
         }
 
         m_diskStatus->setText(QString("共 %1 块物理磁盘").arg(disks.size()));
+
+        // 首次检测到磁盘后自动读取一次温度（含一次性免密授权）
+        if (!m_disksInited) {
+            m_disksInited = true;
+            fetchAllTemps();
+        }
 
         // 已用空间：定时刷新（df 轻量，不需要 root）
         for (int i = 0; i < disks.size(); ++i) {
