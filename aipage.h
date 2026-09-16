@@ -111,6 +111,11 @@ private:
     QComboBox *m_modelChangeDropdown;
     QCheckBox *m_openclawFormatCheckbox;
     QCheckBox *m_modelShortnameCheckbox;
+
+    // GPU 高温保护（自动降级规则）
+    QCheckBox *m_gpuTempGuardCheckbox;
+    QComboBox *m_gpuTempGuardDropdown;
+    void populateGpuDropdown();  // 用 lspci 填充 GPU 下拉
 };
 
 #endif

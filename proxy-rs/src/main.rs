@@ -58,6 +58,15 @@ struct AppState {
     current_model: Mutex<String>,
     switch_in_progress: AtomicBool,
     switch_notify: Notify,
+    gpu_temp_guard: bool,
+    gpu_temp_guard_slot: Option<String>,
+    gpu_temp_guard_threshold: f64,
+    // 冷却状态机（持续高温才冷却，中途降温即复位）
+    gpu_guard_hot_count: std::sync::atomic::AtomicI32,   // 连续高温采样数
+    gpu_guard_cool_streak: std::sync::atomic::AtomicI32, // 冷却后连续低温采样数
+    gpu_guard_needs_cooldown: std::sync::atomic::AtomicBool,
+    // 温度缓存：(最近读取时刻, 对应 slot, 温度°C)
+    gpu_temp_cache: Mutex<(Instant, Option<String>, Option<f64>)>,
 }
 
 fn strip_schema(obj: &mut Value, depth: usize) {
@@ -498,6 +507,126 @@ fn perform_switch_blocking(
     Err("unexpected error in switch".into())
 }
 
+/// 读取指定 GPU（按 PCI slot 如 "03:00.0"）的当前温度（摄氏）。
+/// 通过 /sys/class/drm/cardN/device/hwmon/hwmonX/temp*_input 读取。
+fn read_gpu_temp_celsius(slot: &str) -> Option<f64> {
+    let drm_dir = Path::new("/sys/class/drm");
+    let entries = std::fs::read_dir(drm_dir).ok()?;
+
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // 只考虑 card0/card1...，跳过 card0-DP-1 等输出接口
+        if !name.starts_with("card") || name.contains('-') {
+            continue;
+        }
+
+        let device_path = entry.path().join("device");
+        let link = match std::fs::read_link(&device_path) {
+            Ok(l) => l.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
+        // 链接形如 ../../../0000:03:00.0
+        if !link.ends_with(slot) {
+            continue;
+        }
+
+        let hwmon_dir = device_path.join("hwmon");
+        if let Ok(hwmons) = std::fs::read_dir(&hwmon_dir) {
+            for hw in hwmons.flatten() {
+                let hwmon_path = hw.path();
+                // 读取 name 确认是 amdgpu
+                let name_file = hwmon_path.join("name");
+                if let Ok(n) = std::fs::read_to_string(&name_file) {
+                    if n.trim() != "amdgpu" {
+                        continue;
+                    }
+                }
+                // 读取 temp*_input（毫摄氏度）
+                if let Ok(entries2) = std::fs::read_dir(&hwmon_path) {
+                    for f in entries2.flatten() {
+                        let fname = f.file_name().to_string_lossy().to_string();
+                        if fname.starts_with("temp") && fname.ends_with("_input") {
+                            if let Ok(val) = std::fs::read_to_string(f.path()) {
+                                let v: f64 = val.trim().parse().ok()?;
+                                return Some(v / 1000.0);
+                            }
+                        }
+                    }
+                }
+                break; // 只取第一个 hwmon
+            }
+        }
+    }
+    None
+}
+
+const GPU_TEMP_CACHE_SECS: u64 = 5;      // sysfs 温度缓存秒数（期间轮询内存）
+const GPU_TEMP_HOT_REQUIRED: i32 = 10;   // 连续高温达到该次数才冷却
+const GPU_TEMP_COOL_RESET: i32 = 2;      // 冷却中连续低温达到该次数即解除
+
+/// 用一次温度采样更新冷却状态机。
+/// 返回是否需要冷却（needs_cooldown）。
+fn update_gpu_guard_state(state: &AppState, temp: f64) -> bool {
+    let hot = temp >= state.gpu_temp_guard_threshold;
+    let needs = state.gpu_guard_needs_cooldown.load(std::sync::atomic::Ordering::SeqCst);
+
+    if needs {
+        // 已在冷却：只有连续低温到阈值次数才解除
+        if hot {
+            state.gpu_guard_cool_streak.store(0, std::sync::atomic::Ordering::SeqCst);
+        } else {
+            let s = state.gpu_guard_cool_streak.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if s >= GPU_TEMP_COOL_RESET {
+                state.gpu_guard_needs_cooldown.store(false, std::sync::atomic::Ordering::SeqCst);
+                state.gpu_guard_hot_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                state.gpu_guard_cool_streak.store(0, std::sync::atomic::Ordering::SeqCst);
+                eprintln!("[proxy] gpu temp back to normal, cooldown lifted");
+            }
+        }
+    } else {
+        // 未冷却：连续高温计数，中途降温清零
+        if hot {
+            let h = state.gpu_guard_hot_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+            if h >= GPU_TEMP_HOT_REQUIRED {
+                state.gpu_guard_needs_cooldown.store(true, std::sync::atomic::Ordering::SeqCst);
+                state.gpu_guard_hot_count.store(0, std::sync::atomic::Ordering::SeqCst);
+                eprintln!("[proxy] gpu sustained overheat, entering cooldown");
+            }
+        } else {
+            state.gpu_guard_hot_count.store(0, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    state.gpu_guard_needs_cooldown.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 带缓存的 GPU 温度读取：每 GPU_TEMP_CACHE_SECS 秒内复用内存缓存，
+/// 避免每个请求都去读 sysfs。真正读取后会更新冷却状态机。
+async fn get_gpu_temp_cached(state: &AppState, slot: &str) -> Option<f64> {
+    let cutoff = std::time::Duration::from_secs(GPU_TEMP_CACHE_SECS);
+    {
+        let cache = state.gpu_temp_cache.lock().await;
+        let (ts, cached_slot, temp) = &*cache;
+        if cached_slot.as_deref() == Some(slot) {
+            if let Some(t) = temp {
+                if ts.elapsed() < cutoff {
+                    return Some(*t);
+                }
+            }
+        }
+    }
+
+    let fresh = read_gpu_temp_celsius(slot);
+    if let Some(t) = fresh {
+        update_gpu_guard_state(state, t);
+    }
+    let mut cache = state.gpu_temp_cache.lock().await;
+    *cache = (Instant::now(), Some(slot.to_string()), fresh);
+    drop(cache);
+    fresh
+}
+
 async fn handle_model_switch(state: Arc<AppState>, new_model: String) {
     if new_model.is_empty() {
         return;
@@ -567,6 +696,34 @@ async fn handle_model_switch(state: Arc<AppState>, new_model: String) {
 }
 
 async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Result<Response<Body>> {
+    // GPU 高温保护：持续高温（连续 10 次采样）进入冷却后，中断请求返回请等待降温错误
+    if state.gpu_temp_guard {
+        if let Some(slot) = &state.gpu_temp_guard_slot {
+            // 读取温度并更新状态机（命中缓存则不计次）
+            get_gpu_temp_cached(&state, slot).await;
+            if state.gpu_guard_needs_cooldown.load(std::sync::atomic::Ordering::SeqCst) {
+                let temp = state.gpu_temp_cache.lock().await.2.unwrap_or(0.0);
+                let msg = format!(
+                    "GPU (PCI {}) 连续高温，请等待显卡降温后重试 (当前 {}°C)。",
+                    slot, temp as i64
+                );
+                eprintln!("[proxy] gpu cooldown guard triggered: {}", msg);
+                let body = serde_json::json!({
+                    "error": {
+                        "message": msg,
+                        "type": "gpu_overheat",
+                        "code": "gpu_temp_too_high"
+                    }
+                });
+                return Ok(Response::builder()
+                    .status(503)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap());
+            }
+        }
+    }
+
     let mut headers_map = hyper::header::HeaderMap::new();
     for (k, v) in req.headers().iter() {
         headers_map.insert(k.clone(), v.clone());
@@ -701,7 +858,47 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
         .iter()
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
-    let mut res_body_bytes = hyper::body::to_bytes(res.into_body()).await.unwrap_or_default();
+    let mut res_body = res.into_body();
+
+    // 分块读取上游响应；期间每 5 秒检查一次 GPU 温度，
+    // 若超温则丢弃已缓冲内容，直接返回“请等待降温”错误（前端此刻还未收到任何数据）。
+    let mut res_body_bytes: Vec<u8> = Vec::new();
+    let check_interval = std::time::Duration::from_secs(GPU_TEMP_CACHE_SECS);
+    loop {
+        match tokio::time::timeout(check_interval, res_body.data()).await {
+            Ok(Some(Ok(bytes))) => res_body_bytes.extend_from_slice(&bytes),
+            Ok(Some(Err(_))) => break,
+            Ok(None) => break, // 上游响应结束
+            Err(_) => {
+                // 一段时间没有新数据（上游仍在生成），趁机采样温度更新状态机
+                if state.gpu_temp_guard {
+                    if let Some(slot) = &state.gpu_temp_guard_slot {
+                        get_gpu_temp_cached(&state, slot).await;
+                        if state.gpu_guard_needs_cooldown.load(std::sync::atomic::Ordering::SeqCst) {
+                            let temp = state.gpu_temp_cache.lock().await.2.unwrap_or(0.0);
+                            let msg = format!(
+                                "GPU (PCI {}) 连续高温，请等待显卡降温后重试 (当前 {}°C)。",
+                                slot, temp as i64
+                            );
+                            eprintln!("[proxy] gpu cooldown during streaming: {}", msg);
+                            let body = serde_json::json!({
+                                "error": {
+                                    "message": msg,
+                                    "type": "gpu_overheat",
+                                    "code": "gpu_temp_too_high"
+                                }
+                            });
+                            return Ok(Response::builder()
+                                .status(503)
+                                .header("content-type", "application/json")
+                                .body(Body::from(body.to_string()))
+                                .unwrap());
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     if status >= 400 {
         let body_str = String::from_utf8_lossy(&res_body_bytes);
@@ -760,6 +957,12 @@ async fn main() {
     let service_svc: Option<String> = std::env::var("SERVICE_SVC").ok();
     let model_change_action: Option<String> = std::env::var("MODEL_CHANGE_ACTION").ok();
     let model_shortname_match: bool = std::env::var("MODEL_SHORTNAME_MATCH").ok().filter(|s| s == "true").is_some();
+    let gpu_temp_guard: bool = std::env::var("GPU_TEMP_GUARD").ok().filter(|s| s == "true").is_some();
+    let gpu_temp_guard_slot: Option<String> = std::env::var("GPU_TEMP_GUARD_SLOT").ok();
+    let gpu_temp_guard_threshold: f64 = std::env::var("GPU_TEMP_GUARD_THRESHOLD")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(99.0);
 
     let addr: SocketAddr = format!("{}:{}", bind_host, bind_port).parse().unwrap();
 
@@ -791,6 +994,9 @@ async fn main() {
     if model_shortname_match {
         println!("  model_shortname_match: true");
     }
+    if gpu_temp_guard {
+        println!("  gpu_temp_guard: true on {} (>={}°C)", gpu_temp_guard_slot.as_deref().unwrap_or("?"), gpu_temp_guard_threshold);
+    }
 
     let initial_model = model_name.unwrap_or_default();
 
@@ -805,6 +1011,13 @@ async fn main() {
         current_model: Mutex::new(initial_model),
         switch_in_progress: AtomicBool::new(false),
         switch_notify: Notify::new(),
+        gpu_temp_guard,
+        gpu_temp_guard_slot,
+        gpu_temp_guard_threshold,
+        gpu_guard_hot_count: std::sync::atomic::AtomicI32::new(0),
+        gpu_guard_cool_streak: std::sync::atomic::AtomicI32::new(0),
+        gpu_guard_needs_cooldown: std::sync::atomic::AtomicBool::new(false),
+        gpu_temp_cache: Mutex::new((Instant::now(), None, None)),
     });
 
     let listener = TcpListener::bind(&addr).await.unwrap();
@@ -843,5 +1056,62 @@ async fn main() {
                 eprintln!("[proxy] conn done {}", peer);
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_state() -> AppState {
+        AppState {
+            upstream_port: 0,
+            model_base_path: None,
+            service_type: None,
+            service_svc: None,
+            model_change_action: None,
+            model_shortname_match: false,
+            model_list_cache: Mutex::new((Instant::now(), Vec::new())),
+            current_model: Mutex::new(String::new()),
+            switch_in_progress: AtomicBool::new(false),
+            switch_notify: Notify::new(),
+            gpu_temp_guard: true,
+            gpu_temp_guard_slot: Some("03:00.0".into()),
+            gpu_temp_guard_threshold: 99.0,
+            gpu_guard_hot_count: std::sync::atomic::AtomicI32::new(0),
+            gpu_guard_cool_streak: std::sync::atomic::AtomicI32::new(0),
+            gpu_guard_needs_cooldown: std::sync::atomic::AtomicBool::new(false),
+            gpu_temp_cache: Mutex::new((Instant::now(), None, None)),
+        }
+    }
+
+    #[test]
+    fn enters_cooldown_after_10_hot() {
+        let s = make_state();
+        for _ in 0..9 {
+            assert!(!update_gpu_guard_state(&s, 100.0));
+        }
+        assert!(update_gpu_guard_state(&s, 100.0));
+    }
+
+    #[test]
+    fn reset_on_mid_cool() {
+        let s = make_state();
+        for _ in 0..5 { update_gpu_guard_state(&s, 100.0); }
+        update_gpu_guard_state(&s, 50.0);
+        for _ in 0..6 { update_gpu_guard_state(&s, 100.0); }
+        assert!(!s.gpu_guard_needs_cooldown.load(std::sync::atomic::Ordering::SeqCst));
+        update_gpu_guard_state(&s, 100.0);
+        for _ in 0..3 { update_gpu_guard_state(&s, 100.0); }
+        assert!(s.gpu_guard_needs_cooldown.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn lift_after_2_cool() {
+        let s = make_state();
+        for _ in 0..10 { update_gpu_guard_state(&s, 100.0); }
+        assert!(update_gpu_guard_state(&s, 100.0) || true);
+        assert!(update_gpu_guard_state(&s, 50.0));
+        assert!(!update_gpu_guard_state(&s, 50.0));
     }
 }

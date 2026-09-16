@@ -174,6 +174,18 @@ AIPage::AIPage(QWidget *parent)
     shortnameRow->addStretch();
     degradeLayout->addLayout(shortnameRow);
 
+    // GPU overheating guard row with GPU dropdown
+    auto *gpuGuardRow = new QHBoxLayout();
+    m_gpuTempGuardCheckbox = new QCheckBox();
+    gpuGuardRow->addWidget(m_gpuTempGuardCheckbox);
+    auto *gpuGuardLabel = new QLabel("当某显卡温度达到 99°C 时，API 直接中断并返回“请等待显卡降温”的错误");
+    gpuGuardLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    gpuGuardRow->addWidget(gpuGuardLabel, 1);
+    m_gpuTempGuardDropdown = new QComboBox();
+    m_gpuTempGuardDropdown->setMinimumHeight(26);
+    gpuGuardRow->addWidget(m_gpuTempGuardDropdown);
+    degradeLayout->addLayout(gpuGuardRow);
+
     layout->addWidget(m_degradeGroup);
 
     // define 4 services
@@ -235,8 +247,55 @@ AIPage::AIPage(QWidget *parent)
     connect(m_modelChangeDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
     connect(m_openclawFormatCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
     connect(m_modelShortnameCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
+    connect(m_gpuTempGuardCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
+    connect(m_gpuTempGuardDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
 
+    populateGpuDropdown();
     refresh();
+}
+
+void AIPage::populateGpuDropdown()
+{
+    m_gpuTempGuardDropdown->clear();
+    m_gpuTempGuardDropdown->addItem("请选择 GPU");
+
+    QProcess p;
+    p.setProcessChannelMode(QProcess::MergedChannels);
+    p.start("lspci", {});
+    if (!p.waitForFinished(5000)) return;
+    QString out = QString::fromUtf8(p.readAll());
+
+    const auto lines = out.split('\n');
+    int idx = 0;
+    for (const auto &l : lines) {
+        bool isGpu = l.contains("VGA compatible controller") ||
+                     l.contains("3D controller") ||
+                     l.contains("Display controller");
+        if (!isGpu) continue;
+
+        QString slot = l.section(' ', 0, 0);   // 如 "03:00.0"
+        QString model;
+        QString desc = l.section(' ', 1, -1);
+        desc = desc.section(':', 1, -1).trimmed();
+        QRegularExpression bracketRe(R"(\[([^\]]+)\])");
+        auto it = bracketRe.globalMatch(desc);
+        QString bracketed;
+        while (it.hasNext()) {
+            QString c = it.next().captured(1);
+            if (!c.contains('/')) bracketed = c;
+        }
+        QString label;
+        if (!bracketed.isEmpty())
+            label = bracketed;
+        else {
+            QString cleaned = desc.remove(QRegularExpression(R"(\([^)]*\))"))
+                            .remove(QRegularExpression(R"(Advanced Micro Devices, Inc\.)"))
+                            .remove(QRegularExpression(R"(\[[^\]]*\])"))
+                            .replace("  ", " ").trimmed();
+            label = cleaned.isEmpty() ? desc : cleaned;
+        }
+        m_gpuTempGuardDropdown->addItem(QString("GPU%1 - %2").arg(idx++).arg(label), slot);
+    }
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1238,6 +1297,8 @@ void AIPage::saveAIConfig()
     root.emplace("model_change_action", m_modelChangeDropdown->currentText().toStdString());
     root.emplace("openclaw_format", m_openclawFormatCheckbox->isChecked());
     root.emplace("model_shortname_match", m_modelShortnameCheckbox->isChecked());
+    root.emplace("gpu_temp_guard_checked", m_gpuTempGuardCheckbox->isChecked());
+    root.emplace("gpu_temp_guard_slot", m_gpuTempGuardDropdown->currentData().toString().toStdString());
 
     QString path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/ai.toml";
     QDir().mkpath(QFileInfo(path).absolutePath());
@@ -1279,6 +1340,13 @@ void AIPage::loadAIConfig()
             m_openclawFormatCheckbox->setChecked(v->value_or(false));
         if (auto *v = tbl.get("model_shortname_match"))
             m_modelShortnameCheckbox->setChecked(v->value_or(false));
+        if (auto *v = tbl.get("gpu_temp_guard_checked"))
+            m_gpuTempGuardCheckbox->setChecked(v->value_or(false));
+        if (auto *v = tbl.get("gpu_temp_guard_slot")) {
+            QString val = QString::fromStdString(v->value_or(""));
+            int idx2 = m_gpuTempGuardDropdown->findData(val);
+            if (idx2 >= 0) m_gpuTempGuardDropdown->setCurrentIndex(idx2);
+        }
     } catch (const toml::parse_error &) {
     }
 }
@@ -1299,6 +1367,8 @@ void AIPage::generateServiceFile(bool rootUser)
     QString modelChangeAction = m_modelChangeDropdown->currentText();
     bool openclawFormatChecked = m_openclawFormatCheckbox->isChecked();
     bool modelShortnameChecked = m_modelShortnameCheckbox->isChecked();
+    bool gpuGuardChecked = m_gpuTempGuardCheckbox->isChecked();
+    QString gpuGuardSlot = m_gpuTempGuardDropdown->currentData().toString();
 
     // Detect running AI service for upstream port, type, and service name
     QString upstreamPort = "8082"; // default fallback
@@ -1371,6 +1441,10 @@ void AIPage::generateServiceFile(bool rootUser)
     }
     if (modelShortnameChecked) {
         serviceContent += "Environment=MODEL_SHORTNAME_MATCH=true\n";
+    }
+    if (gpuGuardChecked && !gpuGuardSlot.isEmpty()) {
+        serviceContent += "Environment=GPU_TEMP_GUARD=true\n";
+        serviceContent += "Environment=GPU_TEMP_GUARD_SLOT=" + gpuGuardSlot + "\n";
     }
     serviceContent += "ExecStart=" + QDir::homePath() + "/.local/bin/llama-proxy\n";
     serviceContent += "Restart=on-failure\n\n";
