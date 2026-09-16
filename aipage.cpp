@@ -69,13 +69,20 @@ AIPage::AIPage(QWidget *parent)
     degradeLayout->setContentsMargins(8, 8, 8, 8);
     degradeLayout->setSpacing(6);
 
-    // Proxy port and model base path setting (same row)
+    // Proxy port, output mode and model base path setting (same row)
     auto *proxyPathRow = new QHBoxLayout();
     proxyPathRow->addWidget(new QLabel("代理端口:"));
     m_proxyPortInput = new QLineEdit("8081");
+    m_proxyPortInput->setMaximumWidth(70);
     m_proxyPortInput->setMinimumHeight(26);
     m_proxyPortInput->installEventFilter(m_nowheel);
     proxyPathRow->addWidget(m_proxyPortInput);
+
+    proxyPathRow->addWidget(new QLabel("输出模式:"));
+    m_outputModeDropdown = new QComboBox();
+    m_outputModeDropdown->addItems({"一次性输出", "跟随上游吐字"});
+    m_outputModeDropdown->setMinimumHeight(26);
+    proxyPathRow->addWidget(m_outputModeDropdown);
 
     m_generateServiceBtn = new QPushButton("生成服务文件");
     m_generateServiceBtn->setMinimumHeight(26);
@@ -98,7 +105,7 @@ AIPage::AIPage(QWidget *parent)
     });
     proxyPathRow->addWidget(m_generateServiceBtn);
 
-    proxyPathRow->addWidget(new QLabel(" 模型基础路径:"));
+    proxyPathRow->addWidget(new QLabel("模型基础路径:"));
     m_modelBasePathInput = new QLineEdit("");
     m_modelBasePathInput->setMinimumHeight(26);
     m_modelBasePathInput->installEventFilter(m_nowheel);
@@ -249,6 +256,7 @@ AIPage::AIPage(QWidget *parent)
     connect(m_modelShortnameCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
     connect(m_gpuTempGuardCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
     connect(m_gpuTempGuardDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
+    connect(m_outputModeDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
 
     populateGpuDropdown();
     refresh();
@@ -1299,6 +1307,7 @@ void AIPage::saveAIConfig()
     root.emplace("model_shortname_match", m_modelShortnameCheckbox->isChecked());
     root.emplace("gpu_temp_guard_checked", m_gpuTempGuardCheckbox->isChecked());
     root.emplace("gpu_temp_guard_slot", m_gpuTempGuardDropdown->currentData().toString().toStdString());
+    root.emplace("output_mode", m_outputModeDropdown->currentText().toStdString());
 
     QString path = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/ai.toml";
     QDir().mkpath(QFileInfo(path).absolutePath());
@@ -1347,6 +1356,11 @@ void AIPage::loadAIConfig()
             int idx2 = m_gpuTempGuardDropdown->findData(val);
             if (idx2 >= 0) m_gpuTempGuardDropdown->setCurrentIndex(idx2);
         }
+        if (auto *v = tbl.get("output_mode")) {
+            QString val = QString::fromStdString(v->value_or(""));
+            int idx3 = m_outputModeDropdown->findText(val);
+            if (idx3 >= 0) m_outputModeDropdown->setCurrentIndex(idx3);
+        }
     } catch (const toml::parse_error &) {
     }
 }
@@ -1369,6 +1383,7 @@ void AIPage::generateServiceFile(bool rootUser)
     bool modelShortnameChecked = m_modelShortnameCheckbox->isChecked();
     bool gpuGuardChecked = m_gpuTempGuardCheckbox->isChecked();
     QString gpuGuardSlot = m_gpuTempGuardDropdown->currentData().toString();
+    QString outputMode = m_outputModeDropdown->currentText();
 
     // Detect running AI service for upstream port, type, and service name
     QString upstreamPort = "8082"; // default fallback
@@ -1445,6 +1460,11 @@ void AIPage::generateServiceFile(bool rootUser)
     if (gpuGuardChecked && !gpuGuardSlot.isEmpty()) {
         serviceContent += "Environment=GPU_TEMP_GUARD=true\n";
         serviceContent += "Environment=GPU_TEMP_GUARD_SLOT=" + gpuGuardSlot + "\n";
+    }
+    if (outputMode == "跟随上游吐字") {
+        serviceContent += "Environment=OUTPUT_MODE=stream\n";
+    } else {
+        serviceContent += "Environment=OUTPUT_MODE=buffered\n";
     }
     serviceContent += "ExecStart=" + QDir::homePath() + "/.local/bin/llama-proxy\n";
     serviceContent += "Restart=on-failure\n\n";

@@ -67,6 +67,8 @@ struct AppState {
     gpu_guard_needs_cooldown: std::sync::atomic::AtomicBool,
     // 温度缓存：(最近读取时刻, 对应 slot, 温度°C)
     gpu_temp_cache: Mutex<(Instant, Option<String>, Option<f64>)>,
+    // 输出模式："buffered" 一次性输出 / "stream" 跟随上游逐块转发
+    output_mode: String,
 }
 
 fn strip_schema(obj: &mut Value, depth: usize) {
@@ -627,6 +629,45 @@ async fn get_gpu_temp_cached(state: &AppState, slot: &str) -> Option<f64> {
     fresh
 }
 
+/// 流式转发：把上游 body 逐块推送客户端，期间每 5 秒采样 GPU 温度，
+/// 若进入冷却则中止（客户端会收到截断的流）。
+async fn relay_upstream_stream(
+    mut tx: hyper::body::Sender,
+    mut res_body: Body,
+    state: Arc<AppState>,
+) {
+    let check_interval = std::time::Duration::from_secs(GPU_TEMP_CACHE_SECS);
+    loop {
+        match tokio::time::timeout(check_interval, res_body.data()).await {
+            Ok(Some(Ok(bytes))) => {
+                if tx.send_data(bytes).await.is_err() {
+                    // 客户端关闭连接
+                    return;
+                }
+            }
+            Ok(Some(Err(_))) => return,
+            Ok(None) => return, // 上游响应结束
+            Err(_) => {
+                // 一段时间没有新数据（上游仍在生成），趁机采样温度
+                if state.gpu_temp_guard {
+                    if let Some(slot) = &state.gpu_temp_guard_slot {
+                        get_gpu_temp_cached(&state, slot).await;
+                        if state.gpu_guard_needs_cooldown.load(std::sync::atomic::Ordering::SeqCst) {
+                            let temp = state.gpu_temp_cache.lock().await.2.unwrap_or(0.0);
+                            eprintln!(
+                                "[proxy] gpu cooldown during stream, aborting ({}°C, pci {})",
+                                temp as i64, slot
+                            );
+                            tx.abort();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 async fn handle_model_switch(state: Arc<AppState>, new_model: String) {
     if new_model.is_empty() {
         return;
@@ -860,6 +901,30 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
         .collect();
     let mut res_body = res.into_body();
 
+    // ── 流式模式（跟随上游吐字）────────────────────────────
+    // 逐块转发 upstream body，客户端实时收到（SSE 时逐字）。
+    // 期间每 5 秒采样 GPU 温度，若进入冷却则中止，客户端会收到截断的流。
+    if state.output_mode == "stream" && uri_path != "/v1/models" {
+        let (tx, rx_body) = Body::channel();
+        let mut res_builder = Response::builder().status(status);
+        for (header_key, header_value) in res_headers.iter() {
+            let key_str = header_key.as_str();
+            // 流式转发由 hyper 按 chunked 处理，剥离长度/编码头
+            if key_str == "content-length" || key_str == "transfer-encoding" {
+                continue;
+            }
+            res_builder = res_builder.header(header_key, header_value);
+        }
+        let res = res_builder.body(rx_body).unwrap();
+
+        let state2 = state.clone();
+        tokio::spawn(async move {
+            relay_upstream_stream(tx, res_body, state2).await;
+        });
+        eprintln!("[proxy] streaming response (mode=stream)");
+        return Ok(res);
+    }
+
     // 分块读取上游响应；期间每 5 秒检查一次 GPU 温度，
     // 若超温则丢弃已缓冲内容，直接返回“请等待降温”错误（前端此刻还未收到任何数据）。
     let mut res_body_bytes: Vec<u8> = Vec::new();
@@ -963,6 +1028,7 @@ async fn main() {
         .ok()
         .and_then(|s| s.trim().parse().ok())
         .unwrap_or(99.0);
+    let output_mode: String = std::env::var("OUTPUT_MODE").unwrap_or_else(|_| "buffered".to_string());
 
     let addr: SocketAddr = format!("{}:{}", bind_host, bind_port).parse().unwrap();
 
@@ -1018,6 +1084,7 @@ async fn main() {
         gpu_guard_cool_streak: std::sync::atomic::AtomicI32::new(0),
         gpu_guard_needs_cooldown: std::sync::atomic::AtomicBool::new(false),
         gpu_temp_cache: Mutex::new((Instant::now(), None, None)),
+        output_mode,
     });
 
     let listener = TcpListener::bind(&addr).await.unwrap();

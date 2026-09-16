@@ -116,6 +116,9 @@ private:
     QCheckBox *m_gpuTempGuardCheckbox;
     QComboBox *m_gpuTempGuardDropdown;
     void populateGpuDropdown();  // 用 lspci 填充 GPU 下拉
+
+    // 代理输出模式（一次性 vs 跟随上游吐字）
+    QComboBox *m_outputModeDropdown;
 };
 
 #endif
