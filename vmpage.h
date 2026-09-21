@@ -37,6 +37,8 @@ private:
     void sendQemuPowerdown(const QString &vmName);
     QString findVNCViewer() const;
     QString qmpSocketPath(const QString &vmName) const;
+    bool checkPermissionError(const QString &stderr);
+    void configureQemuSudoers(const QString &vmName);
 
     VMConfigManager m_mgr;
     QTableWidget   *m_table;
