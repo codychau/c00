@@ -4,6 +4,7 @@
 #include <QHBoxLayout>
 #include <QGroupBox>
 #include <QScrollArea>
+#include <QHash>
 #include <QRegularExpression>
 #include <QTimer>
 #include <QFrame>
@@ -162,6 +163,98 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
     ctrlOuter->addWidget(m_ctrlListLabel);
 
     layout->addWidget(ctrlG);
+
+    // ==================================================
+    // 游戏中心启动器 [自动检测 PATH / Flatpak / Snap]
+    // ==================================================
+    auto *gameG = new QGroupBox("游戏中心启动器");
+    auto *gameL = new QHBoxLayout(gameG);
+    gameL->setContentsMargins(16, 10, 16, 10);
+    gameL->addStretch();
+
+    // 候选程序：原生包名 + Flatpak/Snap 应用 ID
+    QStringList candidates = {
+        "steam",
+        "goggalaxy", "gog-galaxy", "goggalaxy2",
+        "com.valvedigital.Steam",
+        "com.bistom.GogGalaxy", "com.bistom.GogGalaxy2"
+    };
+    QStringList sh;
+    sh << "#!/bin/sh";
+    for (const auto &cand : candidates) {
+        sh << ("for p in $(command -v " + cand + " 2>/dev/null); do echo \"path|$p\"; done");
+        if (cand.startsWith("com.")) {
+            sh << ("flatpak list --columns application 2>/dev/null | grep -qx \"" + cand + "\" && echo \"flatpak|" + cand + "\"");
+            sh << ("snap list --columns name 2>/dev/null | grep -qx \"" + cand + "\" && echo \"snap|" + cand + "\"");
+        }
+    }
+    QString script = sh.join("\n");
+
+    {
+        auto *p = new QProcess(this);
+        auto *noneLbl = new QLabel("正在检测游戏启动器…");
+        noneLbl->setStyleSheet("color: #888;");
+        gameL->addWidget(noneLbl, 1);
+
+        connect(p, &QProcess::finished, this, [p, gameL, noneLbl](int, QProcess::ExitStatus) {
+            noneLbl->deleteLater();
+            QString out = QString::fromUtf8(p->readAllStandardOutput()).trimmed();
+            p->deleteLater();
+
+            QHash<QString, QStringList> seen;
+            auto addBtn = [&seen, gameL](const QString &label, const QStringList &launch) {
+                if (label.isEmpty() || launch.isEmpty() || seen.contains(label)) return;
+                seen.insert(label, launch);
+                auto *b = new QPushButton(label);
+                b->setMinimumHeight(56);
+                b->setMinimumWidth(150);
+                b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+                b->setStyleSheet(
+                    "QPushButton { background-color: #2d2d2d; color: #eee; border: 1px solid #444;"
+                    "border-radius: 8px; padding: 6px 10px; font-size: 15px; font-weight: bold; }"
+                    "QPushButton:hover { background-color: #3d3d3d; border-color: #5a9; }"
+                    "QPushButton:pressed { background-color: #2b5797; }");
+                connect(b, &QPushButton::clicked, [launch]() {
+                    if (launch.isEmpty()) return;
+                    QProcess::startDetached(launch.at(0), launch.mid(1));
+                });
+                gameL->addWidget(b);
+            };
+
+            for (const auto &raw : out.split('\n')) {
+                auto t = raw.trimmed();
+                if (t.isEmpty() || !t.contains('|')) continue;
+                int pipe = t.indexOf('|');
+                QString src = t.left(pipe);
+                QString val = t.mid(pipe + 1);
+                if (val.isEmpty()) continue;
+                if (src == "path") {
+                    if (val.contains("gog", Qt::CaseInsensitive))
+                        addBtn("🎲 GOG Galaxy", { val });
+                    else if (val.contains("steam", Qt::CaseInsensitive))
+                        addBtn("🎮 Steam", { val });
+                } else if (src == "flatpak" || src == "snap") {
+                    QString launcher = (src == "flatpak" ? "flatpak" : "snap");
+                    if (val.contains("steam", Qt::CaseInsensitive))
+                        addBtn("🎮 Steam", { launcher, "run", val });
+                    else if (val.contains("gog", Qt::CaseInsensitive))
+                        addBtn("🎲 GOG Galaxy", { launcher, "run", val });
+                }
+            }
+
+            if (seen.isEmpty()) {
+                auto *lbl = new QLabel("未检测到 Steam / GOG Galaxy");
+                lbl->setStyleSheet("color: #999;");
+                gameL->addWidget(lbl, 1);
+            }
+            gameL->addStretch();
+        });
+
+        p->setProcessChannelMode(QProcess::MergedChannels);
+        p->start("sh", { "-c", script });
+    }
+
+    layout->addWidget(gameG);
 
     layout->addStretch();
 
