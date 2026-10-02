@@ -176,6 +176,17 @@ void ServicePage::refresh()
         }
 
         populateTable();
+        filterServices(m_searchBox->text());
+
+        // 重建后尽量恢复上次选中的服务，保持启动/停止上下文
+        for (int i = 0; i < m_table->rowCount(); ++i) {
+            if (!m_table->isRowHidden(i)
+                    && !m_selectedName.isEmpty()
+                    && m_table->item(i, 0)->text() == m_selectedName) {
+                m_table->setCurrentCell(i, 0);
+                break;
+            }
+        }
         m_status->setText(QString("共 %1 个服务").arg(m_table->rowCount()));
     };
 
