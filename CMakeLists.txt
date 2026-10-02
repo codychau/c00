@@ -33,6 +33,10 @@ add_executable(server-toolbox
     formatdialog.h
     entertainmentpage.cpp
     entertainmentpage.h
+    desktoppage.cpp
+    desktoppage.h
+    keybindingconfig.cpp
+    keybindingconfig.h
     aipage.cpp
     aipage.h
     servicepage.cpp
