@@ -46,6 +46,36 @@ make -j$(nproc)
 
 虚拟机配置存储在 `~/.config/ServerToolbox/vms.toml`，使用 TOML 格式。
 
+## 看门狗自动重启
+
+工具提供 `servertoolbox-watchdog` 系统服务（root 权限，开机自启）。当 **nginx 与 SSH 端口同时拒绝连接**（即系统 userspace 异常但内核尚存）时，会自动重启本机。
+
+- 触发前会检查**重启冷却期**（`cooldown_sec`），避免频繁重启。
+- 重启采用**分层降级**：先尝试 `systemctl reboot`（干净重启），若 15 秒内系统仍无响应，则通过内核 **Magic SysRq**（`sync → umount → reboot`）硬重启，绕过所有 userspace。
+- 在「状态」页面点击 **🛡 安装看门狗** 可配置并安装该服务。安装对话框中还提供 **🔄 测试硬重启** 按钮，可直接验证内核级强制重启是否生效。
+
+### 强制重启命令行
+
+`server-toolbox` 支持 `--force-reboot` 参数，会直接执行上述内核级硬重启（需要 root 权限）：
+
+```bash
+sudo server-toolbox --force-reboot
+```
+
+> 说明：`--force-reboot` 通过写入 `/proc/sys/kernel/sysrq` 触发重启，仅在内核可响应时有效；非 root 下会因权限失败而不触发。
+
+## 安装到本地
+
+运行 `build-install.sh` 会自动安装系统依赖、编译并将程序安装到 `~/.local/bin`：
+
+```bash
+./build-install.sh
+# 或（首次安装依赖时）
+sudo ./build-install.sh
+```
+
+安装后通过 `~/.local/bin/server-toolbox` 运行。若该路径未在你的 `PATH` 中，可执行 `export PATH="$HOME/.local/bin:$PATH"`。
+
 ## 许可证
 
 MIT License

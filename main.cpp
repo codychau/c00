@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QCoreApplication>
 #include <QLockFile>
+#include <QTimer>
 #include <QDir>
 #include <QString>
 
@@ -10,6 +11,8 @@
 int main(int argc, char *argv[])
 {
     bool daemon = false;
+    bool forceReboot = false;
+    bool gracefulReboot = false;
     QString configPath;
 
     for (int i = 1; i < argc; ++i) {
@@ -18,7 +21,28 @@ int main(int argc, char *argv[])
             daemon = true;
         } else if (arg == "--health-config" && i + 1 < argc) {
             configPath = QString::fromLocal8Bit(argv[++i]);
+        } else if (arg == "--force-reboot") {
+            forceReboot = true;
+        } else if (arg == "--reboot") {
+            gracefulReboot = true;
         }
+    }
+
+    if (forceReboot) {
+        HealthMonitor monitor;
+        return monitor.forceKernelReboot() ? 0 : 1;
+    }
+
+    if (gracefulReboot) {
+        QCoreApplication app(argc, argv);
+        QCoreApplication::setApplicationName("ServerToolbox");
+
+        HealthMonitor monitor;
+        monitor.performReboot(false);
+
+        // 优雅重启未生效时，performReboot 会在 15 秒后触发内核级兜底。
+        QTimer::singleShot(22000, &app, &QCoreApplication::quit);
+        return app.exec();
     }
 
     if (daemon) {

@@ -19,6 +19,7 @@ public:
         int timeoutMs = 2000;
         int failThreshold = 3;
         int cooldownSec = 300;
+        bool forceKernelRebootMode = false;
         QString nginxHost = "127.0.0.1";
         int nginxPort = 80;
         QString sshHost = "127.0.0.1";
@@ -35,7 +36,11 @@ public:
     static QString defaultConfigText();
     static void ensureConfigFile(const QString &path);
     static void configPorts(const QString &path, int *nginxPort, int *sshPort);
-    static bool setConfigPorts(const QString &path, int nginxPort, int sshPort);
+    static bool configForceKernelReboot(const QString &path);
+    static bool setConfigPorts(const QString &path, int nginxPort, int sshPort,
+                               bool forceKernelRebootMode = false);
+    bool forceKernelReboot();
+    void performReboot(bool forceKernel);
 
 private:
     enum class Probe { Ok, Refused, ClosedEarly, Timeout, Other };

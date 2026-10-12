@@ -18,6 +18,7 @@
 #include <cstdio>
 
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <toml++/toml.h>
 
@@ -105,6 +106,7 @@ void HealthMonitor::loadConfig()
         m_cfg.timeoutMs = static_cast<int>(tbl["timeout_ms"].value_or(int64_t(2000)));
         m_cfg.failThreshold = static_cast<int>(tbl["fail_threshold"].value_or(int64_t(3)));
         m_cfg.cooldownSec = static_cast<int>(tbl["cooldown_sec"].value_or(int64_t(300)));
+        m_cfg.forceKernelRebootMode = tbl["force_kernel_reboot"].value_or(false);
 
         if (auto *n = tbl["nginx"].as_table()) {
             m_cfg.nginxHost = QString::fromStdString((*n)["host"].value_or(std::string("127.0.0.1")));
@@ -139,6 +141,7 @@ QString HealthMonitor::defaultConfigText()
     root.emplace("timeout_ms", int64_t(2000));
     root.emplace("fail_threshold", int64_t(3));
     root.emplace("cooldown_sec", int64_t(300));
+    root.emplace("force_kernel_reboot", false);
     root.emplace("nginx", std::move(nginx));
     root.emplace("ssh", std::move(ssh));
 
@@ -179,7 +182,21 @@ void HealthMonitor::configPorts(const QString &path, int *nginxPort, int *sshPor
     if (sshPort) *sshPort = (sp >= 1 && sp <= 65535) ? sp : 22;
 }
 
-bool HealthMonitor::setConfigPorts(const QString &path, int nginxPort, int sshPort)
+bool HealthMonitor::configForceKernelReboot(const QString &path)
+{
+    if (!QFile::exists(path))
+        return false;
+
+    try {
+        auto tbl = toml::parse_file(path.toStdString());
+        return tbl["force_kernel_reboot"].value_or(false);
+    } catch (const toml::parse_error &) {
+        return false;
+    }
+}
+
+bool HealthMonitor::setConfigPorts(const QString &path, int nginxPort, int sshPort,
+                                   bool forceKernelRebootMode)
 {
     ensureConfigFile(path);
 
@@ -203,6 +220,7 @@ bool HealthMonitor::setConfigPorts(const QString &path, int nginxPort, int sshPo
 
     setPort("nginx", nginxPort);
     setPort("ssh", sshPort);
+    root.insert_or_assign("force_kernel_reboot", forceKernelRebootMode);
 
     std::ofstream ofs(path.toStdString());
     if (!ofs)
@@ -327,12 +345,89 @@ void HealthMonitor::triggerReboot(const QString &reason)
     m_failStreak = 0;
 
     log(QString("触发自动重启：%1").arg(reason));
+
+    performReboot(m_cfg.forceKernelRebootMode);
+
+    QTimer::singleShot(30000, this, [this]() { m_rebooting = false; });
+}
+
+void HealthMonitor::performReboot(bool forceKernel)
+{
+    sync();
+
+    // 勾选“直接内核级重启”：跳过优雅重启，直接 Magic SysRq。
+    if (forceKernel) {
+        log("配置为直接内核级重启，跳过优雅重启 (systemctl)");
+        forceKernelReboot();
+        return;
+    }
+
     if (::geteuid() == 0)
         QProcess::startDetached("systemctl", {"reboot"});
     else
         QProcess::startDetached("pkexec", {"reboot"});
 
-    QTimer::singleShot(10000, this, [this]() { m_rebooting = false; });
+    // 15 秒后仍未重启（说明优雅重启也失效），回退到内核级硬重启。
+    QTimer::singleShot(15000, this, [this]() {
+        log("优雅重启 15 秒未生效，回退到内核级硬重启");
+        forceKernelReboot();
+    });
+}
+
+bool HealthMonitor::forceKernelReboot()
+{
+    log("系统无响应，触发内核级硬重启 (Magic SysRq)");
+
+    // 启用所有 SysRq 功能（内核会补 0 终止符，"1" 即全部启用）。
+    // /proc 值为运行时值，重启后自动恢复，此处覆盖无持久副作用。
+    {
+        int fd = open("/proc/sys/kernel/sysrq", O_WRONLY);
+        if (fd < 0) {
+            fprintf(stderr, "ERR:无法打开 /proc/sys/kernel/sysrq（未以 root 运行或内核未启用 Magic SysRq）\n");
+            return false;
+        }
+        ssize_t w = write(fd, "1", 1);
+        close(fd);
+        if (w != 1) {
+            fprintf(stderr, "ERR:启用 /proc/sys/kernel/sysrq 失败\n");
+            return false;
+        }
+    }
+
+    // 触发命令必须写入 /proc/sysrq-trigger（只写）。
+    // 注意：内核对每次 write 只识别第一个字符，因此必须逐条写入。
+    // s=sync 文件系统，u=只读卸载所有挂载，b=立即重启。
+    // 内核直接响应，绕过所有 userspace 与 systemd。
+    {
+        int fd = open("/proc/sysrq-trigger", O_WRONLY);
+        if (fd < 0) {
+            fprintf(stderr, "ERR:无法打开 /proc/sysrq-trigger（未以 root 运行？）\n");
+            return false;
+        }
+
+        const char pre[] = {'s', 'u'};   // 先落盘再卸载
+        for (char c : pre) {
+            if (write(fd, &c, 1) != 1) {
+                fprintf(stderr, "ERR:写入 SysRq 命令 '%c' 失败，硬重启可能未生效\n", c);
+                close(fd);
+                return false;
+            }
+        }
+
+        // 写入 'b' 后内核应立即重启，正常情况下此调用不会返回。
+        const char boot = 'b';
+        if (write(fd, &boot, 1) != 1) {
+            fprintf(stderr, "ERR:写入 SysRq 命令 'b' 失败，硬重启可能未生效\n");
+            close(fd);
+            return false;
+        }
+        close(fd);
+
+        // 能执行到这里，说明内核并未重启（被 lockdown/虚拟化限制或被忽略）。
+        sleep(2);
+        fprintf(stderr, "ERR:已发出重启命令但系统仍存活，硬重启未生效\n");
+        return false;
+    }
 }
 
 bool HealthMonitor::isAbnormal(Probe p)

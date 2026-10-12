@@ -171,6 +171,7 @@ void StatusPage::installWatchdog()
 
     int nginxPort = 80, sshPort = 22;
     HealthMonitor::configPorts(cfg, &nginxPort, &sshPort);
+    bool forceKernelReboot = HealthMonitor::configForceKernelReboot(cfg);
 
     QTemporaryDir dir;
     if (!dir.isValid()) {
@@ -209,7 +210,7 @@ void StatusPage::installWatchdog()
 
     QString lastError;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        WatchdogInstallDialog dlg(nginxPort, sshPort, needPassword, this);
+        WatchdogInstallDialog dlg(nginxPort, sshPort, needPassword, forceKernelReboot, this);
         if (attempt > 0)
             dlg.setWindowTitle("安装看门狗（密码错误，请重试）");
         if (dlg.exec() != QDialog::Accepted)
@@ -217,9 +218,10 @@ void StatusPage::installWatchdog()
 
         nginxPort = dlg.nginxPort();
         sshPort = dlg.sshPort();
+        forceKernelReboot = dlg.forceKernelReboot();
 
         HealthMonitor::ensureConfigFile(cfg);
-        if (!HealthMonitor::setConfigPorts(cfg, nginxPort, sshPort)) {
+        if (!HealthMonitor::setConfigPorts(cfg, nginxPort, sshPort, forceKernelReboot)) {
             QMessageBox::warning(this, "安装失败", "无法写入配置文件 " + cfg);
             return;
         }
@@ -229,8 +231,10 @@ void StatusPage::installWatchdog()
         if (AdminHelper::runAsRootScriptWithPassword(script, password, &out, &err)) {
             QMessageBox::information(this, "安装成功",
                 QString("看门狗已安装并启动。\n\n服务：servertoolbox-watchdog\n"
-                        "nginx 端口：%1\nSSH 端口：%2\n配置文件：%3")
-                    .arg(nginxPort).arg(sshPort).arg(cfg));
+                        "nginx 端口：%1\nSSH 端口：%2\n重启方式：%3\n配置文件：%4")
+                    .arg(nginxPort).arg(sshPort)
+                    .arg(forceKernelReboot ? "直接内核级重启" : "优雅重启（失败回退内核级）")
+                    .arg(cfg));
             return;
         }
 
