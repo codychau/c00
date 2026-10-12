@@ -29,6 +29,7 @@ protected:
     void showEvent(QShowEvent *event) override;
 
 private:
+    void installWatchdog();
     void runCmd(const QString &cmd, const QStringList &args,
                 std::function<void(const QString &)> cb);
     void setLine(int row, const QString &val, const QString &suffix = QString());

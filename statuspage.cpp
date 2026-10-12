@@ -1,5 +1,8 @@
 #include "statuspage.h"
 #include "shutdowndialog.h"
+#include "healthmonitor.h"
+#include "adminhelper.h"
+#include "watchdoginstalldialog.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -14,6 +17,7 @@
 #include <QJsonArray>
 #include <QFile>
 #include <QTemporaryFile>
+#include <QTemporaryDir>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QInputDialog>
@@ -21,6 +25,11 @@
 #include <QFileInfo>
 #include <QMenu>
 #include <QAction>
+#include <QCoreApplication>
+#include <QTextStream>
+#include <QProcess>
+
+#include <memory>
 
 // ── 列索引 ──
 enum DiskCol { ColDev = 0, ColModel, ColTemp, ColSize, ColUsed, ColMount, ColDiskCount };
@@ -119,10 +128,9 @@ StatusPage::StatusPage(QWidget *parent)
     connect(m_shutdownBtn, &QPushButton::clicked, this, [this]() {
         ShutdownDialog dialog("关机", this);
         if (dialog.exec() == QDialog::Accepted && dialog.isContinue()) {
-            auto *proc = new QProcess(this);
-            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                    this, [proc](int, QProcess::ExitStatus) { proc->deleteLater(); });
-            proc->start("pkexec", {"shutdown", "-h", "now"});
+            QString err;
+            if (!AdminHelper::runAsRootScript("shutdown -h now", this, nullptr, &err))
+                QMessageBox::warning(this, "关机失败", err);
         }
     });
     tempRow->addWidget(m_shutdownBtn);
@@ -131,13 +139,16 @@ StatusPage::StatusPage(QWidget *parent)
     connect(m_restartBtn, &QPushButton::clicked, this, [this]() {
         ShutdownDialog dialog("重启", this);
         if (dialog.exec() == QDialog::Accepted && dialog.isContinue()) {
-            auto *proc = new QProcess(this);
-            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                    this, [proc](int, QProcess::ExitStatus) { proc->deleteLater(); });
-            proc->start("pkexec", {"reboot"});
+            QString err;
+            if (!AdminHelper::runAsRootScript("reboot", this, nullptr, &err))
+                QMessageBox::warning(this, "重启失败", err);
         }
     });
     tempRow->addWidget(m_restartBtn);
+
+    auto *watchdogBtn = new QPushButton("🛡  安装看门狗");
+    connect(watchdogBtn, &QPushButton::clicked, this, &StatusPage::installWatchdog);
+    tempRow->addWidget(watchdogBtn);
 
     auto *exitBtn = new QPushButton("🚪 退出程序");
     connect(exitBtn, &QPushButton::clicked, qApp, []() { qApp->quit(); });
@@ -151,6 +162,86 @@ StatusPage::StatusPage(QWidget *parent)
     m_timer = new QTimer(this);
     m_timer->setInterval(8000);
     connect(m_timer, &QTimer::timeout, this, &StatusPage::refresh);
+}
+
+void StatusPage::installWatchdog()
+{
+    const QString bin = QCoreApplication::applicationFilePath();
+    const QString cfg = HealthMonitor::defaultConfigPath();
+
+    int nginxPort = 80, sshPort = 22;
+    HealthMonitor::configPorts(cfg, &nginxPort, &sshPort);
+
+    QTemporaryDir dir;
+    if (!dir.isValid()) {
+        QMessageBox::warning(this, "安装失败", "无法创建临时目录");
+        return;
+    }
+
+    const QString unitPath = dir.filePath("servertoolbox-watchdog.service");
+    QFile unitFile(unitPath);
+    if (!unitFile.open(QIODevice::WriteOnly | QIODevice::Text)) {
+        QMessageBox::warning(this, "安装失败", "无法写入服务文件");
+        return;
+    }
+    {
+        QTextStream out(&unitFile);
+        out << HealthMonitor::buildUnitContent(bin, cfg);
+    }
+    unitFile.close();
+
+    auto shellQuote = [](const QString &s) {
+        QString q = s;
+        q.replace("'", "'\\''");
+        return "'" + q + "'";
+    };
+
+    const QString script =
+        "install -m 0644 " + shellQuote(unitPath) + " "
+            + shellQuote(HealthMonitor::serviceUnitPath()) + "\n"
+        "systemctl daemon-reload\n"
+        "systemctl enable servertoolbox-watchdog.service\n"
+        "systemctl restart servertoolbox-watchdog.service\n"
+        "if [ -n \"$SUDO_USER\" ] && [ -f " + shellQuote(cfg)
+            + " ]; then chown \"$SUDO_USER\" " + shellQuote(cfg) + "; fi";
+
+    const bool needPassword = !AdminHelper::passwordlessSudoAvailable();
+
+    QString lastError;
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        WatchdogInstallDialog dlg(nginxPort, sshPort, needPassword, this);
+        if (attempt > 0)
+            dlg.setWindowTitle("安装看门狗（密码错误，请重试）");
+        if (dlg.exec() != QDialog::Accepted)
+            return;
+
+        nginxPort = dlg.nginxPort();
+        sshPort = dlg.sshPort();
+
+        HealthMonitor::ensureConfigFile(cfg);
+        if (!HealthMonitor::setConfigPorts(cfg, nginxPort, sshPort)) {
+            QMessageBox::warning(this, "安装失败", "无法写入配置文件 " + cfg);
+            return;
+        }
+
+        const QString password = needPassword ? dlg.password() : QString();
+        QString out, err;
+        if (AdminHelper::runAsRootScriptWithPassword(script, password, &out, &err)) {
+            QMessageBox::information(this, "安装成功",
+                QString("看门狗已安装并启动。\n\n服务：servertoolbox-watchdog\n"
+                        "nginx 端口：%1\nSSH 端口：%2\n配置文件：%3")
+                    .arg(nginxPort).arg(sshPort).arg(cfg));
+            return;
+        }
+
+        lastError = err.isEmpty() ? out : err;
+        if (!AdminHelper::isAuthFailure(lastError)) {
+            QMessageBox::warning(this, "安装失败", lastError);
+            return;
+        }
+    }
+
+    QMessageBox::warning(this, "安装失败", lastError.isEmpty() ? "认证失败" : lastError);
 }
 
 void StatusPage::runCmd(const QString &cmd, const QStringList &args,

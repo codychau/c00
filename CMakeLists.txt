@@ -51,6 +51,12 @@ add_executable(server-toolbox
     logpage.h
     shutdowndialog.cpp
     shutdowndialog.h
+    healthmonitor.cpp
+    healthmonitor.h
+    adminhelper.cpp
+    adminhelper.h
+    watchdoginstalldialog.cpp
+    watchdoginstalldialog.h
 )
 
 target_link_libraries(server-toolbox PRIVATE
