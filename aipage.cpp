@@ -181,6 +181,15 @@ AIPage::AIPage(QWidget *parent)
     shortnameRow->addStretch();
     degradeLayout->addLayout(shortnameRow);
 
+    // Always-expose gateway-model virtual model row with checkbox
+    auto *gatewayRow = new QHBoxLayout();
+    m_exposeGatewayModelCheckbox = new QCheckBox();
+    gatewayRow->addWidget(m_exposeGatewayModelCheckbox);
+    auto *gatewayLabel = new QLabel("始终暴露名为 gateway-model 的虚构模型（勾选后该模型始终存在，并代理到当前可用的模型）");
+    gatewayLabel->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    gatewayRow->addWidget(gatewayLabel, 1);
+    degradeLayout->addLayout(gatewayRow);
+
     // GPU overheating guard row with GPU dropdown
     auto *gpuGuardRow = new QHBoxLayout();
     m_gpuTempGuardCheckbox = new QCheckBox();
@@ -209,9 +218,9 @@ AIPage::AIPage(QWidget *parent)
     m_cards[2].systemdSvc = "vllm.service";
     m_cards[2].procName   = "vllm";
     m_cards[2].port       = 8000;
-    m_cards[3].name       = "LocalAI";
-    m_cards[3].systemdSvc = "local-ai.service";
-    m_cards[3].procName   = "local-ai";
+    m_cards[3].name       = "Strata";
+    m_cards[3].systemdSvc = "strata-coder.service";
+    m_cards[3].procName   = "strata-coder";
     m_cards[3].port       = 8080;
 
     for (int i = 0; i < 4; ++i)
@@ -254,6 +263,7 @@ AIPage::AIPage(QWidget *parent)
     connect(m_modelChangeDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
     connect(m_openclawFormatCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
     connect(m_modelShortnameCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
+    connect(m_exposeGatewayModelCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
     connect(m_gpuTempGuardCheckbox, &QCheckBox::checkStateChanged, this, &AIPage::saveAIConfig);
     connect(m_gpuTempGuardDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
     connect(m_outputModeDropdown, &QComboBox::currentTextChanged, this, &AIPage::saveAIConfig);
@@ -437,19 +447,19 @@ void AIPage::buildCard(int idx)
             return p;
         };
         defs = {
-            a("address",          "address",    "监听地址",       WT_String, ":8080"),
-            a("models-path",      "models-path","模型路径",       WT_String, "", 0, 0, 0, 0, 2, 0.05, {}, false, false, true, true),
-            a("config-dir",       "config-dir", "配置目录",       WT_String, "", 0, 0, 0, 0, 2, 0.05, {}, false, false, true, true),
-            a("context-size",     "context-size","上下文大小",     WT_Int,    "512", 512, 131072),
-            a("f16",              "f16",         "GPU 加速",       WT_String, "off",  0, 0, 0, 0, 0, 0,
-               {"off", "on"}, true),
-            a("upload-limit",     "upload-limit","上传限制(MB)",   WT_Int,    "15",   1, 1000),
-            a("preload-models",   "preload-models","预加载模型",   WT_String, ""),
-            a("cors",             "cors",         "CORS",           WT_String, "off",  0, 0, 0, 0, 0, 0,
-               {"off", "on"}, true),
-            a("galleries",        "galleries",   "模型库地址",     WT_String, ""),
+            a("engine", "engine", "推理引擎", WT_String, "strata", 0, 0, 0, 0, 2, 0.05,
+              {"strata", "mock"}),
+            a("config", "config", "配置文件", WT_String, "",
+              0, 0, 0, 0, 2, 0.05, {}, false, false, true, false),
+            a("port",   "port",   "端口",     WT_Int,    "8080", 1, 65535),
+            a("lazy",   "lazy",   "延迟加载", WT_String, "off", 0, 0, 0, 0, 2, 0.05,
+              {"off", "on"}, true),
+            a("fit-max-tokens", "fit-max-tokens", "适配最大 token", WT_String, "off",
+              0, 0, 0, 0, 2, 0.05, {"off", "on"}, true),
+            a("api-monitor", "api-monitor", "API 监视器", WT_String, "off",
+              0, 0, 0, 0, 2, 0.05, {"off", "on"}, true),
             // Environment variable (not a CLI flag)
-            a("CUDA_VISIBLE_DEVICES", "", "CUDA 设备", WT_String, "0", 0, 0, 0, 0, 0, 0,
+            a("HIP_VISIBLE_DEVICES", "", "可见 GPU", WT_String, "0", 0, 0, 0, 0, 0, 0,
               {}, false, true),
         };
     }
@@ -1277,14 +1287,15 @@ void AIPage::refresh()
 
     m_info->setText("正在检查服务状态…");
 
-    for (int i = 0; i < 3; ++i)
+    for (int i = 0; i < m_cards.size(); ++i)
         checkService(i);
 
     QTimer::singleShot(2500, this, [this]() {
         int running = 0;
         for (const auto &c : m_cards)
             if (c.running) ++running;
-        m_info->setText(QString("AI 后端: %1 / 3 运行中").arg(running));
+        m_info->setText(QString("AI 后端: %1 / %2 运行中")
+                            .arg(running).arg(m_cards.size()));
     });
 }
 
@@ -1305,6 +1316,7 @@ void AIPage::saveAIConfig()
     root.emplace("model_change_action", m_modelChangeDropdown->currentText().toStdString());
     root.emplace("openclaw_format", m_openclawFormatCheckbox->isChecked());
     root.emplace("model_shortname_match", m_modelShortnameCheckbox->isChecked());
+    root.emplace("gateway_model_exposed", m_exposeGatewayModelCheckbox->isChecked());
     root.emplace("gpu_temp_guard_checked", m_gpuTempGuardCheckbox->isChecked());
     root.emplace("gpu_temp_guard_slot", m_gpuTempGuardDropdown->currentData().toString().toStdString());
     root.emplace("output_mode", m_outputModeDropdown->currentText().toStdString());
@@ -1349,6 +1361,8 @@ void AIPage::loadAIConfig()
             m_openclawFormatCheckbox->setChecked(v->value_or(false));
         if (auto *v = tbl.get("model_shortname_match"))
             m_modelShortnameCheckbox->setChecked(v->value_or(false));
+        if (auto *v = tbl.get("gateway_model_exposed"))
+            m_exposeGatewayModelCheckbox->setChecked(v->value_or(false));
         if (auto *v = tbl.get("gpu_temp_guard_checked"))
             m_gpuTempGuardCheckbox->setChecked(v->value_or(false));
         if (auto *v = tbl.get("gpu_temp_guard_slot")) {
@@ -1381,6 +1395,7 @@ void AIPage::generateServiceFile(bool rootUser)
     QString modelChangeAction = m_modelChangeDropdown->currentText();
     bool openclawFormatChecked = m_openclawFormatCheckbox->isChecked();
     bool modelShortnameChecked = m_modelShortnameCheckbox->isChecked();
+    bool exposeGatewayModelChecked = m_exposeGatewayModelCheckbox->isChecked();
     bool gpuGuardChecked = m_gpuTempGuardCheckbox->isChecked();
     QString gpuGuardSlot = m_gpuTempGuardDropdown->currentData().toString();
     QString outputMode = m_outputModeDropdown->currentText();
@@ -1416,8 +1431,8 @@ void AIPage::generateServiceFile(bool rootUser)
                 serviceType = "vllm";
             else if (card.name == "Ollama")
                 serviceType = "ollama";
-            else if (card.name == "LocalAI")
-                serviceType = "localai";
+            else if (card.name == "Strata")
+                serviceType = "strata";
             serviceSvc = card.systemdSvc;
             break;
         }
@@ -1456,6 +1471,9 @@ void AIPage::generateServiceFile(bool rootUser)
     }
     if (modelShortnameChecked) {
         serviceContent += "Environment=MODEL_SHORTNAME_MATCH=true\n";
+    }
+    if (exposeGatewayModelChecked) {
+        serviceContent += "Environment=GATEWAY_MODEL_EXPOSED=true\n";
     }
     if (gpuGuardChecked && !gpuGuardSlot.isEmpty()) {
         serviceContent += "Environment=GPU_TEMP_GUARD=true\n";

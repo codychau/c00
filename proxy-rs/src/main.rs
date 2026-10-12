@@ -9,13 +9,16 @@ use std::net::{SocketAddr, TcpStream};
 use std::path::Path;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, Notify};
 
 const MIN_MODEL_MATCH_LEN: usize = 10;
 const MODEL_LIST_TTL_SECS: u64 = 30;
+
+/// Emit the "strata backend detected" notice at most once per process.
+static STRATA_SKIP_NOTICE: Once = Once::new();
 
 const STRIP_KEYS: &[&str] = &[
     "pattern",
@@ -54,6 +57,7 @@ struct AppState {
     service_svc: Option<String>,
     model_change_action: Option<String>,
     model_shortname_match: bool,
+    gateway_model_exposed: bool,
     model_list_cache: Mutex<(Instant, Vec<String>)>,
     current_model: Mutex<String>,
     switch_in_progress: AtomicBool,
@@ -291,6 +295,49 @@ fn inject_short_model_ids(parsed: &mut Value) -> bool {
     true
 }
 
+/// Fetch the first model id advertised by the upstream `/v1/models` endpoint.
+/// Returns None when upstream is unreachable or advertises no models.
+async fn get_first_upstream_model(port: u16) -> Option<String> {
+    let upstream_host = std::env::var("UPSTREAM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let url = format!("http://{}:{}/v1/models", upstream_host, port);
+    let fut = hyper::Client::new().get(url.parse().ok()?);
+    let res = tokio::time::timeout(std::time::Duration::from_secs(5), fut)
+        .await
+        .ok()?
+        .ok()?;
+    if res.status() != 200 {
+        return None;
+    }
+    let bytes = hyper::body::to_bytes(res.into_body()).await.ok()?;
+    let val: Value = serde_json::from_slice(&bytes).ok()?;
+    let data = val.get("data").and_then(|d| d.as_array())?;
+    data.first()
+        .and_then(|item| item.get("id"))
+        .and_then(|id| id.as_str())
+        .map(|s| s.to_string())
+}
+
+/// Non-destructive injection of a fixed "gateway-model" virtual entry into the
+/// GET /v1/models response. No-op when upstream already lists it.
+fn inject_gateway_model(parsed: &mut Value) -> bool {
+    let Some(data) = parsed.get_mut("data").and_then(|d| d.as_array_mut()) else {
+        return false;
+    };
+    if data
+        .iter()
+        .any(|item| item.get("id").and_then(|i| i.as_str()) == Some("gateway-model"))
+    {
+        return false;
+    }
+    let fake = serde_json::json!({
+        "id": "gateway-model",
+        "object": "model",
+        "owned_by": "gateway"
+    });
+    data.splice(0..0, std::iter::once(fake));
+    true
+}
+
 fn replace_flag(flags: &[&str], old_val: &str, new_val: &str, content: &str) -> Result<String, String> {
     for flag in flags {
         let search = format!("{} {}", flag, old_val);
@@ -387,8 +434,14 @@ fn perform_switch_blocking(
 ) -> Result<(), String> {
     let model_path = find_model_file(base_path, new_model)?;
 
+    // Only llama.cpp / vLLM are reloaded by rewriting their model flag.
+    // Strata owns its engine/model set (see `handle_model_switch`), so it
+    // must never be treated as a reloadable service here.
     let supported = matches!(svc_type, "llamacpp" | "vllm");
     if !supported {
+        if svc_type == "strata" {
+            return Err("strata manages its own models; refusing service reload".into());
+        }
         return Err(format!("service type `{}` not supported for auto reload", svc_type));
     }
 
@@ -668,8 +721,31 @@ async fn relay_upstream_stream(
     }
 }
 
+/// True when the proxy is fronting a Strata engine. Strata owns its model
+/// list (fixed engine config + aliases) and its systemd unit conflicts with
+/// the llama.cpp units, so we must never reload a service for it.
+fn is_strata_backend(state: &AppState) -> bool {
+    state.service_type.as_deref() == Some("strata")
+        || state
+            .service_svc
+            .as_deref()
+            .is_some_and(|s| s.contains("strata"))
+}
+
 async fn handle_model_switch(state: Arc<AppState>, new_model: String) {
     if new_model.is_empty() {
+        return;
+    }
+
+    // Never rewrite/restart a service for Strata: reloading a llama.cpp unit
+    // would stop Strata through the units' Conflicts= and leave the request
+    // hanging. Strata resolves model aliases itself.
+    if is_strata_backend(&state) {
+        STRATA_SKIP_NOTICE.call_once(|| {
+            eprintln!(
+                "[proxy] strata backend detected; model changes are handled by Strata - not reloading any service"
+            );
+        });
         return;
     }
 
@@ -802,8 +878,19 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string());
 
-            if state.model_shortname_match {
-                if let Some(short) = request_model.clone() {
+            if let Some(short) = request_model.clone() {
+                if state.gateway_model_exposed && short == "gateway-model" {
+                    // gateway-model is a virtual alias: always proxy it to the
+                    // first model advertised by the upstream /v1/models list.
+                    if let Some(available) = get_first_upstream_model(state.upstream_port).await {
+                        eprintln!("[proxy] gateway-model resolved to upstream model: {}", available);
+                        parsed["model"] = Value::String(available.clone());
+                        modified = true;
+                        request_model = Some(available.clone());
+                    } else {
+                        eprintln!("[proxy] gateway-model: upstream listed no models; forwarding as-is");
+                    }
+                } else if state.model_shortname_match {
                     let upstream_host = std::env::var("UPSTREAM_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
                     let ids = get_known_model_ids(&state, &upstream_host).await;
                     if let Some(full) = resolve_full_model(&ids, &short) {
@@ -978,6 +1065,12 @@ async fn proxy_handler(state: Arc<AppState>, req: Request<Body>) -> hyper::Resul
                     eprintln!("[proxy] /v1/models injected short model ids");
                 }
             }
+            if state.gateway_model_exposed && inject_gateway_model(&mut parsed) {
+                if let Ok(new_bytes) = serde_json::to_vec(&parsed) {
+                    res_body_bytes = new_bytes.into();
+                    eprintln!("[proxy] /v1/models injected gateway-model");
+                }
+            }
         }
     }
 
@@ -1022,6 +1115,7 @@ async fn main() {
     let service_svc: Option<String> = std::env::var("SERVICE_SVC").ok();
     let model_change_action: Option<String> = std::env::var("MODEL_CHANGE_ACTION").ok();
     let model_shortname_match: bool = std::env::var("MODEL_SHORTNAME_MATCH").ok().filter(|s| s == "true").is_some();
+    let gateway_model_exposed: bool = std::env::var("GATEWAY_MODEL_EXPOSED").ok().filter(|s| s == "true").is_some();
     let gpu_temp_guard: bool = std::env::var("GPU_TEMP_GUARD").ok().filter(|s| s == "true").is_some();
     let gpu_temp_guard_slot: Option<String> = std::env::var("GPU_TEMP_GUARD_SLOT").ok();
     let gpu_temp_guard_threshold: f64 = std::env::var("GPU_TEMP_GUARD_THRESHOLD")
@@ -1060,6 +1154,9 @@ async fn main() {
     if model_shortname_match {
         println!("  model_shortname_match: true");
     }
+    if gateway_model_exposed {
+        println!("  gateway_model_exposed: true");
+    }
     if gpu_temp_guard {
         println!("  gpu_temp_guard: true on {} (>={}°C)", gpu_temp_guard_slot.as_deref().unwrap_or("?"), gpu_temp_guard_threshold);
     }
@@ -1073,6 +1170,7 @@ async fn main() {
         service_svc,
         model_change_action,
         model_shortname_match,
+        gateway_model_exposed,
         model_list_cache: Mutex::new((Instant::now(), Vec::new())),
         current_model: Mutex::new(initial_model),
         switch_in_progress: AtomicBool::new(false),
@@ -1138,6 +1236,7 @@ mod tests {
             service_svc: None,
             model_change_action: None,
             model_shortname_match: false,
+            gateway_model_exposed: false,
             model_list_cache: Mutex::new((Instant::now(), Vec::new())),
             current_model: Mutex::new(String::new()),
             switch_in_progress: AtomicBool::new(false),
@@ -1149,6 +1248,7 @@ mod tests {
             gpu_guard_cool_streak: std::sync::atomic::AtomicI32::new(0),
             gpu_guard_needs_cooldown: std::sync::atomic::AtomicBool::new(false),
             gpu_temp_cache: Mutex::new((Instant::now(), None, None)),
+            output_mode: "buffered".into(),
         }
     }
 
@@ -1180,5 +1280,22 @@ mod tests {
         assert!(update_gpu_guard_state(&s, 100.0) || true);
         assert!(update_gpu_guard_state(&s, 50.0));
         assert!(!update_gpu_guard_state(&s, 50.0));
+    }
+
+    #[test]
+    fn detects_strata_backend() {
+        let mut s = make_state();
+        assert!(!is_strata_backend(&s));
+
+        s.service_type = Some("strata".into());
+        assert!(is_strata_backend(&s));
+
+        // Misconfigured service_type must still be caught by the unit name.
+        s.service_type = Some("llamacpp".into());
+        s.service_svc = Some("strata-coder.service".into());
+        assert!(is_strata_backend(&s));
+
+        s.service_svc = Some("llama-server.service".into());
+        assert!(!is_strata_backend(&s));
     }
 }

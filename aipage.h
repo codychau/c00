@@ -111,6 +111,7 @@ private:
     QComboBox *m_modelChangeDropdown;
     QCheckBox *m_openclawFormatCheckbox;
     QCheckBox *m_modelShortnameCheckbox;
+    QCheckBox *m_exposeGatewayModelCheckbox;  // 始终暴露名为 gateway-model 的虚构模型
 
     // GPU 高温保护（自动降级规则）
     QCheckBox *m_gpuTempGuardCheckbox;
