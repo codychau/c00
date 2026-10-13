@@ -201,8 +201,8 @@ void StatusPage::installWatchdog()
         "install -m 0644 " + shellQuote(unitPath) + " "
             + shellQuote(HealthMonitor::serviceUnitPath()) + "\n"
         "systemctl daemon-reload\n"
-        "systemctl enable servertoolbox-watchdog.service\n"
-        "systemctl restart servertoolbox-watchdog.service\n"
+        // 首次安装时服务并非 active，systemctl restart 会报错退出；先重启，失败再启动，确保一定被拉起
+        "systemctl restart servertoolbox-watchdog.service || systemctl start servertoolbox-watchdog.service\n"
         "if [ -n \"$SUDO_USER\" ] && [ -f " + shellQuote(cfg)
             + " ]; then chown \"$SUDO_USER\" " + shellQuote(cfg) + "; fi";
 
