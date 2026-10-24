@@ -32,6 +32,7 @@ private slots:
 
 private:
     struct SinkInfo {
+        QString id;
         QString name;
         QString friendlyDesc;
         int volumePercent = 50;
@@ -40,6 +41,18 @@ private:
     void runCmd(const QString &cmd, const QStringList &args,
                 std::function<void(const QString &)> cb);
     void parseSinks();
+
+    QString detectAudioBackend() const;
+    QString friendlyAudioDescription(const QString &desc) const;
+    void parsePactlSinks(const QString &out, const QString &defaultSinkName);
+    void parseWpctlSinks(const QString &out);
+    void fillSinkCombo(int defaultIdx);
+
+    QString detectResolutionBackend() const;
+    void parseNiriResolution(const QString &out);
+    void parseHyprResolution(const QString &out);
+    void parseXrandrResolution(const QString &out);
+    void fillResolutionCombo(const QString &currentRes);
     void setVolume(int percent);
     void refreshVolumeOnly();
     void updateVolumeLabel();
@@ -57,6 +70,8 @@ private:
 
     QList<SinkInfo> m_sinks;
     QString m_currentSinkName;
+    QString m_currentSinkId;
+    QString m_audioBackend;
     int m_currentVolume = 50;
 
     // 分辨率
@@ -67,6 +82,7 @@ private:
 
     QStringList m_availableModes;
     QString m_monitorName;
+    QString m_resolutionBackend;
 
     // 手柄
     QLabel         *m_ctrlStatusLabel;

@@ -27,7 +27,7 @@ ShutdownDialog::ShutdownDialog(const QString &action, QWidget *parent)
 
     m_continueBtn = new QPushButton("继续");
     m_continueBtn->setStyleSheet(
-        "QPushButton { background: #16a34a; color: white; padding: 8px 24px; "
+        "QPushButton { background: #16a34a; color: white; padding: 2px 12px; "
         "border-radius: 4px; font-weight: bold; }"
         "QPushButton:hover { background: #15803d; }");
     connect(m_continueBtn, &QPushButton::clicked, this, &ShutdownDialog::onContinueClicked);
@@ -35,7 +35,7 @@ ShutdownDialog::ShutdownDialog(const QString &action, QWidget *parent)
 
     m_cancelBtn = new QPushButton("取消");
     m_cancelBtn->setStyleSheet(
-        "QPushButton { background: #6b7280; color: white; padding: 8px 24px; "
+        "QPushButton { background: #6b7280; color: white; padding: 2px 12px; "
         "border-radius: 4px; }"
         "QPushButton:hover { background: #4b5563; }");
     connect(m_cancelBtn, &QPushButton::clicked, this, &ShutdownDialog::onCancelClicked);

@@ -19,6 +19,11 @@ public:
     explicit VMPage(QWidget *parent = nullptr);
     ~VMPage() override = default;
 
+    // 供场景定时任务等外部调用（不弹交互对话框）
+    bool startVMByName(const QString &name, bool quiet = true);
+    bool stopVMByName(const QString &name, bool force = true, bool quiet = true);
+    bool isVMRunning(const QString &name) const;
+
 private slots:
     void addVM();
     void editVM(int row);
@@ -32,6 +37,8 @@ private slots:
     void onSelectionChanged();
 
 private:
+    bool startVMAt(int row, bool quiet);
+    bool stopVMAt(int row, bool force, bool quiet);
     void saveConfig();
     void updateStartButton();
     void sendQemuPowerdown(const QString &vmName);

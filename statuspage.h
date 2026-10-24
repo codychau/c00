@@ -30,11 +30,13 @@ protected:
 
 private:
     void installWatchdog();
+    void restoreKernelSettings();
     void runCmd(const QString &cmd, const QStringList &args,
                 std::function<void(const QString &)> cb);
     void setLine(int row, const QString &val, const QString &suffix = QString());
 
     // smartctl 免密权限（借鉴 AI 方案：sudo -n smartctl）
+    QString smartctlPath() const;                  // 查找当前系统的 smartctl 可执行文件
     bool hasPasswordlessSmartctl() const;          // 检测 sudo -n smartctl 是否可用
     bool setupSmartctlSudo(const QString &password); // 一次性写入 /etc/sudoers.d/smartctl
     void fetchDiskTemp(const QString &devName, int tableRow);

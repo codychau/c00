@@ -23,6 +23,7 @@
 #include <QInputDialog>
 #include <QDir>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <QMenu>
 #include <QAction>
 #include <QCoreApplication>
@@ -150,6 +151,11 @@ StatusPage::StatusPage(QWidget *parent)
     connect(watchdogBtn, &QPushButton::clicked, this, &StatusPage::installWatchdog);
     tempRow->addWidget(watchdogBtn);
 
+    auto *kernelRevertBtn = new QPushButton("♻️  关闭内核检测");
+    kernelRevertBtn->setToolTip("移除看门狗写入的内核死机检测参数，并停止 kdump。");
+    connect(kernelRevertBtn, &QPushButton::clicked, this, &StatusPage::restoreKernelSettings);
+    tempRow->addWidget(kernelRevertBtn);
+
     auto *exitBtn = new QPushButton("🚪 退出程序");
     connect(exitBtn, &QPushButton::clicked, qApp, []() { qApp->quit(); });
     tempRow->addWidget(exitBtn);
@@ -172,6 +178,12 @@ void StatusPage::installWatchdog()
     int nginxPort = 80, sshPort = 22;
     HealthMonitor::configPorts(cfg, &nginxPort, &sshPort);
     bool forceKernelReboot = HealthMonitor::configForceKernelReboot(cfg);
+
+    // 机器中途休息（每周定时优雅重启）：从配置回填，便于重复安装时保留上次设置
+    bool restEnabled = false;
+    QVector<int> restDays;
+    QString restStart, restEnd;
+    HealthMonitor::configRestWindow(cfg, &restEnabled, &restDays, &restStart, &restEnd);
 
     QTemporaryDir dir;
     if (!dir.isValid()) {
@@ -197,20 +209,12 @@ void StatusPage::installWatchdog()
         return "'" + q + "'";
     };
 
-    const QString script =
-        "install -m 0644 " + shellQuote(unitPath) + " "
-            + shellQuote(HealthMonitor::serviceUnitPath()) + "\n"
-        "systemctl daemon-reload\n"
-        // 首次安装时服务并非 active，systemctl restart 会报错退出；先重启，失败再启动，确保一定被拉起
-        "systemctl restart servertoolbox-watchdog.service || systemctl start servertoolbox-watchdog.service\n"
-        "if [ -n \"$SUDO_USER\" ] && [ -f " + shellQuote(cfg)
-            + " ]; then chown \"$SUDO_USER\" " + shellQuote(cfg) + "; fi";
-
     const bool needPassword = !AdminHelper::passwordlessSudoAvailable();
 
     QString lastError;
     for (int attempt = 0; attempt < 3; ++attempt) {
-        WatchdogInstallDialog dlg(nginxPort, sshPort, needPassword, forceKernelReboot, this);
+        WatchdogInstallDialog dlg(nginxPort, sshPort, needPassword, forceKernelReboot,
+                                  restEnabled, restDays, restStart, restEnd, this);
         if (attempt > 0)
             dlg.setWindowTitle("安装看门狗（密码错误，请重试）");
         if (dlg.exec() != QDialog::Accepted)
@@ -219,22 +223,63 @@ void StatusPage::installWatchdog()
         nginxPort = dlg.nginxPort();
         sshPort = dlg.sshPort();
         forceKernelReboot = dlg.forceKernelReboot();
+        const bool enableKernelDetection = dlg.kernelDetection();
+        const bool enableKdump = dlg.kdumpEnabled();
+        const bool hungTaskPanic = dlg.hungTaskPanic();
+
+        restEnabled = dlg.restEnabled();
+        restDays = dlg.restDays();
+        restStart = dlg.restStart();
+        restEnd = dlg.restEnd();
 
         HealthMonitor::ensureConfigFile(cfg);
         if (!HealthMonitor::setConfigPorts(cfg, nginxPort, sshPort, forceKernelReboot)) {
             QMessageBox::warning(this, "安装失败", "无法写入配置文件 " + cfg);
             return;
         }
+        if (!HealthMonitor::setConfigRestWindow(cfg, restEnabled, restDays, restStart, restEnd)) {
+            QMessageBox::warning(this, "安装失败", "无法写入休息窗口配置 " + cfg);
+            return;
+        }
+
+        // 复用同一次 sudo 会话：服务安装 + 内核级死机检测一并完成。
+        QString script =
+            "install -m 0644 " + shellQuote(unitPath) + " "
+                + shellQuote(HealthMonitor::serviceUnitPath()) + "\n"
+            "systemctl daemon-reload\n"
+            // 首次安装时服务并非 active，systemctl restart 会报错退出；先重启，失败再启动，确保一定被拉起
+            "systemctl restart servertoolbox-watchdog.service || systemctl start servertoolbox-watchdog.service\n"
+            "if [ -n \"$SUDO_USER\" ] && [ -f " + shellQuote(cfg)
+                + " ]; then chown \"$SUDO_USER\" " + shellQuote(cfg) + "; fi\n";
+        if (enableKernelDetection)
+            script += HealthMonitor::buildKernelEnableScript(enableKdump, hungTaskPanic);
 
         const QString password = needPassword ? dlg.password() : QString();
         QString out, err;
         if (AdminHelper::runAsRootScriptWithPassword(script, password, &out, &err)) {
-            QMessageBox::information(this, "安装成功",
-                QString("看门狗已安装并启动。\n\n服务：servertoolbox-watchdog\n"
-                        "nginx 端口：%1\nSSH 端口：%2\n重启方式：%3\n配置文件：%4")
-                    .arg(nginxPort).arg(sshPort)
-                    .arg(forceKernelReboot ? "直接内核级重启" : "优雅重启（失败回退内核级）")
-                    .arg(cfg));
+            QString msg = QString("看门狗已安装并启动。\n\n服务：servertoolbox-watchdog\n"
+                                  "nginx 端口：%1\nSSH 端口：%2\n重启方式：%3\n配置文件：%4")
+                              .arg(nginxPort).arg(sshPort)
+                              .arg(forceKernelReboot ? "直接内核级重启" : "优雅重启（失败回退内核级）")
+                              .arg(cfg);
+            if (enableKernelDetection) {
+                msg += "\n\n内核级死机检测：已开启";
+                msg += hungTaskPanic ? "\n· CPU 锁死/内核错误/hung_task 自动重启"
+                                     : "\n· CPU 锁死/内核错误自动重启（hung_task 仅告警）";
+                if (enableKdump) {
+                    msg += out.contains("KEXEC_CRASH_LOADED=1")
+                               ? "\n· kdump 崩溃转储：已装载"
+                               : "\n· kdump 崩溃转储：未装载（请确认 crashkernel 已生效）";
+                }
+                msg += "\n· 配置文件：" + HealthMonitor::kernelConfigPath();
+            }
+            if (restEnabled) {
+                msg += QString("\n\n机器中途休息：已开启\n· 每周 %1，%2–%3（进入窗口即优雅重启，每个休息日最多一次）")
+                           .arg(HealthMonitor::restDaysText(restDays), restStart, restEnd);
+            } else {
+                msg += "\n\n机器中途休息：未开启";
+            }
+            QMessageBox::information(this, "安装成功", msg);
             return;
         }
 
@@ -246,6 +291,28 @@ void StatusPage::installWatchdog()
     }
 
     QMessageBox::warning(this, "安装失败", lastError.isEmpty() ? "认证失败" : lastError);
+}
+
+void StatusPage::restoreKernelSettings()
+{
+    if (QMessageBox::question(this, "关闭内核级检测",
+            "将移除看门狗写入的内核参数（" + HealthMonitor::kernelConfigPath()
+                + "）并停止 kdump。\n\n"
+                  "移除后，CPU 锁死/内核错误不再自动重启。\n\n确定继续吗？")
+        != QMessageBox::Yes) {
+        return;
+    }
+
+    QString out, err;
+    if (!AdminHelper::runAsRootScript(HealthMonitor::buildKernelDisableScript(), this, &out, &err)) {
+        QMessageBox::warning(this, "操作失败", err);
+        return;
+    }
+
+    QMessageBox::information(this, "已关闭",
+        QString("内核级死机检测配置已移除。\n\n")
+            + (out.contains("KEXEC_CRASH_LOADED=1") ? "注意：kdump 仍处于装载状态。"
+                                                    : "kdump 已卸载。"));
 }
 
 void StatusPage::runCmd(const QString &cmd, const QStringList &args,
@@ -277,6 +344,28 @@ void StatusPage::showEvent(QShowEvent *event)
 }
 
 // ── 获取单块盘的温度 ──
+
+QString StatusPage::smartctlPath() const
+{
+    QString path = QStandardPaths::findExecutable("smartctl");
+    if (!path.isEmpty())
+        return path;
+
+    const QStringList candidates = {
+        "/usr/sbin/smartctl",
+        "/usr/bin/smartctl",
+        "/sbin/smartctl",
+        "/bin/smartctl",
+    };
+
+    for (const QString &candidate : candidates) {
+        if (QFile::exists(candidate))
+            return candidate;
+    }
+
+    return QString();
+}
+
 void StatusPage::fetchDiskTemp(const QString &devName, int tableRow)
 {
     QString devPath = QString("/dev/%1").arg(devName);
@@ -335,22 +424,42 @@ void StatusPage::fetchDiskTemp(const QString &devName, int tableRow)
         }
         m_tempCache[cacheKey] = tempStr;
     });
-    proc->start("sudo", {"-n", "smartctl", "-A", devPath});
+    const QString smartctl = smartctlPath();
+    if (smartctl.isEmpty()) {
+        m_diskStatus->setText("未找到 smartctl，请先安装 smartmontools");
+        if (auto *item = m_diskTable->item(tableRow, ColTemp))
+            item->setText("N/A");
+        proc->deleteLater();
+        return;
+    }
+
+    proc->start("sudo", {"-n", smartctl, "-A", devPath});
 }
 
 bool StatusPage::hasPasswordlessSmartctl() const
 {
+    const QString smartctl = smartctlPath();
+    if (smartctl.isEmpty())
+        return false;
+
     QProcess check;
-    check.start("sudo", {"-n", "smartctl", "-V"});
+    check.start("sudo", {"-n", smartctl, "-V"});
     if (!check.waitForFinished(5000)) return false;
     return check.exitStatus() == QProcess::NormalExit && check.exitCode() == 0;
 }
 
 bool StatusPage::setupSmartctlSudo(const QString &password)
 {
+    const QString smartctl = smartctlPath();
+    if (smartctl.isEmpty()) {
+        QMessageBox::warning(this, "智能磁盘免密配置失败",
+            "未找到 smartctl，请先安装 smartmontools。");
+        return false;
+    }
+
     QString user = qEnvironmentVariable("USER");
     if (user.isEmpty()) user = "root";
-    QString content = QString("%1 ALL=(root) NOPASSWD: /usr/bin/smartctl\n").arg(user);
+    QString content = QString("%1 ALL=(root) NOPASSWD: %2\n").arg(user, smartctl);
 
     auto *tmp = new QTemporaryFile("/tmp/smartctl-sudoers-XXXXXX", this);
     tmp->setAutoRemove(true);

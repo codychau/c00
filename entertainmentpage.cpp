@@ -6,8 +6,11 @@
 #include <QScrollArea>
 #include <QHash>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QTimer>
 #include <QFrame>
+
+#include <memory>
 
 EntertainmentPage::EntertainmentPage(QWidget *parent)
     : QWidget(parent)
@@ -206,12 +209,11 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
                 if (label.isEmpty() || launch.isEmpty() || seen.contains(label)) return;
                 seen.insert(label, launch);
                 auto *b = new QPushButton(label);
-                b->setMinimumHeight(56);
                 b->setMinimumWidth(150);
                 b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
                 b->setStyleSheet(
                     "QPushButton { background-color: #2d2d2d; color: #eee; border: 1px solid #444;"
-                    "border-radius: 8px; padding: 6px 10px; font-size: 15px; font-weight: bold; }"
+                    "border-radius: 8px; padding: 2px 10px; font-size: 13px; font-weight: bold; }"
                     "QPushButton:hover { background-color: #3d3d3d; border-color: #5a9; }"
                     "QPushButton:pressed { background-color: #2b5797; }");
                 connect(b, &QPushButton::clicked, [launch]() {
@@ -271,73 +273,254 @@ void EntertainmentPage::runCmd(const QString &cmd, const QStringList &args,
                                std::function<void(const QString &)> cb)
 {
     auto *p = new QProcess(this);
+    auto done = std::make_shared<bool>(false);
+
+    auto finish = [p, cb, done](const QString &out) {
+        if (*done) return;
+        *done = true;
+        cb(out);
+        p->deleteLater();
+    };
+
     connect(p, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [p, cb](int, QProcess::ExitStatus) {
-                cb(QString::fromUtf8(p->readAllStandardOutput()).trimmed());
-                p->deleteLater();
+            this, [p, finish](int, QProcess::ExitStatus) {
+                finish(QString::fromUtf8(p->readAllStandardOutput()).trimmed());
             });
+
+    // 命令不存在时（例如 Ubuntu + niri 下没有 hyprctl）也要回调，避免界面卡在“检测中”。
+    connect(p, &QProcess::errorOccurred, this, [finish](QProcess::ProcessError) {
+        finish(QString());
+    });
+
     p->setProcessChannelMode(QProcess::MergedChannels);
     p->start(cmd, args);
 }
 
 // ── 分辨率 ──────────────────────────────────────────────
 
+QString EntertainmentPage::detectResolutionBackend() const
+{
+    if (qEnvironmentVariableIsSet("NIRI_SOCKET"))
+        return "niri";
+
+    if (qEnvironmentVariableIsSet("HYPRLAND_INSTANCE_SIGNATURE"))
+        return "hyprctl";
+
+    const QString wayland = qEnvironmentVariable("WAYLAND_DISPLAY");
+    const QString x11 = qEnvironmentVariable("DISPLAY");
+
+    if (!wayland.isEmpty()) {
+        if (!QStandardPaths::findExecutable("niri").isEmpty())
+            return "niri";
+        if (!QStandardPaths::findExecutable("hyprctl").isEmpty())
+            return "hyprctl";
+        return "wayland";
+    }
+
+    if (!x11.isEmpty() && !QStandardPaths::findExecutable("xrandr").isEmpty())
+        return "xrandr";
+
+    return "none";
+}
+
+void EntertainmentPage::fillResolutionCombo(const QString &currentRes)
+{
+    m_resolutionCombo->blockSignals(true);
+    m_resolutionCombo->clear();
+
+    for (const auto &mode : m_availableModes)
+        m_resolutionCombo->addItem(mode);
+
+    if (!currentRes.isEmpty()) {
+        int idx = m_resolutionCombo->findText(currentRes);
+        if (idx >= 0)
+            m_resolutionCombo->setCurrentIndex(idx);
+        m_currentResLabel->setText(
+            QString("当前分辨率：%1  [显示器: %2]").arg(currentRes, m_monitorName));
+    } else {
+        m_currentResLabel->setText("当前分辨率：未知");
+    }
+
+    m_resolutionCombo->blockSignals(false);
+    m_resStatus->setText(
+        QString("共 %1 种分辨率模式（%2）")
+            .arg(m_availableModes.size())
+            .arg(m_resolutionBackend));
+}
+
+void EntertainmentPage::parseNiriResolution(const QString &out)
+{
+    m_availableModes.clear();
+    m_monitorName.clear();
+
+    QString currentRes;
+    bool inAvailable = false;
+    bool firstOutput = true;
+
+    for (const auto &line : out.split('\n')) {
+        const auto t = line.trimmed();
+
+        if (t.startsWith("Output ")) {
+            const int open = t.indexOf('(');
+            const int close = t.indexOf(')', open);
+            if (open >= 0 && close > open) {
+                const QString name = t.mid(open + 1, close - open - 1);
+                if (firstOutput) {
+                    m_monitorName = name;
+                    firstOutput = false;
+                }
+            }
+            inAvailable = false;
+            continue;
+        }
+
+        if (t.startsWith("Current mode:")) {
+            QRegularExpression re(R"((\d+x\d+)\s*@\s*([\d.]+))");
+            const auto m = re.match(t);
+            if (m.hasMatch())
+                currentRes = m.captured(1) + "@" + m.captured(2);
+            continue;
+        }
+
+        if (t.startsWith("Available modes:")) {
+            inAvailable = true;
+            continue;
+        }
+
+        if (inAvailable) {
+            QRegularExpression modeRe(R"((\d+x\d+@[\d.]+))");
+            const auto m = modeRe.match(t);
+            if (m.hasMatch()) {
+                const QString mode = m.captured(1);
+                if (!m_availableModes.contains(mode))
+                    m_availableModes.append(mode);
+            }
+        }
+    }
+
+    fillResolutionCombo(currentRes);
+}
+
+void EntertainmentPage::parseHyprResolution(const QString &out)
+{
+    m_availableModes.clear();
+    m_monitorName.clear();
+
+    QString currentRes;
+    for (const auto &line : out.split('\n')) {
+        auto t = line.trimmed();
+        if (t.startsWith("Monitor ")) {
+            m_monitorName = t.section(' ', 1, 1).chopped(1);
+        }
+        if (t.startsWith("availableModes:")) {
+            QString modesStr = t.mid(QString("availableModes:").length()).trimmed();
+            QStringList seen;
+            for (const auto &m : modesStr.split(' ')) {
+                if (m.isEmpty()) continue;
+                if (!seen.contains(m)) {
+                    seen.append(m);
+                    m_availableModes.append(m);
+                }
+            }
+        }
+
+        QRegularExpression resRe(R"((\d+x\d+@[\d.]+)\s+at\s+0x0)");
+        auto match = resRe.match(t);
+        if (match.hasMatch())
+            currentRes = match.captured(1);
+    }
+
+    fillResolutionCombo(currentRes);
+}
+
+void EntertainmentPage::parseXrandrResolution(const QString &out)
+{
+    m_availableModes.clear();
+    m_monitorName.clear();
+
+    QString currentRes;
+    bool outputSelected = false;
+
+    for (const auto &line : out.split('\n')) {
+        const auto t = line.trimmed();
+
+        if (!outputSelected && t.contains(" connected ")) {
+            const auto parts = t.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+            if (!parts.isEmpty())
+                m_monitorName = parts[0];
+
+            QRegularExpression currentRe(R"((\d+x\d+)\+\d+\+\d+)");
+            const auto m = currentRe.match(t);
+            if (m.hasMatch())
+                currentRes = m.captured(1);
+
+            outputSelected = true;
+            continue;
+        }
+
+        if (!outputSelected)
+            continue;
+
+        const auto parts = t.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+        if (parts.size() < 2)
+            continue;
+
+        const QString res = parts[0];
+        const QString rate = parts[1];
+        if (!res.contains('x') || !rate.contains('.'))
+            continue;
+
+        const QString refresh = rate.split('*', Qt::SkipEmptyParts).first();
+        const QString mode = res + "@" + refresh;
+
+        if (!m_availableModes.contains(mode))
+            m_availableModes.append(mode);
+
+        if (rate.contains('*'))
+            currentRes = mode;
+    }
+
+    fillResolutionCombo(currentRes);
+}
+
 void EntertainmentPage::refreshResolution()
 {
     m_resStatus->setText("检测中…");
+    m_resolutionBackend = detectResolutionBackend();
 
-    runCmd("hyprctl", {"monitors"}, [this](const QString &out) {
+    if (m_resolutionBackend == "niri") {
+        runCmd("niri", {"msg", "outputs"}, [this](const QString &out) {
+            if (out.isEmpty()) {
+                m_resStatus->setText("⚠️ niri 未返回输出信息（请确认在 niri 会话内运行）");
+                return;
+            }
+            parseNiriResolution(out);
+        });
+    } else if (m_resolutionBackend == "hyprctl") {
+        runCmd("hyprctl", {"monitors"}, [this](const QString &out) {
+            if (out.isEmpty()) {
+                m_resStatus->setText("⚠️ hyprctl 未返回显示器信息");
+                return;
+            }
+            parseHyprResolution(out);
+        });
+    } else if (m_resolutionBackend == "xrandr") {
+        runCmd("xrandr", {"--query"}, [this](const QString &out) {
+            if (out.isEmpty()) {
+                m_resStatus->setText("⚠️ xrandr 未返回显示器信息");
+                return;
+            }
+            parseXrandrResolution(out);
+        });
+    } else {
         m_availableModes.clear();
         m_monitorName.clear();
         m_resolutionCombo->blockSignals(true);
         m_resolutionCombo->clear();
-
-        QString currentRes;
-        for (const auto &line : out.split('\n')) {
-            auto t = line.trimmed();
-            if (t.startsWith("Monitor ")) {
-                m_monitorName = t.section(' ', 1, 1).chopped(1);
-            }
-            if (t.startsWith("availableModes:")) {
-                QString modesStr = t.mid(QString("availableModes:").length()).trimmed();
-                // 去重（hyprctl 有重复）
-                QStringList seen;
-                for (const auto &m : modesStr.split(' ')) {
-                    if (m.isEmpty()) continue;
-                    if (!seen.contains(m)) {
-                        seen.append(m);
-                        m_availableModes.append(m);
-                    }
-                }
-            }
-            // 当前分辨率行
-            QRegularExpression resRe(R"((\d+x\d+@[\d.]+)\s+at\s+0x0)");
-            auto match = resRe.match(t);
-            if (match.hasMatch()) {
-                currentRes = match.captured(1);
-            }
-        }
-
-        // 填充下拉
-        for (const auto &mode : m_availableModes) {
-            m_resolutionCombo->addItem(mode);
-        }
-
-        // 选中当前分辨率
-        if (!currentRes.isEmpty()) {
-            int idx = m_resolutionCombo->findText(currentRes);
-            if (idx >= 0) m_resolutionCombo->setCurrentIndex(idx);
-            m_currentResLabel->setText(
-                QString("当前分辨率：%1  [显示器: %2]").arg(currentRes, m_monitorName));
-        } else {
-            m_currentResLabel->setText(
-                QString("当前分辨率：%1").arg(currentRes.isEmpty() ? "未知" : currentRes));
-        }
-
         m_resolutionCombo->blockSignals(false);
-        m_resStatus->setText(
-            QString("共 %1 种分辨率模式").arg(m_availableModes.size()));
-    });
+        m_currentResLabel->setText("当前分辨率：不可用");
+        m_resStatus->setText("未找到可用的分辨率后端（niri / hyprctl / xrandr）");
+    }
 }
 
 void EntertainmentPage::onResolutionChanged()
@@ -347,105 +530,294 @@ void EntertainmentPage::onResolutionChanged()
 
     m_resStatus->setText(QString("⏳ 切换到 %1…").arg(mode));
 
-    // hyprctl 格式: monitor=NAME,RES@HZ,auto,1
-    runCmd("hyprctl", {"keyword", "monitor",
-                       QString("%1,%2,auto,1").arg(m_monitorName, mode)},
-           [this, mode](const QString &out) {
-               if (out.contains("error", Qt::CaseInsensitive) || out.isEmpty()) {
-                   m_resStatus->setText(QString("✅ 已切换到 %1").arg(mode));
-               } else {
-                   m_resStatus->setText(QString("⚠️ %1").arg(out));
-               }
-               // 延迟刷新确认
-               QTimer::singleShot(1500, this, &EntertainmentPage::refreshResolution);
-           });
+    if (m_resolutionBackend == "niri") {
+        runCmd("niri", {"msg", "output", m_monitorName, "mode", mode},
+               [this, mode](const QString &out) {
+                   if (out.isEmpty()) {
+                       m_resStatus->setText(QString("✅ 已切换到 %1").arg(mode));
+                   } else {
+                       m_resStatus->setText(QString("⚠️ %1").arg(out));
+                   }
+                   QTimer::singleShot(1500, this, &EntertainmentPage::refreshResolution);
+               });
+        return;
+    }
+
+    if (m_resolutionBackend == "hyprctl") {
+        // hyprctl 格式: monitor=NAME,RES@HZ,auto,1
+        runCmd("hyprctl", {"keyword", "monitor",
+                           QString("%1,%2,auto,1").arg(m_monitorName, mode)},
+               [this, mode](const QString &out) {
+                   if (out.contains("error", Qt::CaseInsensitive) || out.isEmpty()) {
+                       m_resStatus->setText(QString("✅ 已切换到 %1").arg(mode));
+                   } else {
+                       m_resStatus->setText(QString("⚠️ %1").arg(out));
+                   }
+                   QTimer::singleShot(1500, this, &EntertainmentPage::refreshResolution);
+               });
+        return;
+    }
+
+    if (m_resolutionBackend == "xrandr") {
+        const int sep = mode.indexOf('@');
+        const QString res = sep >= 0 ? mode.left(sep) : mode;
+        const QString rate = sep >= 0 ? mode.mid(sep + 1) : QString();
+
+        QStringList args;
+        args << "--output" << m_monitorName << "--mode" << res;
+        if (!rate.isEmpty())
+            args << "--rate" << rate;
+
+        runCmd("xrandr", args, [this, mode](const QString &out) {
+            if (out.contains("error", Qt::CaseInsensitive)) {
+                m_resStatus->setText(QString("⚠️ %1").arg(out));
+            } else {
+                m_resStatus->setText(QString("✅ 已切换到 %1").arg(mode));
+            }
+            QTimer::singleShot(1500, this, &EntertainmentPage::refreshResolution);
+        });
+        return;
+    }
+
+    m_resStatus->setText("未找到可用的分辨率后端");
 }
 
 // ── 音频 ──────────────────────────────────────────────
 
-void EntertainmentPage::parseSinks()
+QString EntertainmentPage::detectAudioBackend() const
 {
-    runCmd("pactl", {"info"}, [this](const QString &info) {
-        QString defaultSinkName;
-        for (const auto &l : info.split('\n'))
-            if (l.startsWith("Default Sink:"))
-                defaultSinkName = l.mid(QString("Default Sink:").length()).trimmed();
+    if (!QStandardPaths::findExecutable("pactl").isEmpty())
+        return "pactl";
+    if (!QStandardPaths::findExecutable("wpctl").isEmpty())
+        return "wpctl";
+    return "none";
+}
 
-        runCmd("pactl", {"list", "sinks"}, [this, defaultSinkName](const QString &out) {
-            m_sinks.clear();
-            QString curName, curDesc, curFriendly;
-            int curVol = 50, foundIdx = 0;
+QString EntertainmentPage::friendlyAudioDescription(const QString &desc) const
+{
+    if (desc.contains("HDMI", Qt::CaseInsensitive))
+        return "🔊 HDMI 音频输出（显卡）";
+    if (desc.contains("IEC958", Qt::CaseInsensitive))
+        return "🔊 SPDIF 光纤输出（主板）";
+    if (desc.contains("analog", Qt::CaseInsensitive))
+        return "🔊 模拟输出（主板）";
+    return desc;
+}
 
-            auto lines = out.split('\n');
-            for (int i = 0; i < lines.size(); ++i) {
-                QString t = lines[i].trimmed();
+void EntertainmentPage::fillSinkCombo(int defaultIdx)
+{
+    m_sinkCombo->blockSignals(true);
+    m_sinkCombo->clear();
 
-                if (t.startsWith("Sink #")) {
-                    if (!curName.isEmpty()) {
-                        SinkInfo si;
-                        si.name = curName;
-                        si.friendlyDesc = curFriendly;
-                        si.volumePercent = curVol;
-                        m_sinks.append(si);
-                    }
-                    curName.clear(); curDesc.clear();
-                    curVol = 50;
-                    continue;
-                }
-                if (t.startsWith("Name: "))
-                    curName = t.mid(QString("Name: ").length()).trimmed();
-                else if (t.startsWith("Description: ")) {
-                    curDesc = t.mid(QString("Description: ").length()).trimmed();
-                    if (curDesc.contains("HDMI", Qt::CaseInsensitive))
-                        curFriendly = "🔊 HDMI 音频输出（显卡）";
-                    else if (curDesc.contains("IEC958", Qt::CaseInsensitive))
-                        curFriendly = "🔊 SPDIF 光纤输出（主板）";
-                    else if (curDesc.contains("analog", Qt::CaseInsensitive))
-                        curFriendly = "🔊 模拟输出（主板）";
-                    else
-                        curFriendly = curDesc;
-                } else if (t.startsWith("Volume:")) {
-                    QRegularExpression vr(R"((\d+)%)");
-                    auto m = vr.match(t);
-                    if (m.hasMatch())
-                        curVol = m.captured(1).toInt();
-                }
-            }
+    for (const auto &si : m_sinks)
+        m_sinkCombo->addItem(si.friendlyDesc);
+
+    if (!m_sinks.isEmpty()) {
+        if (defaultIdx < 0)
+            defaultIdx = 0;
+
+        const auto &si = m_sinks[defaultIdx];
+        m_currentSinkId = si.id;
+        m_currentSinkName = si.name;
+        m_currentVolume = si.volumePercent;
+
+        m_sinkCombo->setCurrentIndex(defaultIdx);
+        m_sinkLabel->setText(QString("当前输出：%1").arg(si.friendlyDesc));
+
+        m_volumeSlider->blockSignals(true);
+        m_volumeSlider->setValue(m_currentVolume);
+        m_volumeSlider->blockSignals(false);
+        updateVolumeLabel();
+
+        m_status->setText(QString("就绪（%1）").arg(m_audioBackend));
+    } else {
+        m_currentSinkId.clear();
+        m_currentSinkName.clear();
+        m_sinkLabel->setText("当前输出：（未检测到）");
+        m_status->setText("⚠️ 未检测到音频设备");
+    }
+
+    m_sinkCombo->blockSignals(false);
+}
+
+void EntertainmentPage::parsePactlSinks(const QString &out, const QString &defaultSinkName)
+{
+    m_sinks.clear();
+    QString curName, curFriendly;
+    int curVol = 50;
+    int defaultIdx = -1;
+
+    auto lines = out.split('\n');
+    for (int i = 0; i < lines.size(); ++i) {
+        QString t = lines[i].trimmed();
+
+        if (t.startsWith("Sink #")) {
             if (!curName.isEmpty()) {
                 SinkInfo si;
+                si.id = curName;
                 si.name = curName;
                 si.friendlyDesc = curFriendly;
                 si.volumePercent = curVol;
                 m_sinks.append(si);
+                if (curName == defaultSinkName)
+                    defaultIdx = m_sinks.size() - 1;
+            }
+            curName.clear();
+            curFriendly.clear();
+            curVol = 50;
+            continue;
+        }
+
+        if (t.startsWith("Name: "))
+            curName = t.mid(QString("Name: ").length()).trimmed();
+        else if (t.startsWith("Description: "))
+            curFriendly = friendlyAudioDescription(t.mid(QString("Description: ").length()).trimmed());
+        else if (t.startsWith("Volume:")) {
+            QRegularExpression vr(R"((\d+)%)");
+            auto m = vr.match(t);
+            if (m.hasMatch())
+                curVol = m.captured(1).toInt();
+        }
+    }
+
+    if (!curName.isEmpty()) {
+        SinkInfo si;
+        si.id = curName;
+        si.name = curName;
+        si.friendlyDesc = curFriendly;
+        si.volumePercent = curVol;
+        m_sinks.append(si);
+        if (curName == defaultSinkName)
+            defaultIdx = m_sinks.size() - 1;
+    }
+
+    fillSinkCombo(defaultIdx);
+}
+
+void EntertainmentPage::parseWpctlSinks(const QString &out)
+{
+    m_sinks.clear();
+
+    bool inSinks = false;
+    bool inDefaultSection = false;
+    QString defaultName;
+    int defaultIdx = -1;
+
+    for (const auto &line : out.split('\n')) {
+        const auto t = line.trimmed();
+
+        if (t.startsWith("├─ Sinks:")) {
+            inSinks = true;
+            continue;
+        }
+
+        if (inSinks) {
+            if (t.startsWith("├─ Sources:") ||
+                t.startsWith("├─ Filters:") ||
+                t.startsWith("└─ Streams:")) {
+                inSinks = false;
+                continue;
             }
 
-            m_sinkCombo->blockSignals(true);
-            m_sinkCombo->clear();
-            int selectIdx = 0;
-            for (int i = 0; i < m_sinks.size(); ++i) {
-                m_sinkCombo->addItem(m_sinks[i].friendlyDesc);
-                if (m_sinks[i].name == defaultSinkName) {
-                    selectIdx = i;
-                    m_currentSinkName = m_sinks[i].name;
-                    m_currentVolume = m_sinks[i].volumePercent;
-                }
-            }
-            if (!m_sinks.isEmpty()) {
-                m_sinkCombo->setCurrentIndex(selectIdx);
-                m_sinkLabel->setText(
-                    QString("当前输出：%1").arg(m_sinks[selectIdx].friendlyDesc));
-                m_volumeSlider->blockSignals(true);
-                m_volumeSlider->setValue(m_currentVolume);
-                m_volumeSlider->blockSignals(false);
-                updateVolumeLabel();
-            } else {
-                m_sinkLabel->setText("当前输出：（未检测到）");
-            }
-            m_sinkCombo->blockSignals(false);
+            if (!t.startsWith("│"))
+                continue;
 
-            m_status->setText(m_sinks.isEmpty() ? "⚠️ 未检测到音频设备" : "就绪");
+            QString body = t.mid(1).trimmed();
+            const bool isDefault = body.startsWith("*");
+            if (isDefault)
+                body = body.mid(1).trimmed();
+
+            const int dot = body.indexOf(". ");
+            if (dot <= 0)
+                continue;
+
+            const QString id = body.left(dot);
+            const QString rest = body.mid(dot + 2);
+
+            const int bracket = rest.indexOf(" [vol:");
+            const QString desc = bracket >= 0 ? rest.left(bracket).trimmed() : rest.trimmed();
+
+            int vol = 50;
+            QRegularExpression volRe(R"(\[vol:\s*([0-9.]+)\])");
+            const auto m = volRe.match(rest);
+            if (m.hasMatch())
+                vol = qRound(m.captured(1).toDouble() * 100.0);
+
+            SinkInfo si;
+            si.id = id;
+            si.name = desc;
+            si.friendlyDesc = friendlyAudioDescription(desc);
+            si.volumePercent = vol;
+            m_sinks.append(si);
+
+            if (isDefault)
+                defaultIdx = m_sinks.size() - 1;
+        }
+
+        if (t.startsWith("Default Configured Devices:")) {
+            inDefaultSection = true;
+            continue;
+        }
+
+        if (inDefaultSection && t.contains("Audio/Sink")) {
+            const int dot = t.indexOf(". ");
+            const QString rest = dot >= 0 ? t.mid(dot + 2) : t;
+            const int sp = rest.indexOf(' ');
+            if (sp >= 0)
+                defaultName = rest.mid(sp + 1).trimmed();
+        }
+    }
+
+    if (defaultIdx < 0 && !defaultName.isEmpty()) {
+        for (int i = 0; i < m_sinks.size(); ++i) {
+            if (m_sinks[i].name == defaultName) {
+                defaultIdx = i;
+                break;
+            }
+        }
+    }
+
+    fillSinkCombo(defaultIdx);
+}
+
+void EntertainmentPage::parseSinks()
+{
+    m_audioBackend = detectAudioBackend();
+
+    if (m_audioBackend == "pactl") {
+        runCmd("pactl", {"info"}, [this](const QString &info) {
+            QString defaultSinkName;
+            for (const auto &l : info.split('\n')) {
+                if (l.startsWith("Default Sink:"))
+                    defaultSinkName = l.mid(QString("Default Sink:").length()).trimmed();
+            }
+
+            runCmd("pactl", {"list", "sinks"}, [this, defaultSinkName](const QString &out) {
+                parsePactlSinks(out, defaultSinkName);
+            });
         });
-    });
+        return;
+    }
+
+    if (m_audioBackend == "wpctl") {
+        runCmd("wpctl", {"status"}, [this](const QString &out) {
+            if (out.isEmpty()) {
+                m_status->setText("⚠️ wpctl 未返回音频信息");
+                return;
+            }
+            parseWpctlSinks(out);
+        });
+        return;
+    }
+
+    m_sinks.clear();
+    m_currentSinkId.clear();
+    m_currentSinkName.clear();
+    m_sinkCombo->blockSignals(true);
+    m_sinkCombo->clear();
+    m_sinkCombo->blockSignals(false);
+    m_sinkLabel->setText("当前输出：（不可用）");
+    m_status->setText("未找到音频后端（pactl / wpctl）");
 }
 
 void EntertainmentPage::refreshStatus()
@@ -457,65 +829,189 @@ void EntertainmentPage::refreshStatus()
 void EntertainmentPage::onSwitchSink(int index)
 {
     if (index < 0 || index >= m_sinks.size()) return;
-    if (m_sinks[index].name == m_currentSinkName) return;
 
-    m_status->setText("⏳ 切换中…");
-    runCmd("pactl", {"set-default-sink", m_sinks[index].name},
-           [this, index](const QString &) {
-               m_currentSinkName = m_sinks[index].name;
-               m_sinkLabel->setText(
-                   QString("当前输出：%1").arg(m_sinks[index].friendlyDesc));
-               m_status->setText(
-                   QString("✅ 已切换到 %1").arg(m_sinks[index].friendlyDesc));
-               parseSinks();
-           });
+    const auto &si = m_sinks[index];
+
+    if (m_audioBackend == "pactl") {
+        if (si.name == m_currentSinkName) return;
+
+        m_status->setText("⏳ 切换中…");
+        runCmd("pactl", {"set-default-sink", si.name},
+               [this, index](const QString &) {
+                   m_currentSinkName = m_sinks[index].name;
+                   m_sinkLabel->setText(
+                       QString("当前输出：%1").arg(m_sinks[index].friendlyDesc));
+                   m_status->setText(
+                       QString("✅ 已切换到 %1").arg(m_sinks[index].friendlyDesc));
+                   parseSinks();
+               });
+        return;
+    }
+
+    if (m_audioBackend == "wpctl") {
+        if (si.id == m_currentSinkId) return;
+
+        m_status->setText("⏳ 切换中…");
+        runCmd("wpctl", {"set-default", si.id},
+               [this, index](const QString &) {
+                   m_currentSinkId = m_sinks[index].id;
+                   m_currentSinkName = m_sinks[index].name;
+                   m_sinkLabel->setText(
+                       QString("当前输出：%1").arg(m_sinks[index].friendlyDesc));
+                   m_status->setText(
+                       QString("✅ 已切换到 %1").arg(m_sinks[index].friendlyDesc));
+                   parseSinks();
+               });
+        return;
+    }
+
+    m_status->setText("未找到音频后端");
 }
 
 void EntertainmentPage::onVolumeSliderReleased()
 {
-    if (m_currentSinkName.isEmpty()) return;
     setVolume(m_volumeSlider->value());
 }
 
 void EntertainmentPage::setVolume(int percent)
 {
-    if (m_currentSinkName.isEmpty()) return;
     int v = qBound(0, percent, 100);
-    runCmd("pactl", {"set-sink-volume", m_currentSinkName,
-                     QString("%1%").arg(v)},
-           [this, v](const QString &) { m_currentVolume = v; updateVolumeLabel(); });
+
+    if (m_audioBackend == "pactl") {
+        if (m_currentSinkName.isEmpty()) return;
+
+        runCmd("pactl", {"set-sink-volume", m_currentSinkName,
+                         QString("%1%").arg(v)},
+               [this, v](const QString &) {
+                   m_currentVolume = v;
+                   updateVolumeLabel();
+               });
+        return;
+    }
+
+    if (m_audioBackend == "wpctl") {
+        if (m_currentSinkId.isEmpty()) return;
+
+        runCmd("wpctl", {"set-volume", m_currentSinkId,
+                         QString("%1%").arg(v)},
+               [this, v](const QString &) {
+                   m_currentVolume = v;
+                   updateVolumeLabel();
+               });
+        return;
+    }
 }
 
 void EntertainmentPage::onVolumeUp()
 {
-    if (m_currentSinkName.isEmpty()) return;
-    runCmd("pactl", {"set-sink-volume", m_currentSinkName, "+5%"},
-           [this](const QString &) { refreshVolumeOnly(); });
+    if (m_audioBackend == "pactl") {
+        if (m_currentSinkName.isEmpty()) return;
+
+        runCmd("pactl", {"set-sink-volume", m_currentSinkName, "+5%"},
+               [this](const QString &) { refreshVolumeOnly(); });
+        return;
+    }
+
+    if (m_audioBackend == "wpctl") {
+        if (m_currentSinkId.isEmpty()) return;
+
+        runCmd("wpctl", {"set-volume", m_currentSinkId, "5%+"},
+               [this](const QString &) { refreshVolumeOnly(); });
+        return;
+    }
 }
 
 void EntertainmentPage::onVolumeDown()
 {
-    if (m_currentSinkName.isEmpty()) return;
-    runCmd("pactl", {"set-sink-volume", m_currentSinkName, "-5%"},
-           [this](const QString &) { refreshVolumeOnly(); });
+    if (m_audioBackend == "pactl") {
+        if (m_currentSinkName.isEmpty()) return;
+
+        runCmd("pactl", {"set-sink-volume", m_currentSinkName, "-5%"},
+               [this](const QString &) { refreshVolumeOnly(); });
+        return;
+    }
+
+    if (m_audioBackend == "wpctl") {
+        if (m_currentSinkId.isEmpty()) return;
+
+        runCmd("wpctl", {"set-volume", m_currentSinkId, "5%-"},
+               [this](const QString &) { refreshVolumeOnly(); });
+        return;
+    }
 }
 
 void EntertainmentPage::refreshVolumeOnly()
 {
-    if (m_currentSinkName.isEmpty()) return;
-    runCmd("pactl", {"list", "sinks"}, [this](const QString &out) {
-        bool found = false;
-        for (const auto &l : out.split('\n')) {
-            QString t = l.trimmed();
-            if (t.startsWith("Name: ") &&
-                t.mid(QString("Name: ").length()).trimmed() == m_currentSinkName) {
-                found = true; continue;
+    if (m_audioBackend == "pactl") {
+        if (m_currentSinkName.isEmpty()) return;
+
+        runCmd("pactl", {"list", "sinks"}, [this](const QString &out) {
+            bool found = false;
+            for (const auto &l : out.split('\n')) {
+                QString t = l.trimmed();
+                if (t.startsWith("Name: ") &&
+                    t.mid(QString("Name: ").length()).trimmed() == m_currentSinkName) {
+                    found = true;
+                    continue;
+                }
+                if (found && t.startsWith("Volume:")) {
+                    QRegularExpression vr(R"((\d+)%)");
+                    auto m = vr.match(t);
+                    if (m.hasMatch()) {
+                        m_currentVolume = m.captured(1).toInt();
+                        m_volumeSlider->blockSignals(true);
+                        m_volumeSlider->setValue(m_currentVolume);
+                        m_volumeSlider->blockSignals(false);
+                        updateVolumeLabel();
+                    }
+                    break;
+                }
             }
-            if (found && t.startsWith("Volume:")) {
-                QRegularExpression vr(R"((\d+)%)");
-                auto m = vr.match(t);
+        });
+        return;
+    }
+
+    if (m_audioBackend == "wpctl") {
+        if (m_currentSinkId.isEmpty()) return;
+
+        runCmd("wpctl", {"status"}, [this](const QString &out) {
+            bool inSinks = false;
+
+            for (const auto &line : out.split('\n')) {
+                const auto t = line.trimmed();
+
+                if (t.startsWith("├─ Sinks:")) {
+                    inSinks = true;
+                    continue;
+                }
+
+                if (inSinks &&
+                    (t.startsWith("├─ Sources:") ||
+                     t.startsWith("├─ Filters:") ||
+                     t.startsWith("└─ Streams:"))) {
+                    inSinks = false;
+                    continue;
+                }
+
+                if (!inSinks || !t.startsWith("│"))
+                    continue;
+
+                QString body = t.mid(1).trimmed();
+                if (body.startsWith("*"))
+                    body = body.mid(1).trimmed();
+
+                const int dot = body.indexOf(". ");
+                if (dot <= 0)
+                    continue;
+
+                const QString id = body.left(dot);
+                if (id != m_currentSinkId)
+                    continue;
+
+                QRegularExpression volRe(R"(\[vol:\s*([0-9.]+)\])");
+                const auto m = volRe.match(body);
                 if (m.hasMatch()) {
-                    m_currentVolume = m.captured(1).toInt();
+                    m_currentVolume = qRound(m.captured(1).toDouble() * 100.0);
                     m_volumeSlider->blockSignals(true);
                     m_volumeSlider->setValue(m_currentVolume);
                     m_volumeSlider->blockSignals(false);
@@ -523,8 +1019,9 @@ void EntertainmentPage::refreshVolumeOnly()
                 }
                 break;
             }
-        }
-    });
+        });
+        return;
+    }
 }
 
 void EntertainmentPage::updateVolumeLabel()

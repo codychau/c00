@@ -29,6 +29,14 @@ AboutPage::AboutPage(QWidget *parent)
     desc->setStyleSheet("color: #555; font-size: 13px;");
     layout->addWidget(desc);
 
+    auto *author = new QLabel("作者：Cody Chau 周毅豪");
+    QFont authorFont = author->font();
+    authorFont.setBold(true);
+    author->setFont(authorFont);
+    author->setAlignment(Qt::AlignCenter);
+    author->setStyleSheet("color: #333; font-size: 13px;");
+    layout->addWidget(author);
+
     // 系统信息
     auto *sysInfo = new QLabel();
     sysInfo->setStyleSheet("color: #888; font-size: 11px;");

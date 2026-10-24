@@ -9,6 +9,8 @@
 #include <QProcess>
 #include <QSet>
 
+class QCheckBox;
+
 class FormatDialog;
 
 class StorageDevicePage : public QWidget
@@ -54,6 +56,7 @@ private:
     QPushButton *m_smartBtn;
     QPushButton *m_mountBtn;
     QPushButton *m_formatBtn;
+    QCheckBox   *m_hideLoopsCheck = nullptr;
 
     FormatDialog *m_formatDlg = nullptr;
     bool m_formatRunning = false;

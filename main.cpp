@@ -61,6 +61,16 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName("ServerToolbox");
 
+    app.setStyleSheet(
+        "QPushButton {"
+        "  min-height: 25px;"
+        "  max-height: 25px;"
+        "  padding: 2px 12px;"
+        "}"
+        "QPushButton:disabled {"
+        "  color: #888;"
+        "}");
+
     MainWindow w;
     w.show();
 

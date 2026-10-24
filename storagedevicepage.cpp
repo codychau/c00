@@ -14,6 +14,7 @@
 #include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QMessageBox>
+#include <QCheckBox>
 #include <QFileInfo>
 #include <QDir>
 #include <QFile>
@@ -59,7 +60,7 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     m_formatBtn->setVisible(false);
     m_formatBtn->setToolTip("格式化此分区");
     m_formatBtn->setStyleSheet(
-        "QPushButton { background: #dc2626; color: white; padding: 4px 16px; "
+        "QPushButton { background: #dc2626; color: white; padding: 2px 12px; "
         "border-radius: 4px; font-weight: bold; }"
         "QPushButton:hover { background: #b91c1c; }");
     connect(m_formatBtn, &QPushButton::clicked, this, &StorageDevicePage::showFormatDialog);
@@ -76,6 +77,15 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     m_smartBtn->setToolTip("查看硬盘健康状态");
     connect(m_smartBtn, &QPushButton::clicked, this, &StorageDevicePage::showSmart);
     row->addWidget(m_smartBtn);
+
+    m_hideLoopsCheck = new QCheckBox("隐藏 loop 设备");
+    m_hideLoopsCheck->setChecked(true);
+    m_hideLoopsCheck->setToolTip(
+        "过滤 lsblk 中的 loop 设备（ISO、Snap、AppImage 等镜像挂载），"
+        "保留真实磁盘、分区、LVM、RAID 等块设备。");
+    connect(m_hideLoopsCheck, &QCheckBox::toggled,
+            this, [this](bool) { refresh(); });
+    row->addWidget(m_hideLoopsCheck);
 
     m_refreshBtn = new QPushButton("刷新");
     connect(m_refreshBtn, &QPushButton::clicked, this, &StorageDevicePage::refresh);
@@ -221,6 +231,13 @@ static QSet<QString> parseFstabDevices(const QMap<QString, QString> &uuidToName)
 
 void StorageDevicePage::buildTree(const QString &json)
 {
+    const bool hideLoops = m_hideLoopsCheck && m_hideLoopsCheck->isChecked();
+
+    // 记住当前选中的设备，刷新后尽量恢复
+    QString selectedName;
+    if (auto *current = m_tree->currentItem())
+        selectedName = current->data(0, RoleName).toString();
+
     m_tree->clear();
 
     QJsonParseError err;
@@ -239,9 +256,10 @@ void StorageDevicePage::buildTree(const QString &json)
     m_fstabDevices = parseFstabDevices(uuidMap);
 
     // 第三步：递归解析设备树并设置状态
+    int hiddenLoops = 0;
     std::function<void(const QJsonArray &, QTreeWidgetItem *)> parseDevices;
-    parseDevices = [this, &parseDevices](const QJsonArray &arr,
-                                          QTreeWidgetItem *parent) {
+    parseDevices = [this, &parseDevices, hideLoops, &hiddenLoops](
+        const QJsonArray &arr, QTreeWidgetItem *parent) {
         for (const auto &val : arr) {
             auto obj = val.toObject();
             QString name   = obj.value("name").toString();
@@ -249,6 +267,13 @@ void StorageDevicePage::buildTree(const QString &json)
             QString type   = obj.value("type").toString();
             auto fstype    = obj.value("fstype");
             auto mount     = obj.value("mountpoint");
+
+            // loop 设备通常是 ISO / Snap / AppImage 等镜像挂载，
+            // 过滤时连同其子分区一起跳过。
+            if (hideLoops && type == "loop") {
+                ++hiddenLoops;
+                continue;
+            }
 
             QString mnt = mount.isNull() ? "" : mount.toString();
             auto *item = addDevice(parent,
@@ -288,11 +313,44 @@ void StorageDevicePage::buildTree(const QString &json)
 
     parseDevices(devices, nullptr);
 
+    // 恢复选中项；找不到时选中第一个可见设备，避免按钮状态丢失
+    QTreeWidgetItem *restoreItem = nullptr;
+    std::function<QTreeWidgetItem *(QTreeWidgetItem *)> findByName;
+    findByName = [&findByName, &selectedName](QTreeWidgetItem *root) -> QTreeWidgetItem * {
+        if (root->data(0, RoleName).toString() == selectedName)
+            return root;
+        for (int i = 0; i < root->childCount(); ++i) {
+            if (auto *found = findByName(root->child(i)))
+                return found;
+        }
+        return nullptr;
+    };
+
+    if (!selectedName.isEmpty())
+        restoreItem = findByName(m_tree->invisibleRootItem());
+
+    if (!restoreItem && m_tree->topLevelItemCount() > 0)
+        restoreItem = m_tree->topLevelItem(0);
+
+    if (restoreItem) {
+        auto *parent = restoreItem->parent();
+        while (parent) {
+            parent->setExpanded(true);
+            parent = parent->parent();
+        }
+        m_tree->setCurrentItem(restoreItem);
+    }
+
     for (int c = 0; c < 5; ++c)
         m_tree->resizeColumnToContents(c);
 
-    m_status->setText(
-        QString("共 %1 个块设备").arg(countAllItems(m_tree->invisibleRootItem())));
+    const int visibleCount = countAllItems(m_tree->invisibleRootItem());
+    if (hiddenLoops > 0) {
+        m_status->setText(QString("共 %1 个块设备，已隐藏 %2 个 loop 设备")
+                              .arg(visibleCount).arg(hiddenLoops));
+    } else {
+        m_status->setText(QString("共 %1 个块设备").arg(visibleCount));
+    }
 }
 
 void StorageDevicePage::setFormatRunning(bool running)
@@ -304,6 +362,7 @@ void StorageDevicePage::setFormatRunning(bool running)
     m_mountBtn->setEnabled(!running);
     m_smartBtn->setEnabled(!running);
     m_refreshBtn->setEnabled(!running);
+    m_hideLoopsCheck->setEnabled(!running);
     m_tree->setEnabled(!running);
 
     m_status->setText(running

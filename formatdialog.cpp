@@ -155,7 +155,7 @@ FormatDialog::FormatDialog(const QString &devPath,
 
     m_startBtn = new QPushButton("开始格式化");
     m_startBtn->setStyleSheet(
-        "QPushButton { background: #dc2626; color: white; padding: 8px 24px; "
+        "QPushButton { background: #dc2626; color: white; padding: 2px 12px; "
         "border-radius: 4px; font-weight: bold; }"
         "QPushButton:hover { background: #b91c1c; }"
         "QPushButton:disabled { background: #6b7280; }");

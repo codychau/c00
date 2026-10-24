@@ -3,6 +3,7 @@
 
 #include <QTimer>
 #include <QTcpSocket>
+#include <QByteArray>
 #include <QAbstractSocket>
 #include <QProcess>
 #include <QStandardPaths>
@@ -12,6 +13,7 @@
 #include <QDateTime>
 #include <QTextStream>
 
+#include <algorithm>
 #include <memory>
 #include <sstream>
 #include <fstream>
@@ -85,6 +87,14 @@ void HealthMonitor::start()
                 .arg(m_cfg.sshHost).arg(m_cfg.sshPort)
                 .arg(m_cfg.intervalSec).arg(m_cfg.timeoutMs).arg(m_cfg.failThreshold));
 
+    if (m_cfg.restEnabled) {
+        if (m_cfg.restDays.isEmpty())
+            log("机器休息窗口已启用，但未选择休息日，不会触发");
+        else
+            log(QString("机器休息窗口：每周 %1，%2–%3（进入窗口即优雅重启）")
+                    .arg(restDaysText(m_cfg.restDays), m_cfg.restStart, m_cfg.restEnd));
+    }
+
     check();
 }
 
@@ -107,6 +117,25 @@ void HealthMonitor::loadConfig()
         m_cfg.failThreshold = static_cast<int>(tbl["fail_threshold"].value_or(int64_t(3)));
         m_cfg.cooldownSec = static_cast<int>(tbl["cooldown_sec"].value_or(int64_t(300)));
         m_cfg.forceKernelRebootMode = tbl["force_kernel_reboot"].value_or(false);
+
+        m_cfg.restEnabled = tbl["rest_enabled"].value_or(false);
+        m_cfg.restDays.clear();
+        if (auto *arr = tbl["rest_days"].as_array()) {
+            for (auto &v : *arr) {
+                const int d = static_cast<int>(v.value_or(int64_t(0)));
+                if (d >= 1 && d <= 7)
+                    m_cfg.restDays.append(d);
+            }
+        }
+        m_cfg.restStart = QString::fromStdString(
+            tbl["rest_start"].value_or(std::string("03:00")));
+        m_cfg.restEnd = QString::fromStdString(
+            tbl["rest_end"].value_or(std::string("04:00")));
+        m_cfg.restLastRun = QString::fromStdString(
+            tbl["rest_last_run"].value_or(std::string("")));
+
+        if (!parseClock(m_cfg.restStart).isValid()) m_cfg.restStart = "03:00";
+        if (!parseClock(m_cfg.restEnd).isValid())   m_cfg.restEnd = "04:00";
 
         if (auto *n = tbl["nginx"].as_table()) {
             m_cfg.nginxHost = QString::fromStdString((*n)["host"].value_or(std::string("127.0.0.1")));
@@ -142,6 +171,14 @@ QString HealthMonitor::defaultConfigText()
     root.emplace("fail_threshold", int64_t(3));
     root.emplace("cooldown_sec", int64_t(300));
     root.emplace("force_kernel_reboot", false);
+
+    toml::array restDays;
+    restDays.push_back(int64_t(7));   // 默认周日
+    root.emplace("rest_enabled", false);
+    root.emplace("rest_days", std::move(restDays));
+    root.emplace("rest_start", std::string("03:00"));
+    root.emplace("rest_end", std::string("04:00"));
+
     root.emplace("nginx", std::move(nginx));
     root.emplace("ssh", std::move(ssh));
 
@@ -229,6 +266,172 @@ bool HealthMonitor::setConfigPorts(const QString &path, int nginxPort, int sshPo
     return true;
 }
 
+// ── 机器中途休息（每周定时优雅重启） ──
+
+QTime HealthMonitor::parseClock(const QString &s)
+{
+    return QTime::fromString(s, "HH:mm");
+}
+
+QString HealthMonitor::formatClock(const QTime &t)
+{
+    return t.isValid() ? t.toString("HH:mm") : QString();
+}
+
+QString HealthMonitor::restDaysText(const QVector<int> &days)
+{
+    static const char *kNames[7] = {"周一", "周二", "周三", "周四", "周五", "周六", "周日"};
+    QVector<int> sorted = days;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+    QStringList list;
+    for (int d : sorted) {
+        if (d >= 1 && d <= 7)
+            list << QString::fromUtf8(kNames[d - 1]);
+    }
+    return list.isEmpty() ? QStringLiteral("（未选择）") : list.join("、");
+}
+
+void HealthMonitor::configRestWindow(const QString &path, bool *enabled,
+                                     QVector<int> *days, QString *start, QString *end)
+{
+    bool en = false;
+    QVector<int> dd;
+    QString s = "03:00", e = "04:00";
+
+    if (QFile::exists(path)) {
+        try {
+            auto tbl = toml::parse_file(path.toStdString());
+            en = tbl["rest_enabled"].value_or(false);
+            if (auto *arr = tbl["rest_days"].as_array()) {
+                for (auto &v : *arr) {
+                    const int d = static_cast<int>(v.value_or(int64_t(0)));
+                    if (d >= 1 && d <= 7)
+                        dd.append(d);
+                }
+            }
+            s = QString::fromStdString(tbl["rest_start"].value_or(std::string("03:00")));
+            e = QString::fromStdString(tbl["rest_end"].value_or(std::string("04:00")));
+        } catch (const toml::parse_error &) {
+        }
+    }
+
+    if (!parseClock(s).isValid()) s = "03:00";
+    if (!parseClock(e).isValid()) e = "04:00";
+
+    if (enabled) *enabled = en;
+    if (days)    *days = dd;
+    if (start)   *start = s;
+    if (end)     *end = e;
+}
+
+bool HealthMonitor::setConfigRestWindow(const QString &path, bool enabled,
+                                        const QVector<int> &days,
+                                        const QString &start, const QString &end)
+{
+    ensureConfigFile(path);
+
+    toml::table root;
+    try {
+        root = toml::parse_file(path.toStdString());
+    } catch (const toml::parse_error &) {
+        return false;
+    }
+
+    QVector<int> sorted = days;
+    std::sort(sorted.begin(), sorted.end());
+    sorted.erase(std::unique(sorted.begin(), sorted.end()), sorted.end());
+
+    toml::array arr;
+    for (int d : sorted)
+        arr.push_back(int64_t(d));
+
+    root.insert_or_assign("rest_enabled", enabled);
+    root.insert_or_assign("rest_days", std::move(arr));
+    root.insert_or_assign("rest_start", start.toStdString());
+    root.insert_or_assign("rest_end", end.toStdString());
+
+    std::ofstream ofs(path.toStdString());
+    if (!ofs)
+        return false;
+    ofs << root << "\n";
+    return true;
+}
+
+bool HealthMonitor::setConfigRestLastRun(const QString &path, const QString &date)
+{
+    ensureConfigFile(path);
+
+    toml::table root;
+    try {
+        root = toml::parse_file(path.toStdString());
+    } catch (const toml::parse_error &) {
+        return false;
+    }
+
+    root.insert_or_assign("rest_last_run", date.toStdString());
+
+    std::ofstream ofs(path.toStdString());
+    if (!ofs)
+        return false;
+    ofs << root << "\n";
+    return true;
+}
+
+QString HealthMonitor::kernelConfigPath()
+{
+    return QStringLiteral("/etc/sysctl.d/95-servertoolbox-hang.conf");
+}
+
+QString HealthMonitor::buildKernelConfigText(bool hungTaskPanic)
+{
+    QString text;
+    QTextStream out(&text);
+    out << "# 由 ServerToolbox 看门狗安装器生成，请勿手工修改。\n"
+        << "# 删除本文件并执行 sysctl --system 即可还原。\n"
+        << "kernel.hung_task_timeout_secs = 120\n"
+        << "kernel.hung_task_panic = " << (hungTaskPanic ? 1 : 0) << "\n"
+        << "kernel.softlockup_panic = 1\n"
+        << "kernel.hardlockup_panic = 1\n"
+        << "kernel.panic_on_oops = 1\n"
+        << "kernel.panic = 10\n";
+    return text;
+}
+
+QString HealthMonitor::buildKernelEnableScript(bool enableKdump, bool hungTaskPanic)
+{
+    QString script;
+    QTextStream out(&script);
+    out << "cat > " << kernelConfigPath() << " <<'STB_HANG_EOF'\n"
+        << buildKernelConfigText(hungTaskPanic)
+        << "STB_HANG_EOF\n"
+        << "sysctl --system >/dev/null 2>&1 || true\n";
+    if (enableKdump) {
+        out << "if [ -f /etc/default/kdump-tools ]; then\n"
+            << "  sed -i 's/^USE_KDUMP=.*/USE_KDUMP=1/' /etc/default/kdump-tools\n"
+            << "  kdump-config load >/dev/null 2>&1 || systemctl restart kdump-tools >/dev/null 2>&1 || true\n"
+            << "fi\n";
+    }
+    out << "printf 'KEXEC_CRASH_LOADED=%s\\n' \"$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null || echo 0)\"\n"
+        << "printf 'HUNG_TASK_PANIC=%s\\n' \"$(cat /proc/sys/kernel/hung_task_panic 2>/dev/null || echo ?)\"\n";
+    return script;
+}
+
+QString HealthMonitor::buildKernelDisableScript()
+{
+    QString script;
+    QTextStream out(&script);
+    out << "rm -f " << kernelConfigPath() << "\n"
+        << "sysctl --system >/dev/null 2>&1 || true\n"
+        << "if [ -f /etc/default/kdump-tools ]; then\n"
+        << "  sed -i 's/^USE_KDUMP=.*/USE_KDUMP=0/' /etc/default/kdump-tools\n"
+        << "  kdump-config unload >/dev/null 2>&1 || systemctl stop kdump-tools >/dev/null 2>&1 || true\n"
+        << "fi\n"
+        << "printf 'KEXEC_CRASH_LOADED=%s\\n' \"$(cat /sys/kernel/kexec_crash_loaded 2>/dev/null || echo 0)\"\n";
+    return script;
+}
+
 void HealthMonitor::log(const QString &message)
 {
     Logger::log(QString::fromLatin1(kTag), message);
@@ -238,20 +441,81 @@ void HealthMonitor::log(const QString &message)
 
 void HealthMonitor::check()
 {
+    // 休息窗口与探活相互独立：即使探活仍在进行，也要按时检查是否进入休息时段。
+    checkRestWindow();
+
     if (m_busy)
         return;
 
     m_busy = true;
-    probe(m_cfg.nginxHost, m_cfg.nginxPort, [this](Probe p) { onNginxResult(p); });
+    probe(m_cfg.nginxHost, m_cfg.nginxPort, false, [this](Probe p) { onNginxResult(p); });
 }
 
-void HealthMonitor::probe(const QString &host, int port, std::function<void(Probe)> cb)
+// 机器中途休息：进入每周设定的时间段即执行优雅重启。
+// 每个"锚定休息日"最多触发一次（rest_last_run 落盘持久化），
+// 因此重启后守护进程随 systemd 再次启动时，不会在同一个窗口里循环重启。
+void HealthMonitor::checkRestWindow()
+{
+    if (!m_cfg.enabled || !m_cfg.restEnabled)
+        return;
+    if (m_cfg.restDays.isEmpty() || m_rebooting)
+        return;
+
+    const QTime start = parseClock(m_cfg.restStart);
+    const QTime end = parseClock(m_cfg.restEnd);
+    if (!start.isValid() || !end.isValid())
+        return;
+
+    const QDate today = QDate::currentDate();
+    const QDateTime now(today, QTime::currentTime());
+    const bool crossMidnight = end < start;
+
+    // 窗口锚定在休息日当天的起始时刻；跨午夜窗口的结束时刻落在次日，
+    // 所以同时检查"今天"与"昨天"两个锚定日。
+    for (int back = 0; back <= 1; ++back) {
+        const QDate anchor = today.addDays(-back);
+        if (!m_cfg.restDays.contains(anchor.dayOfWeek()))
+            continue;
+
+        const QDateTime winStart(anchor, start);
+        const QDateTime winEnd(anchor.addDays(crossMidnight ? 1 : 0), end);
+        if (now < winStart || now > winEnd)
+            continue;
+
+        const QString anchorKey = anchor.toString("yyyy-MM-dd");
+        if (m_cfg.restLastRun == anchorKey) {
+            // 本窗口已执行过，跳过（防止重启后在窗口内反复触发）。
+            return;
+        }
+
+        m_cfg.restLastRun = anchorKey;
+        if (!setConfigRestLastRun(configPath(), anchorKey))
+            log("休息窗口：无法写入 rest_last_run，重启后窗口内可能重复触发");
+
+        log(QString("进入机器休息窗口（%1 %2–%3），执行优雅重启")
+                .arg(anchorKey).arg(formatClock(start)).arg(formatClock(end)));
+
+        m_rebooting = true;
+        m_lastReboot = now;
+        m_failStreak = 0;
+
+        // 休息时段系统通常是健康的：走优雅重启；performReboot 内置 15 秒
+        // 未生效则回退内核级硬重启的兜底。
+        performReboot(false);
+        QTimer::singleShot(30000, this, [this]() { m_rebooting = false; });
+        return;
+    }
+}
+
+void HealthMonitor::probe(const QString &host, int port, bool expectSshBanner,
+                          std::function<void(Probe)> cb)
 {
     auto *sock = new QTcpSocket(this);
     auto *timer = new QTimer(sock);
     timer->setSingleShot(true);
 
     auto settled = std::make_shared<bool>(false);
+    auto buf = std::make_shared<QByteArray>();
     auto deliver = [sock, cb = std::move(cb), settled](Probe p) {
         if (*settled)
             return;
@@ -261,7 +525,32 @@ void HealthMonitor::probe(const QString &host, int port, std::function<void(Prob
         cb(p);
     };
 
-    connect(sock, &QTcpSocket::connected, this, [deliver]() { deliver(Probe::Ok); });
+    connect(sock, &QTcpSocket::connected, this, [deliver, expectSshBanner]() {
+        // nginx 只需要确认端口能建立连接；SSH 必须等对端主动发来的协议标识串。
+        if (!expectSshBanner)
+            deliver(Probe::Ok);
+    });
+    connect(sock, &QTcpSocket::readyRead, this,
+            [deliver, sock, buf, expectSshBanner]() {
+                if (!expectSshBanner)
+                    return;
+                buf->append(sock->readAll());
+                const int nl = buf->indexOf('\n');
+                if (nl < 0) {
+                    // 对端一直不发换行：交给总超时判定；同时防止无界累积。
+                    if (buf->size() >= 255)
+                        deliver(Probe::BadBanner);
+                    return;
+                }
+                const QByteArray line = buf->left(nl).trimmed();
+                deliver(line.startsWith("SSH-") ? Probe::Ok : Probe::BadBanner);
+            });
+    connect(sock, &QTcpSocket::disconnected, this,
+            [deliver, expectSshBanner]() {
+                // SSH 连接在收到标识串前被关闭，同样视为不可登录。
+                if (expectSshBanner)
+                    deliver(Probe::ClosedEarly);
+            });
     connect(sock, &QTcpSocket::errorOccurred, this,
             [deliver](QAbstractSocket::SocketError e) {
                 switch (e) {
@@ -307,26 +596,29 @@ void HealthMonitor::onNginxResult(Probe nginx)
     }
 
     log(QString("nginx 异常：%1，立即检测 SSH ...").arg(probeName(nginx)));
-    probe(m_cfg.sshHost, m_cfg.sshPort, [this, nginx](Probe ssh) { onSshResult(nginx, ssh); });
+    probe(m_cfg.sshHost, m_cfg.sshPort, true, [this, nginx](Probe ssh) { onSshResult(nginx, ssh); });
 }
 
 void HealthMonitor::onSshResult(Probe nginx, Probe ssh)
 {
     m_busy = false;
 
-    if (isAbnormal(ssh)) {
-        m_failStreak++;
-        log(QString("SSH 亦异常：%1（连续 %2/%3）")
-                    .arg(probeName(ssh)).arg(m_failStreak).arg(m_cfg.failThreshold));
-
-        if (m_failStreak >= m_cfg.failThreshold)
-            triggerReboot(QString("nginx(%1) 与 SSH(%2) 同时异常")
-                          .arg(probeName(nginx), probeName(ssh)));
-    } else {
-        log(QString("nginx 异常但 SSH 正常（%1），系统存活，不重启")
-                    .arg(probeName(ssh)));
+    // SSH 探测的“正常”必须是完成 SSH 协议握手（收到 SSH- 标识串）。
+    // 只看 TCP 连接会误判：sshd 卡死或系统挂起时，内核仍可能替监听套接字
+    // 完成三次握手，此时登录不了、也无法救援，必须视为异常。
+    if (ssh == Probe::Ok) {
+        log("nginx 异常但 SSH 正常（SSH 协议握手成功），系统存活，不重启");
         m_failStreak = 0;
+        return;
     }
+
+    m_failStreak++;
+    log(QString("SSH 亦异常：%1（连续 %2/%3）")
+                .arg(probeName(ssh)).arg(m_failStreak).arg(m_cfg.failThreshold));
+
+    if (m_failStreak >= m_cfg.failThreshold)
+        triggerReboot(QString("nginx(%1) 与 SSH(%2) 同时异常")
+                      .arg(probeName(nginx), probeName(ssh)));
 }
 
 void HealthMonitor::triggerReboot(const QString &reason)
@@ -430,6 +722,7 @@ bool HealthMonitor::forceKernelReboot()
     }
 }
 
+// nginx 探测只做 TCP 建连，超时/其它错误视为“忙但可能仍存活”，不计异常。
 bool HealthMonitor::isAbnormal(Probe p)
 {
     return p == Probe::Refused || p == Probe::ClosedEarly;
@@ -442,6 +735,7 @@ QString HealthMonitor::probeName(Probe p)
     case Probe::Refused:     return "拒绝连接(ECONNREFUSED)";
     case Probe::ClosedEarly: return "提前断开(E_CLOSED_EARLY)";
     case Probe::Timeout:     return "超时";
+    case Probe::BadBanner:   return "未收到 SSH 协议标识串";
     default:                 return "其它错误";
     }
 }

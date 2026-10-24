@@ -41,7 +41,7 @@ ServiceEditDialog::ServiceEditDialog(const QString &serviceName,
     auto *btnRow = new QHBoxLayout();
     m_saveBtn = new QPushButton("保存");
     m_saveBtn->setStyleSheet(
-        "QPushButton { background: #16a34a; color: white; padding: 8px 24px; "
+        "QPushButton { background: #16a34a; color: white; padding: 2px 12px; "
         "border-radius: 4px; font-weight: bold; }"
         "QPushButton:hover { background: #15803d; }"
         "QPushButton:disabled { background: #9ca3af; }");
@@ -50,7 +50,7 @@ ServiceEditDialog::ServiceEditDialog(const QString &serviceName,
 
     m_cancelBtn = new QPushButton("取消");
     m_cancelBtn->setStyleSheet(
-        "QPushButton { background: #6b7280; color: white; padding: 8px 24px; "
+        "QPushButton { background: #6b7280; color: white; padding: 2px 12px; "
         "border-radius: 4px; }"
         "QPushButton:hover { background: #4b5563; }");
     connect(m_cancelBtn, &QPushButton::clicked, this, &ServiceEditDialog::onCancel);

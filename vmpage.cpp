@@ -16,6 +16,7 @@
 #include <QBrush>
 #include <QStandardPaths>
 #include <QDateTime>
+#include <QPointer>
 #include <QLocalSocket>
 #include <QTemporaryDir>
 #include <QTextStream>
@@ -197,6 +198,24 @@ void VMPage::refreshTable()
     updateStartButton();
 }
 
+// 判断某个 QEMU 进程行（ps -ef 输出）是否属于给定虚机
+static bool qemuLineForVM(const QString &line, const QString &vmName, const QString &disk)
+{
+    // 1) 精确匹配 -name 参数后面的值，避免子串误命中（如 vm 名 "win7" 误匹配到 "win7x"）
+    QStringList fields = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    for (int i = 0; i + 1 < fields.size(); ++i) {
+        if (fields[i] == "-name" && fields[i + 1] == vmName)
+            return true;
+    }
+
+    // 2) 系统盘路径命中（磁盘为空时跳过 ——
+    //    否则 "".contains() 会命中所有进程，让尚未装系统的 ISO 启动型虚机被误判为“运行中”）
+    if (!disk.isEmpty() && line.contains(disk))
+        return true;
+
+    return false;
+}
+
 void VMPage::refreshStatus()
 {
     if (m_mgr.vms().isEmpty()) return;
@@ -223,7 +242,7 @@ void VMPage::refreshStatus()
         const auto &vm = m_mgr.vms()[i];
         bool running = false;
         for (const auto &ql : qemuLines) {
-            if (ql.contains(vm.disk) || (ql.contains("-name") && ql.contains(vm.name))) {
+            if (qemuLineForVM(ql, vm.name, vm.disk)) {
                 running = true;
                 break;
             }
@@ -374,14 +393,38 @@ static bool fstabHasPendingMounts()
 
 void VMPage::startVM()
 {
-    int row = m_table->currentRow();
-    if (row < 0 || row >= m_mgr.vms().size()) return;
+    const int row = m_table->currentRow();
+    if (row < 0) return;
+    startVMAt(row, false);
+}
+
+bool VMPage::startVMByName(const QString &name, bool quiet)
+{
+    if (name.isEmpty())
+        return false;
+
+    for (int i = 0; i < m_mgr.vms().size(); ++i) {
+        if (m_mgr.vms()[i].name == name) {
+            m_table->setCurrentCell(i, 0);
+            return startVMAt(i, quiet);
+        }
+    }
+
+    Logger::log("VM", QString("场景请求启动虚机，但配置中不存在：%1").arg(name));
+    return false;
+}
+
+bool VMPage::startVMAt(int row, bool quiet)
+{
+    if (row < 0 || row >= m_mgr.vms().size()) return false;
 
     auto *statusItem = m_table->item(row, ColStatus);
     if (statusItem && statusItem->text().contains("运行中")) {
-        QMessageBox::information(this, "提示",
-            QString("「%1」已在运行中").arg(m_mgr.vms()[row].name));
-        return;
+        if (!quiet) {
+            QMessageBox::information(this, "提示",
+                QString("「%1」已在运行中").arg(m_mgr.vms()[row].name));
+        }
+        return false;
     }
 
     const auto &vm = m_mgr.vms()[row];
@@ -505,10 +548,12 @@ void VMPage::startVM()
     if (!proc->waitForStarted(3000)) {
         QString err = proc->errorString();
         Logger::log("VM", QString("❌ 启动失败: %1 — %2").arg(vm.name, err));
-        QMessageBox::warning(this, "启动失败",
-            QString("无法启动 QEMU:\n%1").arg(err));
+        if (!quiet) {
+            QMessageBox::warning(this, "启动失败",
+                QString("无法启动 QEMU:\n%1").arg(err));
+        }
         delete proc;
-        return;
+        return false;
     }
 
     auto startedAt = QDateTime::currentSecsSinceEpoch();
@@ -519,7 +564,7 @@ void VMPage::startVM()
     updateStartButton();
 
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, proc, name = vm.name, startedAt](int exitCode, QProcess::ExitStatus status) {
+            this, [this, proc, name = vm.name, startedAt, quiet](int exitCode, QProcess::ExitStatus status) {
         auto elapsed = QDateTime::currentSecsSinceEpoch() - startedAt;
         QString stderr = QString::fromUtf8(proc->readAll()).trimmed();
 
@@ -534,28 +579,30 @@ void VMPage::startVM()
             Logger::log("VM", QString("❌ %1 启动失败:\n%2").arg(name, errMsg));
             
             bool hasPermissionError = checkPermissionError(stderr);
-            
-            // 延迟弹窗，避免在信号处理器内直接弹模态框重入事件循环导致崩溃
-            QTimer::singleShot(0, this, [this, name, exitCode, errMsg, hasPermissionError]() {
-                if (hasPermissionError) {
-                    QMessageBox msgBox(this);
-                    msgBox.setWindowTitle("虚机启动失败 - 权限问题");
-                    msgBox.setIcon(QMessageBox::Warning);
-                    msgBox.setText(QString("虚机「%1」启动失败，可能是映像文件权限问题。\n\nQEMU 输出:\n%2")
-                        .arg(name).arg(errMsg.left(500)));
-                    msgBox.setInformativeText("是否配置 QEMU sudo 免密权限以解决此问题？");
-                    msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
-                    msgBox.setDefaultButton(QMessageBox::Yes);
-                    
-                    if (msgBox.exec() == QMessageBox::Yes) {
-                        configureQemuSudoers(name);
+
+            if (!quiet) {
+                // 延迟弹窗，避免在信号处理器内直接弹模态框重入事件循环导致崩溃
+                QTimer::singleShot(0, this, [this, name, exitCode, errMsg, hasPermissionError]() {
+                    if (hasPermissionError) {
+                        QMessageBox msgBox(this);
+                        msgBox.setWindowTitle("虚机启动失败 - 权限问题");
+                        msgBox.setIcon(QMessageBox::Warning);
+                        msgBox.setText(QString("虚机「%1」启动失败，可能是映像文件权限问题。\n\nQEMU 输出:\n%2")
+                            .arg(name).arg(errMsg.left(500)));
+                        msgBox.setInformativeText("是否配置 QEMU sudo 免密权限以解决此问题？");
+                        msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
+                        msgBox.setDefaultButton(QMessageBox::Yes);
+
+                        if (msgBox.exec() == QMessageBox::Yes) {
+                            configureQemuSudoers(name);
+                        }
+                    } else {
+                        QMessageBox::critical(this, "虚机启动失败",
+                            QString("%1\n\n退出码: %2\n\nQEMU 输出:\n%3")
+                                .arg(name).arg(exitCode).arg(errMsg));
                     }
-                } else {
-                    QMessageBox::critical(this, "虚机启动失败",
-                        QString("%1\n\n退出码: %2\n\nQEMU 输出:\n%3")
-                            .arg(name).arg(exitCode).arg(errMsg));
-                }
-            });
+                });
+            }
         }
 
         m_runningProcs.remove(name);
@@ -563,23 +610,25 @@ void VMPage::startVM()
         m_status->setText(QString("⏹️ %1 已停止").arg(name));
         refreshStatus();
     });
+
+    return true;
 }
 
 // ── 停止 ──
 
 void VMPage::stopVM()
 {
-    int row = m_table->currentRow();
+    const int row = m_table->currentRow();
     if (row < 0 || row >= m_mgr.vms().size()) return;
 
-    const auto &vm = m_mgr.vms()[row];
+    const QString vmName = m_mgr.vms()[row].name;
     auto *statusItem = m_table->item(row, ColStatus);
     if (!statusItem || !statusItem->text().contains("运行中")) return;
 
     // 弹出选择
     auto *menu = new QMessageBox(this);
     menu->setWindowTitle("停止虚机");
-    menu->setText(QString("选择停止方式: %1").arg(vm.name));
+    menu->setText(QString("选择停止方式: %1").arg(vmName));
     menu->setIcon(QMessageBox::Question);
 
     auto *btnShutdown = menu->addButton("🛑 正常关机", QMessageBox::AcceptRole);
@@ -591,14 +640,51 @@ void VMPage::stopVM()
     if (menu->clickedButton() == btnCancel)
         return;
 
-    if (menu->clickedButton() == btnShutdown) {
+    stopVMAt(row, menu->clickedButton() == btnKill, false);
+}
+
+bool VMPage::stopVMByName(const QString &name, bool force, bool quiet)
+{
+    if (name.isEmpty())
+        return false;
+
+    for (int i = 0; i < m_mgr.vms().size(); ++i) {
+        if (m_mgr.vms()[i].name == name) {
+            m_table->setCurrentCell(i, 0);
+            return stopVMAt(i, force, quiet);
+        }
+    }
+
+    Logger::log("VM", QString("场景请求停止虚机，但配置中不存在：%1").arg(name));
+    return false;
+}
+
+bool VMPage::stopVMAt(int row, bool force, bool quiet)
+{
+    if (row < 0 || row >= m_mgr.vms().size()) return false;
+
+    const auto &vm = m_mgr.vms()[row];
+    auto *statusItem = m_table->item(row, ColStatus);
+    if (!statusItem || !statusItem->text().contains("运行中")) return false;
+
+    if (!force) {
         Logger::log("VM", QString("正常关机: %1").arg(vm.name));
         sendQemuPowerdown(vm.name);
 
         // 如果进程还在跟踪，等待最多 15 秒后强行终止
         if (m_runningProcs.contains(vm.name)) {
             QProcess *p = m_runningProcs[vm.name];
-            if (!p->waitForFinished(15000)) {
+            if (quiet) {
+                // 定时任务不能阻塞界面：15 秒后仍在运行则强制终止
+                QPointer<QProcess> guard(p);
+                const QString vmName = vm.name;
+                QTimer::singleShot(15000, this, [guard, vmName]() {
+                    if (guard && guard->state() != QProcess::NotRunning) {
+                        Logger::log("VM", QString("关机超时，强行终止: %1").arg(vmName));
+                        guard->kill();
+                    }
+                });
+            } else if (!p->waitForFinished(15000)) {
                 Logger::log("VM", QString("超时，强行终止: %1").arg(vm.name));
                 p->kill();
                 p->waitForFinished(2000);
@@ -646,11 +732,24 @@ void VMPage::stopVM()
         if (!killed) {
             QString warn = QString("未找到虚机「%1」的 QEMU 进程，可能已退出").arg(vm.name);
             Logger::log("VM", warn);
-            QMessageBox::warning(this, "极速停止", warn);
+            if (!quiet)
+                QMessageBox::warning(this, "极速停止", warn);
         }
     }
 
     refreshStatus();
+    return true;
+}
+
+bool VMPage::isVMRunning(const QString &name) const
+{
+    for (int i = 0; i < m_mgr.vms().size(); ++i) {
+        if (m_mgr.vms()[i].name != name)
+            continue;
+        auto *item = m_table->item(i, ColStatus);
+        return item && item->text().contains("运行中");
+    }
+    return false;
 }
 
 void VMPage::sendQemuPowerdown(const QString &vmName)

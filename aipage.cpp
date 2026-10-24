@@ -85,7 +85,6 @@ AIPage::AIPage(QWidget *parent)
     proxyPathRow->addWidget(m_outputModeDropdown);
 
     m_generateServiceBtn = new QPushButton("生成服务文件");
-    m_generateServiceBtn->setMinimumHeight(26);
     connect(m_generateServiceBtn, &QPushButton::clicked, this, [this]() {
         QMenu *menu = new QMenu(this);
         QAction *installUser = new QAction("安装到当前用户", this);
@@ -113,7 +112,6 @@ AIPage::AIPage(QWidget *parent)
 
     auto *browseBtn = new QPushButton("…");
     browseBtn->setFixedWidth(28);
-    browseBtn->setFixedHeight(26);
     connect(browseBtn, &QPushButton::clicked, this, [this]() {
         QString path = QFileDialog::getExistingDirectory(
             this, "选择模型基础路径", QDir::homePath());
@@ -520,7 +518,6 @@ void AIPage::buildCard(int idx)
         if (p.browse) {
             auto *browseBtn = new QPushButton("…");
             browseBtn->setFixedWidth(28);
-            browseBtn->setFixedHeight(26);
             connect(browseBtn, &QPushButton::clicked, this, [this, &p]() {
                 auto *le = qobject_cast<QLineEdit *>(p.widget);
                 if (!le) return;

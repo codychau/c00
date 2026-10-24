@@ -13,22 +13,29 @@
 #include <QPushButton>
 #include <QCheckBox>
 #include <QHBoxLayout>
+#include <QGridLayout>
 #include <QDialogButtonBox>
 #include <QMessageBox>
 #include <QInputDialog>
+#include <QTimeEdit>
+#include <QTime>
 
 WatchdogInstallDialog::WatchdogInstallDialog(int nginxPort, int sshPort, bool needPassword,
-                                             bool forceKernelReboot, QWidget *parent)
+                                             bool forceKernelReboot,
+                                             bool restEnabled, const QVector<int> &restDays,
+                                             const QString &restStart, const QString &restEnd,
+                                             QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("安装看门狗");
-    setMinimumWidth(360);
+    setMinimumWidth(470);
 
     auto *layout = new QVBoxLayout(this);
 
     auto *desc = new QLabel(
         "将安装系统服务 servertoolbox-watchdog（root 权限，开机自启）。\n"
-        "当 nginx 与 SSH 端口同时拒绝连接时，自动重启本机。");
+        "当 nginx 拒绝连接、且 SSH 也无法完成协议握手时，自动重启本机。\n"
+        "可额外配置每周定时的「机器中途休息」，在设定时间段内自动优雅重启。");
     desc->setWordWrap(true);
     layout->addWidget(desc);
 
@@ -57,6 +64,86 @@ WatchdogInstallDialog::WatchdogInstallDialog(int nginxPort, int sshPort, bool ne
         "勾选后，检测到异常时跳过 systemctl 优雅重启，直接通过内核 Magic SysRq 强制重启。");
     layout->addWidget(m_forceKernelCheck);
 
+    m_kernelCheck = new QCheckBox("同时配置内核级死机检测（锁死/内核错误自动重启）");
+    m_kernelCheck->setChecked(true);
+    m_kernelCheck->setToolTip(
+        "写入 /etc/sysctl.d/95-servertoolbox-hang.conf：\n"
+        "CPU 软/硬锁死与内核 oops 触发 panic，10 秒后自动重启。");
+    layout->addWidget(m_kernelCheck);
+
+    m_kdumpCheck = new QCheckBox("开启 kdump 崩溃转储（保留 vmcore 与内核日志）");
+    m_kdumpCheck->setChecked(true);
+    m_kdumpCheck->setToolTip(
+        "启用 USE_KDUMP 并装载 crash kernel；crashkernel 内存已在启动参数中预留。");
+    layout->addWidget(m_kdumpCheck);
+
+    m_hungTaskCheck = new QCheckBox("进程卡死(hung_task)超过 120s 也自动重启（可能因大 I/O 误重启）");
+    m_hungTaskCheck->setChecked(false);
+    m_hungTaskCheck->setToolTip(
+        "默认只告警。若希望磁盘/IO 卡死也直接重启，可勾选此项（会带来误重启风险）。");
+    layout->addWidget(m_hungTaskCheck);
+
+    auto syncKernelOpts = [this]() {
+        const bool on = m_kernelCheck->isChecked();
+        m_kdumpCheck->setEnabled(on);
+        m_hungTaskCheck->setEnabled(on);
+    };
+    connect(m_kernelCheck, &QCheckBox::toggled, this, syncKernelOpts);
+    syncKernelOpts();
+
+    // ── 机器中途休息（每周定时优雅重启） ──
+    m_restCheck = new QCheckBox("机器中途休息（每周定时优雅重启）");
+    m_restCheck->setChecked(restEnabled);
+    m_restCheck->setToolTip(
+        "勾选后，看门狗会在每周选定的休息日、设定的时间段内自动重启本机。\n"
+        "进入时间段的第一个检测周期即触发，每个休息日最多一次（重启后不会在窗口内循环触发）。\n"
+        "走优雅重启（systemctl reboot），15 秒未生效则回退内核级硬重启。");
+    layout->addWidget(m_restCheck);
+
+    m_restPanel = new QWidget();
+    auto *restLayout = new QGridLayout(m_restPanel);
+    restLayout->setContentsMargins(0, 0, 0, 0);
+    restLayout->setSpacing(6);
+
+    restLayout->addWidget(new QLabel("休息日："), 0, 0);
+    static const char *kDayNames[7] = {"周一", "周二", "周三", "周四", "周五", "周六", "周日"};
+    for (int i = 0; i < 7; ++i) {
+        m_dayChecks[i] = new QCheckBox(QString::fromUtf8(kDayNames[i]));
+        m_dayChecks[i]->setChecked(restDays.contains(i + 1));
+        restLayout->addWidget(m_dayChecks[i], 0, i + 1);
+    }
+
+    restLayout->addWidget(new QLabel("时间段："), 1, 0);
+
+    QTime tStart = QTime::fromString(restStart, "HH:mm");
+    QTime tEnd   = QTime::fromString(restEnd, "HH:mm");
+    if (!tStart.isValid()) tStart = QTime(3, 0);
+    if (!tEnd.isValid())   tEnd   = QTime(4, 0);
+
+    m_restStart = new QTimeEdit(tStart);
+    m_restStart->setDisplayFormat("HH:mm");
+    m_restStart->setToolTip("窗口起始时刻，进入即触发优雅重启。");
+    m_restEnd = new QTimeEdit(tEnd);
+    m_restEnd->setDisplayFormat("HH:mm");
+    m_restEnd->setToolTip("窗口结束时刻；起始晚于结束表示跨午夜窗口（归属起始日）。");
+
+    auto *timeRow = new QHBoxLayout();
+    timeRow->addWidget(m_restStart);
+    timeRow->addWidget(new QLabel("→"));
+    timeRow->addWidget(m_restEnd);
+    timeRow->addStretch();
+    restLayout->addLayout(timeRow, 1, 1, 1, 6);
+
+    auto *restHint = new QLabel(
+        "起始时间晚于结束时间表示跨午夜窗口（如 22:00 → 02:00，归属起始日）。\n"
+        "每个休息日最多重启一次，重启后守护进程随开机自启，不会在窗口内反复重启。");
+    restHint->setWordWrap(true);
+    restLayout->addWidget(restHint, 2, 0, 1, 8);
+
+    connect(m_restCheck, &QCheckBox::toggled, this, [this]() { syncRestPanel(); });
+    layout->addWidget(m_restPanel);
+    syncRestPanel();
+
     auto *testRow = new QHBoxLayout();
     auto *testLabel = new QLabel("系统测试：");
     testRow->addWidget(testLabel);
@@ -70,7 +157,8 @@ WatchdogInstallDialog::WatchdogInstallDialog(int nginxPort, int sshPort, bool ne
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
     buttons->button(QDialogButtonBox::Ok)->setText("安装");
     buttons->button(QDialogButtonBox::Cancel)->setText("取消");
-    connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::accepted, this,
+            &WatchdogInstallDialog::validateAndAccept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
 }
@@ -201,4 +289,75 @@ QString WatchdogInstallDialog::password() const
 bool WatchdogInstallDialog::forceKernelReboot() const
 {
     return m_forceKernelCheck && m_forceKernelCheck->isChecked();
+}
+
+bool WatchdogInstallDialog::kernelDetection() const
+{
+    return m_kernelCheck && m_kernelCheck->isChecked();
+}
+
+bool WatchdogInstallDialog::kdumpEnabled() const
+{
+    return kernelDetection() && m_kdumpCheck && m_kdumpCheck->isChecked();
+}
+
+bool WatchdogInstallDialog::hungTaskPanic() const
+{
+    return kernelDetection() && m_hungTaskCheck && m_hungTaskCheck->isChecked();
+}
+
+void WatchdogInstallDialog::syncRestPanel()
+{
+    if (m_restPanel)
+        m_restPanel->setEnabled(m_restCheck && m_restCheck->isChecked());
+}
+
+void WatchdogInstallDialog::validateAndAccept()
+{
+    if (m_restCheck && m_restCheck->isChecked()) {
+        QVector<int> days;
+        for (int i = 0; i < 7; ++i)
+            if (m_dayChecks[i] && m_dayChecks[i]->isChecked())
+                days.append(i + 1);
+
+        if (days.isEmpty()) {
+            QMessageBox::warning(this, "机器中途休息",
+                "请至少选择一个休息日，否则休息窗口永远不会触发。");
+            return;
+        }
+        if (m_restStart && m_restEnd && m_restStart->time() == m_restEnd->time()) {
+            QMessageBox::warning(this, "机器中途休息",
+                "时间段的起始与结束时间不能相同（窗口长度为 0，无法触发）。\n"
+                "例如可设为 03:00 → 04:00。");
+            return;
+        }
+    }
+    accept();
+}
+
+bool WatchdogInstallDialog::restEnabled() const
+{
+    return m_restCheck && m_restCheck->isChecked();
+}
+
+QVector<int> WatchdogInstallDialog::restDays() const
+{
+    QVector<int> days;
+    if (!m_restCheck || !m_restCheck->isChecked())
+        return days;
+    for (int i = 0; i < 7; ++i) {
+        if (m_dayChecks[i] && m_dayChecks[i]->isChecked())
+            days.append(i + 1);
+    }
+    return days;
+}
+
+QString WatchdogInstallDialog::restStart() const
+{
+    return m_restStart ? m_restStart->time().toString("HH:mm") : QStringLiteral("03:00");
+}
+
+QString WatchdogInstallDialog::restEnd() const
+{
+    return m_restEnd ? m_restEnd->time().toString("HH:mm") : QStringLiteral("04:00");
 }
