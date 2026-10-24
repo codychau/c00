@@ -64,9 +64,22 @@ bool VMConfigManager::load()
 
             // VirtualBox 专属 (旧配置缺省时回退默认)
             if (auto *v = vmTbl->get("vm_type"))         vm.vmType      = QString::fromStdString(v->value_or("qemu"));
-            if (auto *v = vmTbl->get("ostype"))          vm.ostype      = QString::fromStdString(v->value_or("Windows7"));
-            if (auto *v = vmTbl->get("disk_format"))     vm.diskFormat  = QString::fromStdString(v->value_or("vdi"));
-            if (auto *v = vmTbl->get("storage_backend")) vm.storageBackend = QString::fromStdString(v->value_or("sata"));
+            if (auto *v = vmTbl->get("ostype")) {
+                // VirtualBox ostype ID 无空格 (Windows7/Windows10...), 旧配置若存了界面名则归一
+                QString o = QString::fromStdString(v->value_or("Windows7"));
+                o.remove(' ');
+                vm.ostype = o;
+            }
+            if (auto *v = vmTbl->get("disk_format")) {
+                QString df = QString::fromStdString(v->value_or("vdi")).toLower();
+                if (df.contains("vmdk"))      vm.diskFormat = "vmdk";
+                else if (df.contains("vhdx")) vm.diskFormat = "vhdx";
+                else                          vm.diskFormat = "vdi";  // VDI (VirtualBox 原生) 等
+            }
+            if (auto *v = vmTbl->get("storage_backend")) {
+                QString sb = QString::fromStdString(v->value_or("sata")).toLower();
+                vm.storageBackend = sb.contains("ide") ? "ide" : "sata";  // "IDE (...)" / "SATA (...)"
+            }
             if (auto *v = vmTbl->get("vbox_disk_size"))  vm.vboxDiskSize= v->value_or(20480);
             if (auto *v = vmTbl->get("vbox_nic_type"))   vm.vboxNicType = QString::fromStdString(v->value_or("nat"));
             if (auto *v = vmTbl->get("vbox_bridge_dev")) vm.vboxBridgeDev = QString::fromStdString(v->value_or(""));

@@ -856,9 +856,9 @@ VMConfig VMDialog::vmConfig() const
     vm.ramfb      = m_ramfbCb->isChecked();
     vm.diskInterface = m_diskInterfaceCombo->currentData().toString();
     vm.vmType      = m_vmTypeCombo->currentData().toString();
-    vm.ostype      = m_ostypeCombo->currentText();
-    vm.storageBackend = m_storageBackendCombo->currentText();
-    vm.diskFormat  = m_diskFormatCombo->currentText();
+    vm.ostype      = m_ostypeCombo->currentData().toString();
+    vm.storageBackend = m_storageBackendCombo->currentData().toString();
+    vm.diskFormat  = m_diskFormatCombo->currentData().toString();
     vm.vboxDiskSize = m_vboxDiskSizeSpin->value();
     vm.vboxNicType  = (m_vboxNicTypeCombo && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)")
                       ? "bridged" : "nat";
