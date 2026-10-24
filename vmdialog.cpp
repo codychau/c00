@@ -322,10 +322,16 @@ VMDialog::VMDialog(QWidget *parent)
     isoRow->addWidget(m_isoBtn);
     basicForm->addRow("ISO:", isoRow);
 
-    m_virtioDiskCb = new QCheckBox("系统盘使用 VirtIO 接口（高性能，关闭后用 IDE/SATA 兼容旧 OS）");
-    m_virtioDiskCb->setChecked(true);
-    m_virtioDiskCb->setToolTip("开启: -drive if=virtio (更快)\n关闭: 默认接口 (IDE/SATA, 兼容 Win2000/98)");
-    basicForm->addRow("", m_virtioDiskCb);
+    m_diskInterfaceCombo = new QComboBox();
+    m_diskInterfaceCombo->addItem("virtio (高性能, 需装驱动)", "virtio");
+    m_diskInterfaceCombo->addItem("SATA (AHCI)", "sata");
+    m_diskInterfaceCombo->addItem("IDE", "ide");
+    m_diskInterfaceCombo->setCurrentIndex(0);
+    m_diskInterfaceCombo->setToolTip(
+        "IDE: 原生 IDE 控制器, Win98/2000/XP/7 免驱动即认盘(推荐旧 OS)\n"
+        "SATA: AHCI 控制器, Win7 SP1+ 原生支持\n"
+        "virtio: 性能最高, 但需装入对应驱动 (Win10/11 自带, 老系统需手动装)");
+    basicForm->addRow("系统盘接口:", m_diskInterfaceCombo);
 
     leftCol->addWidget(basicGroup);
 
@@ -664,7 +670,9 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     }
 
     // 自动启动
-    m_virtioDiskCb->setChecked(vm.virtioDisk);
+    // 系统盘接口下拉 (virtio / sata / ide)
+    int diIdx = m_diskInterfaceCombo->findData(vm.diskInterface);
+    if (diIdx >= 0) m_diskInterfaceCombo->setCurrentIndex(diIdx);
     m_autoStartCb->setChecked(vm.autoStart);
     m_waitMountCb->setChecked(vm.waitMount);
 
@@ -727,7 +735,7 @@ VMConfig VMDialog::vmConfig() const
     vm.net        = m_netCombo->currentData().toString();
     vm.nicModel   = m_nicCombo->currentText();
     vm.ramfb      = m_ramfbCb->isChecked();
-    vm.virtioDisk = m_virtioDiskCb->isChecked();
+    vm.diskInterface = m_diskInterfaceCombo->currentData().toString();
     vm.autoStart  = m_autoStartCb->isChecked();
     vm.waitMount  = m_waitMountCb->isChecked();
 

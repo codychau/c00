@@ -52,7 +52,13 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("machine"))    vm.machine  = QString::fromStdString(v->value_or("q35"));
             if (auto *v = vmTbl->get("cpu_type"))   vm.cpuType  = QString::fromStdString(v->value_or("host"));
             if (auto *v = vmTbl->get("kvm"))        vm.kvm      = v->value_or(true);
-            if (auto *v = vmTbl->get("virtio_disk")) vm.virtioDisk = v->value_or(true);
+            // 系统盘接口: 优先 disk_interface; 旧配置用 virtio_disk(bool) 迁移
+            if (auto *v = vmTbl->get("disk_interface")) {
+                QString s = QString::fromStdString(v->value_or(""));
+                if (s == "sata" || s == "ide" || s == "virtio") vm.diskInterface = s;
+            } else if (auto *v = vmTbl->get("virtio_disk")) {
+                vm.diskInterface = v->value_or(true) ? "virtio" : "ide";
+            }
             if (auto *v = vmTbl->get("vga"))        vm.vga      = QString::fromStdString(v->value_or("virtio"));
             if (auto *v = vmTbl->get("nic_model"))  vm.nicModel = QString::fromStdString(v->value_or("virtio-net-pci"));
 
@@ -132,7 +138,7 @@ bool VMConfigManager::save() const
         tbl.emplace("machine",    vm.machine.toStdString());
         tbl.emplace("cpu_type",   vm.cpuType.toStdString());
         tbl.emplace("kvm",        vm.kvm);
-        tbl.emplace("virtio_disk", vm.virtioDisk);
+        tbl.emplace("disk_interface", vm.diskInterface.toStdString());
         tbl.emplace("vga",        vm.vga.toStdString());
         tbl.emplace("nic_model",  vm.nicModel.toStdString());
 

@@ -61,7 +61,7 @@ private:
     QCheckBox      *m_hugepagesCb;
 
     // 磁盘高级
-    QCheckBox      *m_virtioDiskCb;
+    QComboBox      *m_diskInterfaceCombo;
 
     // 额外参数
     QPlainTextEdit *m_extraEdit;

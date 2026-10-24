@@ -479,9 +479,11 @@ bool VMPage::startVMAt(int row, bool quiet)
     args << "-qmp" << QString("unix:%1,server=on,wait=off").arg(sockPath);
 
     if (!vm.disk.isEmpty()) {
-        QString driveStr = QString("file=%1,format=qcow2").arg(vm.disk);
-        if (vm.virtioDisk)
-            driveStr += ",if=virtio,index=0,cache=none,aio=native";
+        // 系统盘接口: virtio(高性能) / sata(AHCI) / ide(原生 IDE, 旧 OS 免驱动)
+        QString if_ = vm.diskInterface;
+        if (if_ != "virtio" && if_ != "sata" && if_ != "ide") if_ = "ide";  // 非法值兜底为 IDE
+        QString driveStr = QString("file=%1,format=qcow2,if=%2,index=0,cache=none,aio=native")
+                               .arg(vm.disk, if_);
         args << "-drive" << driveStr;
     }
 

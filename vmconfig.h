@@ -34,7 +34,7 @@ struct VMConfig {
     QString machine  = "q35";   // q35, pc, pc-i440fx-*
     QString cpuType  = "host";  // host, qemu64, pentium3, cortex-a72
     bool    kvm       = true;    // 启用 KVM 加速
-    bool    virtioDisk = true;   // 系统盘使用 virtio（关闭后用默认 IDE/SATA）
+    QString diskInterface = "virtio";  // 系统盘接口: virtio / sata / ide (ide 兼容 Win98/7 等旧 OS 免驱动)
     QString vga       = "virtio";// virtio, cirrus, qxl, virtio-gpu, none
     QString net       = "user";  // user, bridge, tap
     QString nicModel  = "virtio-net-pci"; // 网卡模型
