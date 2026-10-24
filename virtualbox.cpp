@@ -35,7 +35,9 @@ static int runVBox(const QStringList &args, QString *err)
     QString text = QString::fromUtf8(proc.readAllStandardOutput())
                  + QString::fromUtf8(proc.readAllStandardError());
     int rc = proc.exitCode();
-    if (rc != 0 && err) *err = text.trimmed();
+    // 总是填充输出: vmExists/isRunning/addController 需要成功时的 stdout,
+    // 失败时调用方也可从同一参数取错误信息。
+    if (err) *err = text.trimmed();
     return rc;
 }
 
@@ -84,10 +86,22 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
     }
 
     // ── 新建 ──
-    // 1) createvm
-    if (int rc = runVBox({"createvm", "--name", name,
-                          "--ostype", vm.ostype, "--register"}, err); rc != 0)
-        return false;
+    // 1) createvm (若 .vbox 残留未注册, 自动 registervm 复用而非报错)
+    QString createOut;
+    if (runVBox({"createvm", "--name", name,
+                 "--ostype", vm.ostype, "--register"}, &createOut) != 0) {
+        if (createOut.contains("already exists", Qt::CaseInsensitive)) {
+            QString vboxFile = QDir::homePath() + "/VirtualBox VMs/" + name + "/" + name + ".vbox";
+            if (runVBox({"registervm", vboxFile}, err) != 0) {
+                if (err) *err = "复用残留 VM 配置失败: " + *err;
+                return false;
+            }
+            Logger::log("VirtualBox", QString("♻️ 复用已存在的 VM 配置: %1").arg(vboxFile));
+        } else {
+            if (err) *err = createOut;
+            return false;
+        }
+    }
 
     // 2) 存储控制器 (SATA; IDE 在本版不可用)
     QString backend = resolveBackend(vm.storageBackend);
