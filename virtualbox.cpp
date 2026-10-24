@@ -82,7 +82,8 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
 
     if (vmExists(name)) {
         // 已存在: 只回写核心设置 (内存/CPU/ostype/网络/显示). 控制器/磁盘/ISO 保持原样.
-        return applySettings(vm, err);
+        // 注意: applySettings 返回 int (0=成功), 必须显式比较, 不能直接 return
+        return applySettings(vm, err) == 0;
     }
 
     // ── 新建 ──
