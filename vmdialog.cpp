@@ -290,8 +290,11 @@ void VMDialog::updateVmTypeUI()
     m_vncSpin->setVisible(!vbox);
     m_diskInterfaceCombo->setVisible(!vbox);
 
-    // 额外参数组标题随类型变化
-    m_extraGroup->setWindowTitle(vbox ? "额外参数" : "额外 QEMU 参数");
+    // 高级参数组 (右列): VirtualBox 时整组隐藏，窗口更短
+    m_advGroup->setVisible(!vbox);
+
+    // 额外参数组是 QEMU 专属，VirtualBox 时整组隐藏（窗口更短）
+    m_extraGroup->setVisible(!vbox);
 
     // VirtualBox: 桥接模式时才显示桥接网卡输入
     if (m_vboxNicTypeCombo && m_vboxBridgeEdit)
@@ -490,8 +493,8 @@ VMDialog::VMDialog(QWidget *parent)
     // ════════ 右列 ════════
     auto *rightCol = new QVBoxLayout();
 
-    auto *advGroup = new QGroupBox("高级参数");
-    auto *advForm  = new QFormLayout(advGroup);
+    m_advGroup = new QGroupBox("高级参数");
+    auto *advForm  = new QFormLayout(m_advGroup);
 
     // 架构
     m_qemuCombo = new QComboBox();
@@ -581,7 +584,7 @@ VMDialog::VMDialog(QWidget *parent)
 
     rightCol->addWidget(autoGroup);
 
-    rightCol->addWidget(advGroup);
+    rightCol->addWidget(m_advGroup);
 
     // ── 端口转发 ──
     auto *portGroup = new QGroupBox("端口转发 (user 模式)");

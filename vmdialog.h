@@ -79,6 +79,7 @@ private:
     // 额外参数
     QPlainTextEdit *m_extraEdit;
     QGroupBox      *m_extraGroup;
+    QGroupBox      *m_advGroup;
 
     // 按钮
     QPushButton    *m_portAddBtn;
