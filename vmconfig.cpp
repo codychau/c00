@@ -62,6 +62,15 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("vga"))        vm.vga      = QString::fromStdString(v->value_or("virtio"));
             if (auto *v = vmTbl->get("nic_model"))  vm.nicModel = QString::fromStdString(v->value_or("virtio-net-pci"));
 
+            // VirtualBox 专属 (旧配置缺省时回退默认)
+            if (auto *v = vmTbl->get("vm_type"))         vm.vmType      = QString::fromStdString(v->value_or("qemu"));
+            if (auto *v = vmTbl->get("ostype"))          vm.ostype      = QString::fromStdString(v->value_or("Windows7"));
+            if (auto *v = vmTbl->get("disk_format"))     vm.diskFormat  = QString::fromStdString(v->value_or("vdi"));
+            if (auto *v = vmTbl->get("storage_backend")) vm.storageBackend = QString::fromStdString(v->value_or("sata"));
+            if (auto *v = vmTbl->get("vbox_disk_size"))  vm.vboxDiskSize= v->value_or(20480);
+            if (auto *v = vmTbl->get("vbox_nic_type"))   vm.vboxNicType = QString::fromStdString(v->value_or("nat"));
+            if (auto *v = vmTbl->get("vbox_bridge_dev")) vm.vboxBridgeDev = QString::fromStdString(v->value_or(""));
+
             // 端口转发
             if (auto *v = vmTbl->get("port_forwards")) {
                 if (auto *arr = v->as_array()) {
@@ -141,6 +150,13 @@ bool VMConfigManager::save() const
         tbl.emplace("disk_interface", vm.diskInterface.toStdString());
         tbl.emplace("vga",        vm.vga.toStdString());
         tbl.emplace("nic_model",  vm.nicModel.toStdString());
+        tbl.emplace("vm_type",        vm.vmType.toStdString());
+        tbl.emplace("ostype",         vm.ostype.toStdString());
+        tbl.emplace("disk_format",    vm.diskFormat.toStdString());
+        tbl.emplace("storage_backend", vm.storageBackend.toStdString());
+        tbl.emplace("vbox_disk_size", vm.vboxDiskSize);
+        tbl.emplace("vbox_nic_type",  vm.vboxNicType.toStdString());
+        tbl.emplace("vbox_bridge_dev", vm.vboxBridgeDev.toStdString());
 
         // 端口转发
         toml::array pfArr;

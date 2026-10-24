@@ -34,10 +34,27 @@ struct VMConfig {
     QString machine  = "q35";   // q35, pc, pc-i440fx-*
     QString cpuType  = "host";  // host, qemu64, pentium3, cortex-a72
     bool    kvm       = true;    // 启用 KVM 加速
-    QString diskInterface = "virtio";  // 系统盘接口: virtio / sata / ide (ide 兼容 Win98/7 等旧 OS 免驱动)
+    QString diskInterface = "virtio";  // 系统盘接口: virtio, sata, ide
     QString vga       = "virtio";// virtio, cirrus, qxl, virtio-gpu, none
     QString net       = "user";  // user, bridge, tap
     QString nicModel  = "virtio-net-pci"; // 网卡模型
+
+    // ── 虚拟机类型 / VirtualBox 专属 ──
+    //  vmType: qemu (默认) | virtualbox
+    QString vmType = "qemu";
+    // VirtualBox: 目标 OS 类型 (ostype), 如 Windows98/WindowsXP/Windows7/Windows10
+    QString ostype = "Windows7";
+    // VirtualBox: 磁盘镜像格式 (建盘时使用), vdi / vmdk / vhdx
+    QString diskFormat = "vdi";
+    // VirtualBox: 存储控制器后端. sata (默认, 通用). ide 仅历史兼容:
+    // 7.2.6 的 CLI 中 IDE 控制器 storageattach 失效, 代码会自动回退 SATA.
+    QString storageBackend = "sata";
+    // VirtualBox: 虚拟磁盘大小 (MB), 仅新建 VM 时使用
+    int     vboxDiskSize = 20480;
+    // VirtualBox: 网络模式. nat / bridged
+    QString vboxNicType = "nat";
+    // VirtualBox: bridged 模式下用的宿主机网卡名 (vboxNicType==bridged 时)
+    QString vboxBridgeDev = "";
 
     // 端口转发 (user 模式下生效)
     QVector<PortFwd> portForwards;

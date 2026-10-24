@@ -10,6 +10,7 @@
 #include <QListWidget>
 #include <QCheckBox>
 #include <QTableWidget>
+#include <QGroupBox>
 
 #include "vmconfig.h"
 
@@ -63,8 +64,21 @@ private:
     // 磁盘高级
     QComboBox      *m_diskInterfaceCombo;
 
+    // 虚拟机类型 / VirtualBox 专属控件
+    QComboBox      *m_vmTypeCombo;
+    QGroupBox      *m_vboxGroup;
+    QComboBox      *m_ostypeCombo;
+    QComboBox      *m_storageBackendCombo;
+    QComboBox      *m_diskFormatCombo;
+    QSpinBox       *m_vboxDiskSizeSpin;
+    QComboBox      *m_vboxNicTypeCombo;
+    QLineEdit      *m_vboxBridgeEdit;
+
+    void updateVmTypeUI();  // 按虚拟机类型显示/隐藏对应控件
+
     // 额外参数
     QPlainTextEdit *m_extraEdit;
+    QGroupBox      *m_extraGroup;
 
     // 按钮
     QPushButton    *m_portAddBtn;

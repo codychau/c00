@@ -39,6 +39,9 @@ private slots:
 private:
     bool startVMAt(int row, bool quiet);
     bool stopVMAt(int row, bool force, bool quiet);
+    // VirtualBox 分支
+    bool startVBoxVM(const VMConfig &vm, bool quiet);
+    bool stopVBoxVM(const VMConfig &vm, bool force, bool quiet);
     void saveConfig();
     void updateStartButton();
     void sendQemuPowerdown(const QString &vmName);

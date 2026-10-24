@@ -31,6 +31,8 @@ add_executable(server-toolbox
     vmconfig.h
     vmdialog.cpp
     vmdialog.h
+    virtualbox.cpp
+    virtualbox.h
     pcidialog.cpp
     pcidialog.h
     smartdialog.cpp

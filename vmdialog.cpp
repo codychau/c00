@@ -270,8 +270,34 @@ static bool editDataDiskDialog(QWidget *parent, VMDataDisk &dd, bool isNew)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  VMDialog — 双列布局
+//  updateVmTypeUI — 按虚拟机类型显隐对应控件
 // ═══════════════════════════════════════════════════════════════════
+void VMDialog::updateVmTypeUI()
+{
+    const bool vbox = (m_vmTypeCombo->currentData() == "virtualbox");
+
+    // VirtualBox 专属设置组
+    m_vboxGroup->setVisible(vbox);
+
+    // QEMU 高级控件: VirtualBox 时隐藏 (架构/机器/CPU/KVM/VGA/网络/网卡)
+    m_qemuCombo->setVisible(!vbox);
+    m_machineCombo->setVisible(!vbox);
+    m_cpuTypeCombo->setVisible(!vbox);
+    m_kvmCb->setVisible(!vbox);
+    m_vgaCombo->setVisible(!vbox);
+    m_netCombo->setVisible(!vbox);
+    m_nicCombo->setVisible(!vbox);
+    m_vncSpin->setVisible(!vbox);
+    m_diskInterfaceCombo->setVisible(!vbox);
+
+    // 额外参数组标题随类型变化
+    m_extraGroup->setWindowTitle(vbox ? "额外参数" : "额外 QEMU 参数");
+
+    // VirtualBox: 桥接模式时才显示桥接网卡输入
+    if (m_vboxNicTypeCombo && m_vboxBridgeEdit)
+        m_vboxBridgeEdit->setVisible(vbox
+            && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)");
+}
 
 VMDialog::VMDialog(QWidget *parent)
     : QDialog(parent)
@@ -289,6 +315,14 @@ VMDialog::VMDialog(QWidget *parent)
 
     auto *basicGroup = new QGroupBox("基本参数");
     auto *basicForm  = new QFormLayout(basicGroup);
+
+    // 虚拟机类型 (QEMU / VirtualBox)
+    m_vmTypeCombo = new QComboBox();
+    m_vmTypeCombo->addItem("QEMU (KVM 加速, 高性能)", "qemu");
+    m_vmTypeCombo->addItem("VirtualBox (自带窗口)", "virtualbox");
+    m_vmTypeCombo->setCurrentIndex(0);
+    m_vmTypeCombo->setToolTip("QEMU: KVM 硬件加速、精细调优\nVirtualBox: 开箱即用、自带窗口，适合老系统");
+    basicForm->addRow("虚拟机类型:", m_vmTypeCombo);
 
     m_nameEdit = new QLineEdit();
     m_nameEdit->setPlaceholderText("例如: Windows 10");
@@ -334,6 +368,67 @@ VMDialog::VMDialog(QWidget *parent)
     basicForm->addRow("系统盘接口:", m_diskInterfaceCombo);
 
     leftCol->addWidget(basicGroup);
+
+    // ── VirtualBox 专属设置 ── (按虚拟机类型显示/隐藏)
+    m_vboxGroup = new QGroupBox("VirtualBox 设置");
+    auto *vboxForm  = new QFormLayout(m_vboxGroup);
+
+    m_ostypeCombo = new QComboBox();
+    m_ostypeCombo->setEditable(false);
+    m_ostypeCombo->addItem("Windows 3.1", "Windows31");
+    m_ostypeCombo->addItem("Windows 95", "Windows95");
+    m_ostypeCombo->addItem("Windows 98", "Windows98");
+    m_ostypeCombo->addItem("Windows ME", "WindowsMe");
+    m_ostypeCombo->addItem("Windows NT 4", "WindowsNT4");
+    m_ostypeCombo->addItem("Windows 2000", "Windows2000");
+    m_ostypeCombo->addItem("Windows XP", "WindowsXP");
+    m_ostypeCombo->addItem("Windows 7", "Windows7");
+    m_ostypeCombo->addItem("Windows 8.1", "Windows81");
+    m_ostypeCombo->addItem("Windows 10", "Windows10");
+    m_ostypeCombo->addItem("Windows 11", "Windows11");
+    m_ostypeCombo->setCurrentText("Windows7");
+    m_ostypeCombo->setToolTip("目标操作系统. 旧 OS (Win98/XP) 也可运行, 但安装镜像需走 SATA 控制器");
+    vboxForm->addRow("目标 OS:", m_ostypeCombo);
+
+    m_storageBackendCombo = new QComboBox();
+    m_storageBackendCombo->addItem("SATA (默认, 通用)", "sata");
+    m_storageBackendCombo->addItem("IDE (老 OS, 7.2.6 会回退 SATA)", "ide");
+    m_storageBackendCombo->setCurrentIndex(0);
+    m_storageBackendCombo->setToolTip(
+        "磁盘控制器.\n"
+        "注: VirtualBox 7.2.x 的 CLI 中 IDE 控制器 storageattach 失效,\n"
+        "无论选哪个都会自动回退到 SATA.");
+    vboxForm->addRow("存储后端:", m_storageBackendCombo);
+
+    m_diskFormatCombo = new QComboBox();
+    m_diskFormatCombo->addItem("VDI (VirtualBox 原生)", "vdi");
+    m_diskFormatCombo->addItem("VMDK (兼容 VMware)", "vmdk");
+    m_diskFormatCombo->addItem("VHDX (Hyper-V)", "vhdx");
+    m_diskFormatCombo->setCurrentText("VDI (VirtualBox 原生)");
+    m_diskFormatCombo->setToolTip("虚拟磁盘镜像格式 (新建 VM 时使用)");
+    vboxForm->addRow("磁盘格式:", m_diskFormatCombo);
+
+    m_vboxDiskSizeSpin = new QSpinBox();
+    m_vboxDiskSizeSpin->setRange(16, 10485760);
+    m_vboxDiskSizeSpin->setValue(20480);
+    m_vboxDiskSizeSpin->setSuffix(" MB");
+    m_vboxDiskSizeSpin->setSingleStep(512);
+    m_vboxDiskSizeSpin->setToolTip("新建 VM 时自动创建该大小的磁盘");
+    vboxForm->addRow("虚拟磁盘大小:", m_vboxDiskSizeSpin);
+
+    m_vboxNicTypeCombo = new QComboBox();
+    m_vboxNicTypeCombo->addItem("NAT", "nat");
+    m_vboxNicTypeCombo->addItem("桥接 (Bridged)", "bridged");
+    m_vboxNicTypeCombo->setCurrentText("NAT");
+    m_vboxNicTypeCombo->setToolTip("VirtualBox 网络模式");
+    vboxForm->addRow("网络模式:", m_vboxNicTypeCombo);
+
+    m_vboxBridgeEdit = new QLineEdit();
+    m_vboxBridgeEdit->setPlaceholderText("宿主机网卡名, 如 eth0");
+    vboxForm->addRow("桥接网卡:", m_vboxBridgeEdit);
+
+    m_vboxGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
+    leftCol->addWidget(m_vboxGroup);
 
     // ── 数据盘 ──
     auto *ddGroup = new QGroupBox("数据盘");
@@ -382,13 +477,13 @@ VMDialog::VMDialog(QWidget *parent)
     leftCol->addWidget(hptGroup);
 
     // ── 额外参数 ──
-    auto *extraGroup = new QGroupBox("额外 QEMU 参数");
-    auto *extraLayout = new QVBoxLayout(extraGroup);
+    m_extraGroup = new QGroupBox("额外 QEMU 参数");
+    auto *extraLayout = new QVBoxLayout(m_extraGroup);
     m_extraEdit = new QPlainTextEdit();
     m_extraEdit->setPlaceholderText("以上控件未覆盖的参数写在这里");
     m_extraEdit->setMaximumHeight(70);
     extraLayout->addWidget(m_extraEdit);
-    leftCol->addWidget(extraGroup);
+    leftCol->addWidget(m_extraGroup);
 
     cols->addLayout(leftCol, 1);
 
@@ -541,7 +636,9 @@ VMDialog::VMDialog(QWidget *parent)
         }
     });
 
-    // 文件浏览
+    // 虚拟机类型切换 → 显隐 VirtualBox 专属控件 / QEMU 高级控件
+    connect(m_vmTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { updateVmTypeUI(); });
     connect(m_diskBtn, &QPushButton::clicked, this, [this]() {
         QString path = QFileDialog::getOpenFileName(this, "选择系统盘",
             m_diskEdit->text().isEmpty() ? QDir::homePath() : m_diskEdit->text(),
@@ -642,6 +739,9 @@ VMDialog::VMDialog(QWidget *parent)
         int row = m_pciList->currentRow();
         if (row >= 0) delete m_pciList->takeItem(row);
     });
+
+    // 初始化显隐 (默认 QEMU → 隐藏 VirtualBox 设置组)
+    updateVmTypeUI();
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -655,6 +755,22 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     m_memSpin->setValue(vm.memory);
     m_diskEdit->setText(vm.disk);
     m_isoEdit->setText(vm.iso);
+
+    // 虚拟机类型 + VirtualBox 专属字段
+    if (m_vmTypeCombo->findData(vm.vmType) >= 0)
+        m_vmTypeCombo->setCurrentIndex(m_vmTypeCombo->findData(vm.vmType));
+    if (m_ostypeCombo)           m_ostypeCombo->setCurrentText(vm.ostype);
+    if (m_storageBackendCombo)   m_storageBackendCombo->setCurrentText(vm.storageBackend);
+    if (m_diskFormatCombo)       m_diskFormatCombo->setCurrentText(vm.diskFormat);
+    if (m_vboxDiskSizeSpin)      m_vboxDiskSizeSpin->setValue(vm.vboxDiskSize);
+    if (m_vboxNicTypeCombo) {
+        QString nt = vm.vboxNicType == "bridged" ? "桥接 (Bridged)" : "NAT";
+        m_vboxNicTypeCombo->setCurrentText(nt);
+    }
+    if (m_vboxBridgeEdit)        m_vboxBridgeEdit->setText(vm.vboxBridgeDev);
+
+    // 按当前类型刷新显隐
+    updateVmTypeUI();
 
     // 数据盘
     m_dataDiskList->clear();
@@ -736,6 +852,14 @@ VMConfig VMDialog::vmConfig() const
     vm.nicModel   = m_nicCombo->currentText();
     vm.ramfb      = m_ramfbCb->isChecked();
     vm.diskInterface = m_diskInterfaceCombo->currentData().toString();
+    vm.vmType      = m_vmTypeCombo->currentData().toString();
+    vm.ostype      = m_ostypeCombo->currentText();
+    vm.storageBackend = m_storageBackendCombo->currentText();
+    vm.diskFormat  = m_diskFormatCombo->currentText();
+    vm.vboxDiskSize = m_vboxDiskSizeSpin->value();
+    vm.vboxNicType  = (m_vboxNicTypeCombo && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)")
+                      ? "bridged" : "nat";
+    vm.vboxBridgeDev = m_vboxBridgeEdit ? m_vboxBridgeEdit->text().trimmed() : "";
     vm.autoStart  = m_autoStartCb->isChecked();
     vm.waitMount  = m_waitMountCb->isChecked();
 

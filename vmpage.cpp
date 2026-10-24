@@ -1,5 +1,6 @@
 #include "vmpage.h"
 #include "vmdialog.h"
+#include "virtualbox.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -241,10 +242,15 @@ void VMPage::refreshStatus()
     for (int i = 0; i < m_mgr.vms().size(); ++i) {
         const auto &vm = m_mgr.vms()[i];
         bool running = false;
-        for (const auto &ql : qemuLines) {
-            if (qemuLineForVM(ql, vm.name, vm.disk)) {
-                running = true;
-                break;
+
+        if (vm.vmType == "virtualbox") {
+            running = VirtualBox::isRunning(vm.name);
+        } else {
+            for (const auto &ql : qemuLines) {
+                if (qemuLineForVM(ql, vm.name, vm.disk)) {
+                    running = true;
+                    break;
+                }
             }
         }
 
@@ -428,6 +434,10 @@ bool VMPage::startVMAt(int row, bool quiet)
     }
 
     const auto &vm = m_mgr.vms()[row];
+
+    // ── VirtualBox 分支 ──
+    if (vm.vmType == "virtualbox")
+        return startVBoxVM(vm, quiet);
 
     // ── 等待挂载点（可选）──
     if (vm.waitMount) {
@@ -616,6 +626,34 @@ bool VMPage::startVMAt(int row, bool quiet)
     return true;
 }
 
+// ── VirtualBox 启动 ──
+
+bool VMPage::startVBoxVM(const VMConfig &vm, bool quiet)
+{
+    QString err;
+    // 创建/配置 (若 VM 尚未在 VirtualBox 注册)
+    if (!VirtualBox::prepare(vm, &err)) {
+        Logger::log("VirtualBox", QString("❌ 准备失败 %1: %2").arg(vm.name, err));
+        if (!quiet)
+            QMessageBox::warning(this, "VirtualBox 启动失败",
+                QString("「%1」初始化失败:\n%2").arg(vm.name, err));
+        return false;
+    }
+
+    if (!VirtualBox::start(vm.name, /*headless=*/false)) {
+        if (!quiet)
+            QMessageBox::warning(this, "VirtualBox 启动失败",
+                QString("「%1」无法启动，请查看日志").arg(vm.name));
+        return false;
+    }
+
+    m_status->setText(QString("▶️ %1 已启动 (VirtualBox 窗口)").arg(vm.name));
+    // 立即规范化表格状态，使“运行中”文案可被停止逻辑识别
+    refreshStatus();
+    updateStartButton();
+    return true;
+}
+
 // ── 停止 ──
 
 void VMPage::stopVM()
@@ -668,6 +706,10 @@ bool VMPage::stopVMAt(int row, bool force, bool quiet)
     const auto &vm = m_mgr.vms()[row];
     auto *statusItem = m_table->item(row, ColStatus);
     if (!statusItem || !statusItem->text().contains("运行中")) return false;
+
+    // ── VirtualBox 分支 ──
+    if (vm.vmType == "virtualbox")
+        return stopVBoxVM(vm, force, quiet);
 
     if (!force) {
         Logger::log("VM", QString("正常关机: %1").arg(vm.name));
@@ -739,6 +781,23 @@ bool VMPage::stopVMAt(int row, bool force, bool quiet)
         }
     }
 
+    refreshStatus();
+    return true;
+}
+
+// ── VirtualBox 停止 ──
+
+bool VMPage::stopVBoxVM(const VMConfig &vm, bool force, bool quiet)
+{
+    if (!VirtualBox::stop(vm.name, force)) {
+        if (!quiet)
+            QMessageBox::warning(this, "VirtualBox 停止失败",
+                QString("「%1」无法发送停止命令，可能已退出").arg(vm.name));
+        return false;
+    }
+    // VirtualBox 无 QProcess 跟踪: 立即刷新状态，由轮询确认真实运行态
+    m_status->setText(QString("⏹️ %1 已发送停止命令 (%2)")
+        .arg(vm.name, force ? "强制" : "正常关机"));
     refreshStatus();
     return true;
 }
