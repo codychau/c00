@@ -511,7 +511,7 @@ VMDialog::VMDialog(QWidget *parent)
 
     netOuter->addWidget(m_netPageQemu);
     netOuter->addWidget(m_netPageVbox);
-    leftCol->addWidget(m_netGroup);
+    // 注意: 加到右列 (见下方 rightCol), 不占左列高度
 
     // ── VirtualBox 专属设置 ── (按虚拟机类型显示/隐藏)
     m_vboxGroup = new QGroupBox("VirtualBox 设置");
@@ -734,6 +734,9 @@ VMDialog::VMDialog(QWidget *parent)
     autoLayout->addWidget(m_waitMountCb);
 
     rightCol->addWidget(autoGroup);
+
+    // 网络设置放到右列 (借用端口转发组缩短后腾出的空间)
+    rightCol->addWidget(m_netGroup);
 
     rightCol->addWidget(m_advGroup);
 
