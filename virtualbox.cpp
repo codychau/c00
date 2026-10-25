@@ -37,6 +37,7 @@ static int runVBox(const QStringList &args, QString *err)
 struct VboxLayout {
     QHash<QString, int> portcounts;  // 控制器名 → 当前端口数
     QSet<QString> media;             // 已挂载的媒体路径
+    QStringList natpfNames;          // NAT 端口转发规则名 (Forwarding(N)="name,proto,,host,,guest")
 };
 
 // 前置声明 (定义在文件下方)
@@ -45,6 +46,7 @@ static int addController(const QString &vmName, const QString &ctrlName,
                          const QString &type, int portcount,
                          const VboxLayout &lay, QString *err);
 static int applySettings(const VMConfig &vm, QString *err);
+static void applyNatpf(const VMConfig &vm);
 static bool attachDisks(const VMConfig &vm, QString *err);
 
 // VirtualBox 7.x 中 storageattach 的 IDE 控制器存在 CLI 缺陷
@@ -85,6 +87,7 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
         // 已存在: 回写核心设置, 并补挂尚未挂载的磁盘 (已挂载的条目跳过)
         // 注意: applySettings 返回 int (0=成功), 必须显式比较, 不能直接 return
         if (applySettings(vm, err) != 0) return false;
+        applyNatpf(vm);
         return attachDisks(vm, err);
     }
 
@@ -118,6 +121,9 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
     // 3) 核心设置
     if (int rc = applySettings(vm, err); rc != 0)
         return false;
+
+    // 4) NAT 端口转发
+    applyNatpf(vm);
 
     Logger::log("VirtualBox", QString("✅ %1 已创建并配置 (ostype=%2)").arg(name, vm.ostype));
     return true;
@@ -189,6 +195,13 @@ static VboxLayout readLayout(const QString &vmName)
                 lay.media.insert(p);
         }
     }
+
+    // NAT 端口转发规则: Forwarding(N)="name,proto,,hostPort,,guestPort"
+    QRegularExpression pfRe("Forwarding\\(\\d+\\)=\"([^\"]+)\"");
+    auto pit = pfRe.globalMatch(out);
+    while (pit.hasNext())
+        lay.natpfNames << pit.next().captured(1).split(',').first();
+
     return lay;
 }
 
@@ -300,6 +313,32 @@ static int applySettings(const VMConfig &vm, QString *err)
     } else {
         a << "--nic1" << "nat";
     }
+    if (!vm.vboxNicModel.isEmpty())
+        a << "--nic-type1" << vm.vboxNicModel;
 
     return runVBox(a, err);
+}
+
+// NAT 端口转发: 先删现有规则, 再按配置重建. bridged 模式无 NAT, 清空即可.
+// 规则名用 pf<序号>, 保证重复 prepare 时幂等.
+static void applyNatpf(const VMConfig &vm)
+{
+    const QString name = vm.name;
+    const VboxLayout lay = readLayout(name);
+
+    for (const auto &ruleName : lay.natpfNames)
+        runVBox({"modifyvm", name, "--natpf1", "delete", ruleName}, nullptr);
+
+    if (vm.vboxNicType != "nat")
+        return;
+
+    for (int i = 0; i < vm.portForwards.size(); ++i) {
+        const auto &pf = vm.portForwards[i];
+        if (pf.hostPort <= 0 || pf.guestPort <= 0) continue;
+        QString proto = (pf.protocol.toLower() == "udp") ? "udp" : "tcp";
+        QString rule  = QString("pf%1,%2,,%3,,%4").arg(i).arg(proto).arg(pf.hostPort).arg(pf.guestPort);
+        QString out;
+        if (runVBox({"modifyvm", name, "--natpf1", rule}, &out) != 0)
+            Logger::log("VirtualBox", QString("⚠️ 端口转发 %1 写入失败: %2").arg(rule, out));
+    }
 }

@@ -357,6 +357,9 @@ void VMDialog::updateVmTypeUI()
     // VirtualBox 专属设置组
     m_vboxGroup->setVisible(vbox);
 
+    // 网络设置组是 VirtualBox 专属 (QEMU 的网络在「高级参数」里)
+    m_netGroup->setVisible(vbox);
+
     // QEMU 高级控件: VirtualBox 时隐藏 (架构/机器/CPU/KVM/VGA/网络/网卡)
     m_qemuCombo->setVisible(!vbox);
     m_machineCombo->setVisible(!vbox);
@@ -372,6 +375,12 @@ void VMDialog::updateVmTypeUI()
 
     // 额外参数组是 QEMU 专属，VirtualBox 时整组隐藏（窗口更短）
     m_extraGroup->setVisible(!vbox);
+
+    // 端口转发组: VirtualBox 时压缩高度并隐藏「编辑」按钮 (表变矮, 窗口更短)
+    m_portGroup->setTitle(vbox ? "端口转发 (NAT)" : "端口转发 (user 模式)");
+    m_portTable->setMinimumHeight(vbox ? 50 : 110);
+    m_portTable->setMaximumHeight(vbox ? 90 : QWIDGETSIZE_MAX);
+    m_portEditBtn->setVisible(!vbox);
 
     // VirtualBox: 桥接模式时才显示桥接网卡输入
     if (m_vboxNicTypeCombo && m_vboxBridgeEdit)
@@ -429,6 +438,42 @@ VMDialog::VMDialog(QWidget *parent)
     basicForm->addRow("ISO:", isoRow);
 
     leftCol->addWidget(basicGroup);
+
+    // ── 网络设置 (VirtualBox) ── (按虚拟机类型显示/隐藏)
+    m_netGroup = new QGroupBox("网络设置");
+    auto *netForm = new QFormLayout(m_netGroup);
+
+    m_vboxNicTypeCombo = new QComboBox();
+    m_vboxNicTypeCombo->addItem("NAT", "nat");
+    m_vboxNicTypeCombo->addItem("桥接 (Bridged)", "bridged");
+    m_vboxNicTypeCombo->setCurrentIndex(m_vboxNicTypeCombo->findData("nat"));
+    m_vboxNicTypeCombo->setToolTip(
+        "VirtualBox 网络模式.\n"
+        "NAT: 宿主机做 NAT, 虚机可出站; 端口转发用下方「端口转发」表 (写入 --natpf1).\n"
+        "桥接: 虚机直接接到宿主机网卡, 与局域网同网段.");
+    netForm->addRow("网络模式:", m_vboxNicTypeCombo);
+
+    m_vboxNicModelCombo = new QComboBox();
+    m_vboxNicModelCombo->addItem("Intel PRO/1000 (82545EM, 默认)", "82545EM");
+    m_vboxNicModelCombo->addItem("Intel PRO/100 (82540EM)", "82540EM");
+    m_vboxNicModelCombo->addItem("PCNet (Am79C973, 老 OS 免驱动)", "Am79C973");
+    m_vboxNicModelCombo->addItem("Virtio-NET (高性能, 需装驱动)", "virtio");
+    m_vboxNicModelCombo->addItem("USB 网卡 (usbnet)", "usbnet");
+    m_vboxNicModelCombo->setCurrentIndex(m_vboxNicModelCombo->findData("82545EM"));
+    m_vboxNicModelCombo->setToolTip(
+        "网卡型号 (--nic-type1).\n"
+        "82545EM: 千兆, Win2000+ 原生支持.\n"
+        "82540EM: 百兆, Win98/2000 免驱动.\n"
+        "Am79C973: PCNet, 极老 OS (Win3.1/95/98) 免驱动.\n"
+        "virtio: 高性能, Linux 原生, Windows 需装驱动.");
+    netForm->addRow("网卡型号:", m_vboxNicModelCombo);
+
+    m_vboxBridgeEdit = new QLineEdit();
+    m_vboxBridgeEdit->setPlaceholderText("宿主机网卡名, 如 eth0");
+    netForm->addRow("桥接网卡:", m_vboxBridgeEdit);
+
+    m_netGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
+    leftCol->addWidget(m_netGroup);
 
     // ── VirtualBox 专属设置 ── (按虚拟机类型显示/隐藏)
     m_vboxGroup = new QGroupBox("VirtualBox 设置");
@@ -512,17 +557,6 @@ VMDialog::VMDialog(QWidget *parent)
     connect(m_vboxRdpCb, &QCheckBox::toggled, this, [this](bool on) {
         m_vboxRdpPortSpin->setEnabled(on);
     });
-
-    m_vboxNicTypeCombo = new QComboBox();
-    m_vboxNicTypeCombo->addItem("NAT", "nat");
-    m_vboxNicTypeCombo->addItem("桥接 (Bridged)", "bridged");
-    m_vboxNicTypeCombo->setCurrentText("NAT");
-    m_vboxNicTypeCombo->setToolTip("VirtualBox 网络模式");
-    vboxForm->addRow("网络模式:", m_vboxNicTypeCombo);
-
-    m_vboxBridgeEdit = new QLineEdit();
-    m_vboxBridgeEdit->setPlaceholderText("宿主机网卡名, 如 eth0");
-    vboxForm->addRow("桥接网卡:", m_vboxBridgeEdit);
 
     m_vboxGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
     leftCol->addWidget(m_vboxGroup);
@@ -681,8 +715,8 @@ VMDialog::VMDialog(QWidget *parent)
     rightCol->addWidget(m_advGroup);
 
     // ── 端口转发 ──
-    auto *portGroup = new QGroupBox("端口转发 (user 模式)");
-    auto *portLayout = new QVBoxLayout(portGroup);
+    m_portGroup = new QGroupBox("端口转发 (user 模式)");
+    auto *portLayout = new QVBoxLayout(m_portGroup);
 
     m_portTable = new QTableWidget(0, 3);
     m_portTable->setHorizontalHeaderLabels({"主机端口", "虚机端口", "协议"});
@@ -702,7 +736,7 @@ VMDialog::VMDialog(QWidget *parent)
     portBtnRow->addWidget(m_portRemoveBtn);
     portBtnRow->addStretch();
     portLayout->addLayout(portBtnRow);
-    rightCol->addWidget(portGroup);
+    rightCol->addWidget(m_portGroup);
 
     cols->addLayout(rightCol, 1);
     outer->addLayout(cols);
@@ -857,6 +891,10 @@ void VMDialog::setVMConfig(const VMConfig &vm)
         int ntIdx = m_vboxNicTypeCombo->findData(vm.vboxNicType);
         if (ntIdx >= 0) m_vboxNicTypeCombo->setCurrentIndex(ntIdx);
     }
+    if (m_vboxNicModelCombo) {
+        int nmIdx = m_vboxNicModelCombo->findData(vm.vboxNicModel);
+        if (nmIdx >= 0) m_vboxNicModelCombo->setCurrentIndex(nmIdx);
+    }
     if (m_vboxBridgeEdit)        m_vboxBridgeEdit->setText(vm.vboxBridgeDev);
 
     // 按当前类型刷新显隐
@@ -940,6 +978,7 @@ VMConfig VMDialog::vmConfig() const
     vm.vboxRdpPort  = m_vboxRdpPortSpin->value();
     vm.vboxNicType  = (m_vboxNicTypeCombo && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)")
                       ? "bridged" : "nat";
+    vm.vboxNicModel = m_vboxNicModelCombo->currentData().toString();
     vm.vboxBridgeDev = m_vboxBridgeEdit ? m_vboxBridgeEdit->text().trimmed() : "";
     vm.autoStart  = m_autoStartCb->isChecked();
     vm.waitMount  = m_waitMountCb->isChecked();

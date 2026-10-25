@@ -45,6 +45,7 @@ private:
 
     // 端口转发表
     QTableWidget   *m_portTable;
+    QGroupBox      *m_portGroup;
 
     // 磁盘列表 (系统盘 + 数据盘)
     QListWidget    *m_diskList;
@@ -59,6 +60,12 @@ private:
     QListWidget    *m_pciList;
     QCheckBox      *m_hugepagesCb;
 
+    // 网络设置 (VirtualBox)
+    QGroupBox      *m_netGroup;
+    QComboBox      *m_vboxNicTypeCombo;
+    QComboBox      *m_vboxNicModelCombo;
+    QLineEdit      *m_vboxBridgeEdit;
+
     // 虚拟机类型 / VirtualBox 专属控件
     QComboBox      *m_vmTypeCombo;
     QGroupBox      *m_vboxGroup;
@@ -70,8 +77,6 @@ private:
     QCheckBox      *m_vboxUefiCb;
     QCheckBox      *m_vboxRdpCb;
     QSpinBox       *m_vboxRdpPortSpin;
-    QComboBox      *m_vboxNicTypeCombo;
-    QLineEdit      *m_vboxBridgeEdit;
 
     void updateVmTypeUI();  // 按虚拟机类型显示/隐藏对应控件
 

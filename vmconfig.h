@@ -61,6 +61,8 @@ struct VMConfig {
     int     vboxRdpPort = 3389;
     // VirtualBox: 网络模式. nat / bridged
     QString vboxNicType = "nat";
+    // VirtualBox: 网卡型号 (nic-type1). Am79C970A / Am79C973 / 82540EM / 82543GC / 82545EM / virtio / usbnet
+    QString vboxNicModel = "82545EM";
     // VirtualBox: bridged 模式下用的宿主机网卡名 (vboxNicType==bridged 时)
     QString vboxBridgeDev = "";
 

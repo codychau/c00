@@ -100,6 +100,7 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("vbox_rdp"))        vm.vboxRdp    = v->value_or(false);
             if (auto *v = vmTbl->get("vbox_rdp_port"))   vm.vboxRdpPort = v->value_or(3389);
             if (auto *v = vmTbl->get("vbox_nic_type"))   vm.vboxNicType = QString::fromStdString(v->value_or("nat"));
+            if (auto *v = vmTbl->get("vbox_nic_model"))  vm.vboxNicModel = QString::fromStdString(v->value_or("82545EM"));
             if (auto *v = vmTbl->get("vbox_bridge_dev")) vm.vboxBridgeDev = QString::fromStdString(v->value_or(""));
 
             // 端口转发
@@ -214,6 +215,7 @@ bool VMConfigManager::save() const
         tbl.emplace("vbox_rdp",       vm.vboxRdp);
         tbl.emplace("vbox_rdp_port",  vm.vboxRdpPort);
         tbl.emplace("vbox_nic_type",  vm.vboxNicType.toStdString());
+        tbl.emplace("vbox_nic_model", vm.vboxNicModel.toStdString());
         tbl.emplace("vbox_bridge_dev", vm.vboxBridgeDev.toStdString());
 
         // 端口转发
