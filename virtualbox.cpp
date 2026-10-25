@@ -165,7 +165,7 @@ bool VirtualBox::start(const QString &name, bool headless)
         Logger::log("VirtualBox", QString("❌ 启动失败 %1: %2").arg(name, err));
         return false;
     }
-    Logger::log("VirtualBox", QString("✅ %1 已启动 (headless=%2)").arg(name, headless));
+    Logger::log("VirtualBox", QString("✅ %1 已启动 (headless=%2)").arg(name).arg(headless ? "true" : "false"));
     return true;
 }
 
@@ -177,7 +177,7 @@ bool VirtualBox::stop(const QString &name, bool force)
         Logger::log("VirtualBox", QString("❌ 停止失败 %1: %2").arg(name, err));
         return false;
     }
-    Logger::log("VirtualBox", QString("⏹️ %1 已发送停止命令 (force=%2)").arg(name, force));
+    Logger::log("VirtualBox", QString("⏹️ %1 已发送停止命令 (force=%2)").arg(name).arg(force ? "true" : "false"));
     return true;
 }
 
