@@ -81,6 +81,8 @@ bool VMConfigManager::load()
                 vm.storageBackend = sb.contains("ide") ? "ide" : "sata";  // "IDE (...)" / "SATA (...)"
             }
             if (auto *v = vmTbl->get("vbox_disk_size"))  vm.vboxDiskSize= v->value_or(20480);
+            if (auto *v = vmTbl->get("vbox_acpi"))       vm.vboxAcpi   = v->value_or(true);
+            if (auto *v = vmTbl->get("vbox_ioapic"))     vm.vboxIoapic = v->value_or(true);
             if (auto *v = vmTbl->get("vbox_nic_type"))   vm.vboxNicType = QString::fromStdString(v->value_or("nat"));
             if (auto *v = vmTbl->get("vbox_bridge_dev")) vm.vboxBridgeDev = QString::fromStdString(v->value_or(""));
 
@@ -168,6 +170,8 @@ bool VMConfigManager::save() const
         tbl.emplace("disk_format",    vm.diskFormat.toStdString());
         tbl.emplace("storage_backend", vm.storageBackend.toStdString());
         tbl.emplace("vbox_disk_size", vm.vboxDiskSize);
+        tbl.emplace("vbox_acpi",      vm.vboxAcpi);
+        tbl.emplace("vbox_ioapic",    vm.vboxIoapic);
         tbl.emplace("vbox_nic_type",  vm.vboxNicType.toStdString());
         tbl.emplace("vbox_bridge_dev", vm.vboxBridgeDev.toStdString());
 

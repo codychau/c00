@@ -419,6 +419,16 @@ VMDialog::VMDialog(QWidget *parent)
     m_vboxDiskSizeSpin->setToolTip("新建 VM 时自动创建该大小的磁盘");
     vboxForm->addRow("虚拟磁盘大小:", m_vboxDiskSizeSpin);
 
+    m_vboxAcpiCb = new QCheckBox("启用 ACPI");
+    m_vboxAcpiCb->setChecked(true);
+    m_vboxAcpiCb->setToolTip("Win7 及更新系统必须开启, 否则安装时报 'BIOS is not ACPI compliant'.\n极老 OS (Win98/DOS) 可能需要关闭.");
+    vboxForm->addRow("", m_vboxAcpiCb);
+
+    m_vboxIoapicCb = new QCheckBox("启用 IOAPIC");
+    m_vboxIoapicCb->setChecked(true);
+    m_vboxIoapicCb->setToolTip("多核/中断控制器, 通常与 ACPI 一起开启.");
+    vboxForm->addRow("", m_vboxIoapicCb);
+
     m_vboxNicTypeCombo = new QComboBox();
     m_vboxNicTypeCombo->addItem("NAT", "nat");
     m_vboxNicTypeCombo->addItem("桥接 (Bridged)", "bridged");
@@ -766,6 +776,8 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     if (m_storageBackendCombo)   m_storageBackendCombo->setCurrentText(vm.storageBackend);
     if (m_diskFormatCombo)       m_diskFormatCombo->setCurrentText(vm.diskFormat);
     if (m_vboxDiskSizeSpin)      m_vboxDiskSizeSpin->setValue(vm.vboxDiskSize);
+    if (m_vboxAcpiCb)            m_vboxAcpiCb->setChecked(vm.vboxAcpi);
+    if (m_vboxIoapicCb)          m_vboxIoapicCb->setChecked(vm.vboxIoapic);
     if (m_vboxNicTypeCombo) {
         QString nt = vm.vboxNicType == "bridged" ? "桥接 (Bridged)" : "NAT";
         m_vboxNicTypeCombo->setCurrentText(nt);
@@ -860,6 +872,8 @@ VMConfig VMDialog::vmConfig() const
     vm.storageBackend = m_storageBackendCombo->currentData().toString();
     vm.diskFormat  = m_diskFormatCombo->currentData().toString();
     vm.vboxDiskSize = m_vboxDiskSizeSpin->value();
+    vm.vboxAcpi     = m_vboxAcpiCb->isChecked();
+    vm.vboxIoapic   = m_vboxIoapicCb->isChecked();
     vm.vboxNicType  = (m_vboxNicTypeCombo && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)")
                       ? "bridged" : "nat";
     vm.vboxBridgeDev = m_vboxBridgeEdit ? m_vboxBridgeEdit->text().trimmed() : "";

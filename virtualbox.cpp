@@ -12,16 +12,6 @@
 
 // ── 工具函数 ──
 
-// 是否属于"极老 OS" (无 ACPI / ioapic / 64 位支持)
-static bool isLegacyOS(const QString &ostype)
-{
-    static const QStringList legacy = {
-        "Windows31", "Windows95", "Windows98", "WindowsMe",
-        "WindowsNT3x", "WindowsNT4", "MSDOS"
-    };
-    return legacy.contains(ostype);
-}
-
 // 同步执行一条 VBoxManage 命令. 成功返回 0; err 携带失败原因.
 static int runVBox(const QStringList &args, QString *err)
 {
@@ -204,8 +194,8 @@ static int addController(const QString &vmName, const QString &name,
 static int applySettings(const VMConfig &vm, QString *err)
 {
     QStringList a = {"modifyvm", vm.name};
-    a << "--acpi" << (isLegacyOS(vm.ostype) ? "off" : "on");
-    a << "--ioapic" << (isLegacyOS(vm.ostype) ? "off" : "on");
+    a << "--acpi" << (vm.vboxAcpi ? "on" : "off");
+    a << "--ioapic" << (vm.vboxIoapic ? "on" : "off");
     a << "--cpus" << QString::number(vm.cpu);
     a << "--memory" << QString::number(vm.memory);
     a << "--os-type" << vm.ostype;

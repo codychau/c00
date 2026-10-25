@@ -51,6 +51,9 @@ struct VMConfig {
     QString storageBackend = "sata";
     // VirtualBox: 虚拟磁盘大小 (MB), 仅新建 VM 时使用
     int     vboxDiskSize = 20480;
+    // VirtualBox: ACPI / IOAPIC 开关 (Win7+ 必须 on; 极老 OS 可关)
+    bool    vboxAcpi = true;
+    bool    vboxIoapic = true;
     // VirtualBox: 网络模式. nat / bridged
     QString vboxNicType = "nat";
     // VirtualBox: bridged 模式下用的宿主机网卡名 (vboxNicType==bridged 时)

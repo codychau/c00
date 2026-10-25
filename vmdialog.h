@@ -71,6 +71,8 @@ private:
     QComboBox      *m_storageBackendCombo;
     QComboBox      *m_diskFormatCombo;
     QSpinBox       *m_vboxDiskSizeSpin;
+    QCheckBox      *m_vboxAcpiCb;
+    QCheckBox      *m_vboxIoapicCb;
     QComboBox      *m_vboxNicTypeCombo;
     QLineEdit      *m_vboxBridgeEdit;
 
