@@ -356,6 +356,7 @@ void VMDialog::updateVmTypeUI()
 
     // VirtualBox 专属设置组
     m_vboxGroup->setVisible(vbox);
+    m_vboxGpuGroup->setVisible(vbox);
 
     // 网络设置组: 按类型显示对应页
     m_netGroup->setVisible(true);
@@ -438,6 +439,55 @@ VMDialog::VMDialog(QWidget *parent)
     basicForm->addRow("ISO:", isoRow);
 
     leftCol->addWidget(basicGroup);
+
+    // ── 显卡设置 ── (VirtualBox 专属, 置于网络设置上方)
+    m_vboxGpuGroup = new QGroupBox("显卡设置");
+    auto *gpuForm  = new QFormLayout(m_vboxGpuGroup);
+
+    m_vboxGpuCombo = new QComboBox();
+    m_vboxGpuCombo->addItem("VBoxSVGA (VMSVGA, 默认, 支持 3D)", "vmsvga");
+    m_vboxGpuCombo->addItem("VBoxVGA (老 OS 兼容, 不支持 3D)", "vboxvga");
+    m_vboxGpuCombo->addItem("VBoxGBA (无头服务器)", "vboxgba");
+    m_vboxGpuCombo->setCurrentIndex(m_vboxGpuCombo->findData("vmsvga"));
+    m_vboxGpuCombo->setToolTip(
+        "显卡控制器 (--graphicscontroller).\n"
+        "VBoxSVGA: 现代系统默认, 唯一支持 3D 加速的控制器.\n"
+        "VBoxVGA: 老 OS (Win98/XP) 免驱动兼容, 不支持 3D.\n"
+        "VBoxGBA: 无头模式用, 无 3D.\n"
+        "勾选 3D 加速后强制锁定为 VBoxSVGA.");
+    gpuForm->addRow("显卡控制器:", m_vboxGpuCombo);
+
+    m_vboxVramSpin = new QSpinBox();
+    m_vboxVramSpin->setRange(64, 128);
+    m_vboxVramSpin->setValue(128);
+    m_vboxVramSpin->setSingleStep(8);
+    m_vboxVramSpin->setSuffix(" MB");
+    m_vboxVramSpin->setToolTip(
+        "显卡显存. 未启用 3D 加速时 64~128 MB;\n"
+        "启用 3D 加速后最高 256 MB.\n"
+        "现代系统建议 128 MB; 老 OS (Win98/XP) 用 64 MB 即可.");
+    gpuForm->addRow("显存:", m_vboxVramSpin);
+
+    m_vbox3dCb = new QCheckBox("启用 3D 加速");
+    m_vbox3dCb->setChecked(false);
+    m_vbox3dCb->setToolTip(
+        "VirtualBox 3D 加速 (--accelerate3d on), 需安装 Guest Additions.\n"
+        "老 OS (Win98/XP) 与 3D 加速兼容性差, 建议关闭.\n"
+        "勾选后显存上限放宽到 256 MB.");
+    gpuForm->addRow("", m_vbox3dCb);
+
+    // 3D 加速开关 → 显存上限 128 / 256, 显卡控制器强制 VBoxSVGA
+    connect(m_vbox3dCb, &QCheckBox::toggled, this, [this](bool on) {
+        m_vboxVramSpin->setMaximum(on ? 256 : 128);
+        if (m_vboxVramSpin->value() > m_vboxVramSpin->maximum())
+            m_vboxVramSpin->setValue(m_vboxVramSpin->maximum());
+        m_vboxGpuCombo->setEnabled(!on);
+        if (on)
+            m_vboxGpuCombo->setCurrentIndex(m_vboxGpuCombo->findData("vmsvga"));
+    });
+
+    m_vboxGpuGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
+    leftCol->addWidget(m_vboxGpuGroup);
 
     // ── 网络设置 ── 统一组: 按虚拟机类型显示 QEMU / VirtualBox 页
     m_netGroup = new QGroupBox("网络设置");
@@ -916,6 +966,19 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     if (m_vboxAcpiCb)            m_vboxAcpiCb->setChecked(vm.vboxAcpi);
     if (m_vboxIoapicCb)          m_vboxIoapicCb->setChecked(vm.vboxIoapic);
     if (m_vboxUefiCb)            m_vboxUefiCb->setChecked(vm.vboxUefi);
+    if (m_vbox3dCb)              m_vbox3dCb->setChecked(vm.vbox3d);
+    if (m_vboxGpuCombo) {
+        int gcIdx = m_vboxGpuCombo->findData(vm.graphicsController);
+        if (gcIdx >= 0) m_vboxGpuCombo->setCurrentIndex(gcIdx);
+        // 3D 加速时强制 VBoxSVGA
+        m_vboxGpuCombo->setEnabled(!vm.vbox3d);
+        if (vm.vbox3d)
+            m_vboxGpuCombo->setCurrentIndex(m_vboxGpuCombo->findData("vmsvga"));
+    }
+    if (m_vboxVramSpin) {
+        m_vboxVramSpin->setMaximum(vm.vbox3d ? 256 : 128);
+        m_vboxVramSpin->setValue(qBound(64, vm.vboxVram, m_vboxVramSpin->maximum()));
+    }
     if (m_vboxRdpCb)             m_vboxRdpCb->setChecked(vm.vboxRdp);
     if (m_vboxRdpPortSpin)       m_vboxRdpPortSpin->setValue(vm.vboxRdpPort);
     if (m_vboxNicTypeCombo) {
@@ -1005,6 +1068,11 @@ VMConfig VMDialog::vmConfig() const
     vm.vboxAcpi     = m_vboxAcpiCb->isChecked();
     vm.vboxIoapic   = m_vboxIoapicCb->isChecked();
     vm.vboxUefi     = m_vboxUefiCb->isChecked();
+    vm.vboxVram     = m_vboxVramSpin->value();
+    vm.vbox3d       = m_vbox3dCb->isChecked();
+    // 3D 加速时强制 VBoxSVGA (与界面锁定逻辑一致, 双保险)
+    vm.graphicsController = vm.vbox3d ? "vmsvga"
+                                       : m_vboxGpuCombo->currentData().toString();
     vm.vboxRdp      = m_vboxRdpCb->isChecked();
     vm.vboxRdpPort  = m_vboxRdpPortSpin->value();
     vm.vboxNicType  = m_vboxNicTypeCombo ? m_vboxNicTypeCombo->currentData().toString() : "nat";

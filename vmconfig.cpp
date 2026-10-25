@@ -74,6 +74,12 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("kvm"))        vm.kvm      = v->value_or(true);
             if (auto *v = vmTbl->get("vga"))        vm.vga      = QString::fromStdString(v->value_or("virtio"));
             if (auto *v = vmTbl->get("nic_model"))  vm.nicModel = QString::fromStdString(v->value_or("virtio-net-pci"));
+            if (auto *v = vmTbl->get("graphics_controller")) {
+                QString gc = QString::fromStdString(v->value_or("vmsvga")).toLower();
+                // 归一界面名: VBoxSVGA → vmsvga
+                if (gc == "vboxsvga") gc = "vmsvga";
+                vm.graphicsController = (gc == "vboxvga" || gc == "vboxgba") ? gc : "vmsvga";
+            }
 
             // VirtualBox 专属 (旧配置缺省时回退默认)
             if (auto *v = vmTbl->get("vm_type"))         vm.vmType      = QString::fromStdString(v->value_or("qemu"));
@@ -97,6 +103,8 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("vbox_acpi"))       vm.vboxAcpi   = v->value_or(true);
             if (auto *v = vmTbl->get("vbox_ioapic"))     vm.vboxIoapic = v->value_or(true);
             if (auto *v = vmTbl->get("vbox_uefi"))       vm.vboxUefi   = v->value_or(false);
+            if (auto *v = vmTbl->get("vbox_vram"))       vm.vboxVram   = v->value_or(128);
+            if (auto *v = vmTbl->get("vbox_3d"))         vm.vbox3d     = v->value_or(false);
             if (auto *v = vmTbl->get("vbox_rdp"))        vm.vboxRdp    = v->value_or(false);
             if (auto *v = vmTbl->get("vbox_rdp_port"))   vm.vboxRdpPort = v->value_or(3389);
             if (auto *v = vmTbl->get("vbox_nic_type"))   vm.vboxNicType = QString::fromStdString(v->value_or("nat"));
@@ -205,6 +213,7 @@ bool VMConfigManager::save() const
         tbl.emplace("kvm",        vm.kvm);
         tbl.emplace("vga",        vm.vga.toStdString());
         tbl.emplace("nic_model",  vm.nicModel.toStdString());
+        tbl.emplace("graphics_controller", vm.graphicsController.toStdString());
         tbl.emplace("vm_type",        vm.vmType.toStdString());
         tbl.emplace("ostype",         vm.ostype.toStdString());
         tbl.emplace("storage_backend", vm.storageBackend.toStdString());
@@ -214,6 +223,8 @@ bool VMConfigManager::save() const
         tbl.emplace("vbox_uefi",      vm.vboxUefi);
         tbl.emplace("vbox_rdp",       vm.vboxRdp);
         tbl.emplace("vbox_rdp_port",  vm.vboxRdpPort);
+        tbl.emplace("vbox_vram",      vm.vboxVram);
+        tbl.emplace("vbox_3d",        vm.vbox3d);
         tbl.emplace("vbox_nic_type",  vm.vboxNicType.toStdString());
         tbl.emplace("vbox_nic_model", vm.vboxNicModel.toStdString());
         tbl.emplace("vbox_bridge_dev", vm.vboxBridgeDev.toStdString());

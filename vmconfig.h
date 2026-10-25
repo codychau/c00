@@ -37,6 +37,9 @@ struct VMConfig {
     QString cpuType  = "host";  // host, qemu64, pentium3, cortex-a72
     bool    kvm       = true;    // 启用 KVM 加速
     QString vga       = "virtio";// virtio, cirrus, qxl, virtio-gpu, none
+    // VirtualBox: 显卡控制器 (--graphicscontroller). VBoxVGA / VMSVGA(即 VBoxSVGA) / VBoxGBA.
+    // 勾选 3D 加速时强制 VMSVGA (VirtualBox 唯一支持 3D 的控制器).
+    QString graphicsController = "vmsvga";
     QString net       = "user";  // user, bridge, tap
     QString nicModel  = "virtio-net-pci"; // 网卡模型
 
@@ -56,6 +59,9 @@ struct VMConfig {
     // VirtualBox: 固件. true = UEFI (--firmware efi), false = BIOS.
     // 缺省 false 是为了让旧配置里的 VM 保持原样 (已用 BIOS 安装的盘换 UEFI 会无法启动).
     bool    vboxUefi = false;
+    // VirtualBox: 显卡. 显存 MB (8~128, VirtualBox 上限 128), 3D 加速开关.
+    int     vboxVram = 128;   // 显存 MB: 64~128 (无 3D), 勾选 3D 后最高 256
+    bool    vbox3d   = false;
     // VirtualBox: RDP 远程控制 (VRDE, VirtualBox 内置 RDP 服务器). 仅 VM 运行时监听.
     bool    vboxRdp = false;
     int     vboxRdpPort = 3389;

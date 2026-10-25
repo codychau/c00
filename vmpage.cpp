@@ -650,6 +650,18 @@ bool VMPage::startVMAt(int row, bool quiet)
 
 bool VMPage::startVBoxVM(const VMConfig &vm, bool quiet)
 {
+    // 表格里「运行中」每 5 秒才刷一次, 可能滞后 (刚点过启动 / VBox 窗口已开).
+    // 这里先做一次权威查询 (list runningvms, 不占配置锁), 避免重复启动被
+    // VirtualBox 以会话锁拒绝后误报「启动失败」.
+    if (VirtualBox::isRunning(vm.name)) {
+        refreshStatus();
+        updateStartButton();
+        if (!quiet)
+            QMessageBox::information(this, "提示",
+                QString("「%1」已在运行中").arg(vm.name));
+        return false;
+    }
+
     QString err;
     // 创建/配置 (若 VM 尚未在 VirtualBox 注册)
     if (!VirtualBox::prepare(vm, &err)) {
@@ -663,7 +675,9 @@ bool VMPage::startVBoxVM(const VMConfig &vm, bool quiet)
     if (!VirtualBox::start(vm.name, /*headless=*/false)) {
         if (!quiet)
             QMessageBox::warning(this, "VirtualBox 启动失败",
-                QString("「%1」无法启动，请查看日志").arg(vm.name));
+                QString("「%1」启动失败:\nVirtualBox 拒绝了启动请求 "
+                        "(虚机可能正被其他会话占用或配置异常).\n\n详细信息见「日志」页.")
+                    .arg(vm.name));
         return false;
     }
 

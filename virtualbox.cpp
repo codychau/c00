@@ -7,6 +7,7 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QDateTime>
+#include <QThread>
 #include <QSet>
 #include <QHash>
 
@@ -95,6 +96,12 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
     const QString name = vm.name;
 
     if (vmExists(name)) {
+        // 已在运行: modifyvm / storageattach 都会因虚机被会话占用而失败,
+        // 且运行中也无法改这些设置 —— 直接视为就绪, 由调用方走启动/提示逻辑.
+        if (isRunning(name)) {
+            Logger::log("VirtualBox", QString("ℹ️ %1 正在运行, 跳过配置回写").arg(name));
+            return true;
+        }
         // 已存在: 回写核心设置, 并补挂尚未挂载的磁盘 (已挂载的条目跳过)
         // 注意: applySettings 返回 int (0=成功), 必须显式比较, 不能直接 return
         if (applySettings(vm, err) != 0) return false;
@@ -145,6 +152,19 @@ bool VirtualBox::start(const QString &name, bool headless)
     QString err;
     QStringList args = {"startvm", name, "--type", headless ? "headless" : "gui"};
     if (int rc = runVBox(args, &err); rc != 0) {
+        // 重复点击启动 (或状态表尚未刷新) 时, VBox 会以会话锁拒绝:
+        // "The machine 'xxx' is already locked by a session".
+        // 此时虚机多半正在启动或已经跑起来了, 轮询确认后再判定成败, 避免误报.
+        if (err.contains("already locked by a session", Qt::CaseInsensitive)) {
+            for (int i = 0; i < 8; ++i) {   // 最多等 4 秒 (启动过渡态通常 1~3 秒)
+                QThread::msleep(500);
+                if (isRunning(name)) {
+                    Logger::log("VirtualBox",
+                        QString("✅ %1 已在运行 (会话锁提示, 视为启动成功)").arg(name));
+                    return true;
+                }
+            }
+        }
         Logger::log("VirtualBox", QString("❌ 启动失败 %1: %2").arg(name, err));
         return false;
     }
@@ -309,8 +329,11 @@ static int applySettings(const VMConfig &vm, QString *err)
     a << "--cpus" << QString::number(vm.cpu);
     a << "--memory" << QString::number(vm.memory);
     a << "--os-type" << vm.ostype;
-    a << "--graphicscontroller" << "vmsvga";
-    a << "--vram" << "128";
+    // 显卡: 3D 加速仅 VBoxSVGA (vmsvga) 支持, 勾选时强制
+    QString gc = vm.vbox3d ? "vmsvga" : vm.graphicsController;
+    a << "--graphicscontroller" << gc;
+    a << "--vram" << QString::number(qBound(64, vm.vboxVram, vm.vbox3d ? 256 : 128));
+    a << "--accelerate3d" << (vm.vbox3d ? "on" : "off");
 
     // 64 位: 仅 ostype 含 "64" 时开启
     if (vm.ostype.contains("64"))

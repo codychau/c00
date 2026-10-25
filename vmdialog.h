@@ -71,12 +71,16 @@ private:
     // 虚拟机类型 / VirtualBox 专属控件
     QComboBox      *m_vmTypeCombo;
     QGroupBox      *m_vboxGroup;
+    QGroupBox      *m_vboxGpuGroup;   // 显卡设置 (显存 + 3D 加速)
+    QComboBox      *m_vboxGpuCombo;   // 显卡控制器 (VBoxSVGA / VBoxSVGA / VBoxVGA / VBoxGBA)
     QComboBox      *m_ostypeCombo;
     QComboBox      *m_storageBackendCombo;
     QSpinBox       *m_vboxDiskSizeSpin;
     QCheckBox      *m_vboxAcpiCb;
     QCheckBox      *m_vboxIoapicCb;
     QCheckBox      *m_vboxUefiCb;
+    QSpinBox       *m_vboxVramSpin;
+    QCheckBox      *m_vbox3dCb;
     QCheckBox      *m_vboxRdpCb;
     QSpinBox       *m_vboxRdpPortSpin;
 
