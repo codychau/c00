@@ -71,12 +71,23 @@ bool VirtualBox::vmExists(const QString &name)
     return re.match(out).hasMatch();
 }
 
+QSet<QString> VirtualBox::runningVMs()
+{
+    QSet<QString> names;
+    QString out;
+    if (runVBox({"list", "runningvms"}, &out) != 0) return names;
+    // 行格式: "name" {uuid}
+    QRegularExpression re("^\\s*\"([^\"]+)\"\\s*\\{",
+                          QRegularExpression::MultilineOption);
+    auto it = re.globalMatch(out);
+    while (it.hasNext())
+        names.insert(it.next().captured(1));
+    return names;
+}
+
 bool VirtualBox::isRunning(const QString &name)
 {
-    QString out;
-    if (runVBox({"showvminfo", name}, &out) != 0) return false;
-    QRegularExpression re("^State:\\s+running", QRegularExpression::MultilineOption);
-    return re.match(out).hasMatch();
+    return runningVMs().contains(name);
 }
 
 bool VirtualBox::prepare(const VMConfig &vm, QString *err)

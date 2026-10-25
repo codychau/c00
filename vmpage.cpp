@@ -257,12 +257,18 @@ void VMPage::refreshStatus()
         prevRunning = item && item->text().contains("运行中");
     }
 
+    // VirtualBox 运行状态: 一次 list runningvms 搞定, 不逐个 showvminfo
+    // (showvminfo 会为运行中的机器建立会话, 短时间占住配置锁, 可能让
+    //  VirtualBox GUI 打开设置时报「正在被其他进程修改」)
+    const QSet<QString> vboxRunning =
+        (m_mgr.vms().isEmpty() ? QSet<QString>() : VirtualBox::runningVMs());
+
     for (int i = 0; i < m_mgr.vms().size(); ++i) {
         const auto &vm = m_mgr.vms()[i];
         bool running = false;
 
         if (vm.vmType == "virtualbox") {
-            running = VirtualBox::isRunning(vm.name);
+            running = vboxRunning.contains(vm.name);
         } else {
             for (const auto &ql : qemuLines) {
                 if (qemuLineForVM(ql, vm.name, vm.systemDiskPath())) {

@@ -3,6 +3,7 @@
 
 #include <QString>
 #include <QStringList>
+#include <QSet>
 
 #include "vmconfig.h"
 
@@ -17,6 +18,10 @@ public:
 
     // 是否存在该 VM (已注册)。
     static bool vmExists(const QString &name);
+
+    // 所有运行中的 VM 名 (一次 `VBoxManage list runningvms`)。
+    // 只读注册表, 不建立机器会话, 因此不会和 VirtualBox GUI 抢配置锁。
+    static QSet<QString> runningVMs();
 
     // 是否运行中 (State: running)。
     static bool isRunning(const QString &name);
