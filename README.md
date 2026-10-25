@@ -16,7 +16,8 @@
   - 可视化编辑虚机配置（CPU、内存、磁盘、网络、端口转发等）
   - 统一磁盘列表：系统盘（启动盘，可选 virtio/SATA/IDE 接口）与数据盘在同一列表管理，支持 qemu-img / VBoxManage 建盘
   - 硬件直通（PCI 设备、Hugepages）
-  - VirtualBox 专属：网络设置（NAT/桥接 + 网卡型号）、目标 OS（含 64-bit 预设）、UEFI/BIOS 固件、ACPI/IOAPIC、RDP 远程控制（VRDE）
+  - 「网络设置」统一组：QEMU（user/bridge/tap + 网卡型号 + VNC）、VirtualBox（NAT/桥接 + 网卡型号 + 桥接网卡）
+  - VirtualBox 专属：目标 OS（含 64-bit 预设）、UEFI/BIOS 固件、ACPI/IOAPIC、RDP 远程控制（VRDE）
   - VirtualBox NAT 端口转发（写入 --natpf1，重复启动时先删旧规则再重建）
   - 自动启动
   - **等待挂载点** — 启动前主动挂载 fstab 中未就绪的设备，解决硬盘开机延迟挂载问题

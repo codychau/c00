@@ -357,17 +357,17 @@ void VMDialog::updateVmTypeUI()
     // VirtualBox 专属设置组
     m_vboxGroup->setVisible(vbox);
 
-    // 网络设置组是 VirtualBox 专属 (QEMU 的网络在「高级参数」里)
-    m_netGroup->setVisible(vbox);
+    // 网络设置组: 按类型显示对应页
+    m_netGroup->setVisible(true);
+    m_netPageQemu->setVisible(!vbox);
+    m_netPageVbox->setVisible(vbox);
 
-    // QEMU 高级控件: VirtualBox 时隐藏 (架构/机器/CPU/KVM/VGA/网络/网卡)
+    // QEMU 高级控件: VirtualBox 时隐藏 (架构/机器/CPU/KVM/VGA/VNC)
     m_qemuCombo->setVisible(!vbox);
     m_machineCombo->setVisible(!vbox);
     m_cpuTypeCombo->setVisible(!vbox);
     m_kvmCb->setVisible(!vbox);
     m_vgaCombo->setVisible(!vbox);
-    m_netCombo->setVisible(!vbox);
-    m_nicCombo->setVisible(!vbox);
     m_vncSpin->setVisible(!vbox);
 
     // 高级参数组 (右列): VirtualBox 时整组隐藏，窗口更短
@@ -385,7 +385,7 @@ void VMDialog::updateVmTypeUI()
     // VirtualBox: 桥接模式时才显示桥接网卡输入
     if (m_vboxNicTypeCombo && m_vboxBridgeEdit)
         m_vboxBridgeEdit->setVisible(vbox
-            && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)");
+            && m_vboxNicTypeCombo->currentData().toString() == "bridged");
 }
 
 VMDialog::VMDialog(QWidget *parent)
@@ -439,9 +439,46 @@ VMDialog::VMDialog(QWidget *parent)
 
     leftCol->addWidget(basicGroup);
 
-    // ── 网络设置 (VirtualBox) ── (按虚拟机类型显示/隐藏)
+    // ── 网络设置 ── 统一组: 按虚拟机类型显示 QEMU / VirtualBox 页
     m_netGroup = new QGroupBox("网络设置");
-    auto *netForm = new QFormLayout(m_netGroup);
+    auto *netOuter = new QVBoxLayout(m_netGroup);
+    netOuter->setContentsMargins(9, 9, 9, 9);
+    netOuter->setSpacing(0);
+
+    // QEMU 页
+    m_netPageQemu = new QWidget();
+    auto *qemuNetForm = new QFormLayout(m_netPageQemu);
+    qemuNetForm->setContentsMargins(0, 0, 0, 0);
+
+    m_netCombo = new QComboBox();
+    m_netCombo->addItem("user (NAT)",   "user");
+    m_netCombo->addItem("bridge (桥接)", "bridge");
+    m_netCombo->addItem("tap 设备",      "tap");
+    m_netCombo->setToolTip(
+        "QEMU 网络模式.\n"
+        "user (NAT): 用户态网络, 出站可用; 入站靠下方「端口转发」(hostfwd).\n"
+        "bridge: 桥接到宿主机网桥, 与局域网同网段.\n"
+        "tap: 直接使用预先创建好的 tap 设备.");
+    qemuNetForm->addRow("网络模式:", m_netCombo);
+
+    m_nicCombo = new QComboBox();
+    m_nicCombo->setEditable(true);
+    m_nicCombo->addItem("virtio-net-pci");
+    m_nicCombo->addItem("e1000");
+    m_nicCombo->addItem("rtl8139");
+    m_nicCombo->addItem("ne2k_pci");
+    m_nicCombo->addItem("virtio-net-ccw");
+    m_nicCombo->setToolTip(
+        "QEMU 网卡型号.\n"
+        "virtio-net-pci: 性能最好, Windows 需装 virtio 驱动.\n"
+        "e1000: Intel 千兆, 多数系统免驱动.\n"
+        "rtl8139 / ne2k_pci: 老系统兼容用.");
+    qemuNetForm->addRow("网卡型号:", m_nicCombo);
+
+    // VirtualBox 页
+    m_netPageVbox = new QWidget();
+    auto *vboxNetForm = new QFormLayout(m_netPageVbox);
+    vboxNetForm->setContentsMargins(0, 0, 0, 0);
 
     m_vboxNicTypeCombo = new QComboBox();
     m_vboxNicTypeCombo->addItem("NAT", "nat");
@@ -451,7 +488,7 @@ VMDialog::VMDialog(QWidget *parent)
         "VirtualBox 网络模式.\n"
         "NAT: 宿主机做 NAT, 虚机可出站; 端口转发用下方「端口转发」表 (写入 --natpf1).\n"
         "桥接: 虚机直接接到宿主机网卡, 与局域网同网段.");
-    netForm->addRow("网络模式:", m_vboxNicTypeCombo);
+    vboxNetForm->addRow("网络模式:", m_vboxNicTypeCombo);
 
     m_vboxNicModelCombo = new QComboBox();
     m_vboxNicModelCombo->addItem("Intel PRO/1000 (82545EM, 默认)", "82545EM");
@@ -466,13 +503,14 @@ VMDialog::VMDialog(QWidget *parent)
         "82540EM: 百兆, Win98/2000 免驱动.\n"
         "Am79C973: PCNet, 极老 OS (Win3.1/95/98) 免驱动.\n"
         "virtio: 高性能, Linux 原生, Windows 需装驱动.");
-    netForm->addRow("网卡型号:", m_vboxNicModelCombo);
+    vboxNetForm->addRow("网卡型号:", m_vboxNicModelCombo);
 
     m_vboxBridgeEdit = new QLineEdit();
     m_vboxBridgeEdit->setPlaceholderText("宿主机网卡名, 如 eth0");
-    netForm->addRow("桥接网卡:", m_vboxBridgeEdit);
+    vboxNetForm->addRow("桥接网卡:", m_vboxBridgeEdit);
 
-    m_netGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
+    netOuter->addWidget(m_netPageQemu);
+    netOuter->addWidget(m_netPageVbox);
     leftCol->addWidget(m_netGroup);
 
     // ── VirtualBox 专属设置 ── (按虚拟机类型显示/隐藏)
@@ -667,22 +705,7 @@ VMDialog::VMDialog(QWidget *parent)
     m_vgaCombo->addItem("none",     "none");
     advForm->addRow("VGA 类型:", m_vgaCombo);
 
-    // 网络
-    m_netCombo = new QComboBox();
-    m_netCombo->addItem("user (NAT)",   "user");
-    m_netCombo->addItem("bridge (桥接)", "bridge");
-    m_netCombo->addItem("tap 设备",      "tap");
-    advForm->addRow("网络模式:", m_netCombo);
-
-    // 网卡模型
-    m_nicCombo = new QComboBox();
-    m_nicCombo->setEditable(true);
-    m_nicCombo->addItem("virtio-net-pci");
-    m_nicCombo->addItem("e1000");
-    m_nicCombo->addItem("rtl8139");
-    m_nicCombo->addItem("ne2k_pci");
-    m_nicCombo->addItem("virtio-net-ccw");
-    advForm->addRow("网卡型号:", m_nicCombo);
+    // 网络模式/网卡型号已移到上方「网络设置」组
 
     // VNC
     m_vncSpin = new QSpinBox();
@@ -737,6 +760,7 @@ VMDialog::VMDialog(QWidget *parent)
     portBtnRow->addStretch();
     portLayout->addLayout(portBtnRow);
     rightCol->addWidget(m_portGroup);
+    rightCol->addStretch(1);   // 让各组按内容高度排列, 不被拉伸成大外框
 
     cols->addLayout(rightCol, 1);
     outer->addLayout(cols);
@@ -777,6 +801,10 @@ VMDialog::VMDialog(QWidget *parent)
 
     // 虚拟机类型切换 → 显隐 VirtualBox 专属控件 / QEMU 高级控件
     connect(m_vmTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int) { updateVmTypeUI(); });
+
+    // 网络模式切换 → 桥接网卡输入框显隐
+    connect(m_vboxNicTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) { updateVmTypeUI(); });
     connect(m_isoBtn, &QPushButton::clicked, this, [this]() {
         QString path = QFileDialog::getOpenFileName(this, "选择 ISO",
@@ -976,8 +1004,7 @@ VMConfig VMDialog::vmConfig() const
     vm.vboxUefi     = m_vboxUefiCb->isChecked();
     vm.vboxRdp      = m_vboxRdpCb->isChecked();
     vm.vboxRdpPort  = m_vboxRdpPortSpin->value();
-    vm.vboxNicType  = (m_vboxNicTypeCombo && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)")
-                      ? "bridged" : "nat";
+    vm.vboxNicType  = m_vboxNicTypeCombo ? m_vboxNicTypeCombo->currentData().toString() : "nat";
     vm.vboxNicModel = m_vboxNicModelCombo->currentData().toString();
     vm.vboxBridgeDev = m_vboxBridgeEdit ? m_vboxBridgeEdit->text().trimmed() : "";
     vm.autoStart  = m_autoStartCb->isChecked();

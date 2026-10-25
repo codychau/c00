@@ -60,8 +60,10 @@ private:
     QListWidget    *m_pciList;
     QCheckBox      *m_hugepagesCb;
 
-    // 网络设置 (VirtualBox)
+    // 网络设置 (QEMU / VirtualBox 各一页)
     QGroupBox      *m_netGroup;
+    QWidget        *m_netPageQemu;
+    QWidget        *m_netPageVbox;
     QComboBox      *m_vboxNicTypeCombo;
     QComboBox      *m_vboxNicModelCombo;
     QLineEdit      *m_vboxBridgeEdit;
