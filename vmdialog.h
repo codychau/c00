@@ -29,8 +29,6 @@ private:
     QLineEdit      *m_nameEdit;
     QSpinBox       *m_cpuSpin;
     QSpinBox       *m_memSpin;
-    QLineEdit      *m_diskEdit;
-    QPushButton    *m_diskBtn;
     QLineEdit      *m_isoEdit;
     QPushButton    *m_isoBtn;
 
@@ -48,8 +46,8 @@ private:
     // 端口转发表
     QTableWidget   *m_portTable;
 
-    // 数据盘
-    QListWidget    *m_dataDiskList;
+    // 磁盘列表 (系统盘 + 数据盘)
+    QListWidget    *m_diskList;
 
     // 自动启动
     QCheckBox      *m_autoStartCb;
@@ -61,18 +59,17 @@ private:
     QListWidget    *m_pciList;
     QCheckBox      *m_hugepagesCb;
 
-    // 磁盘高级
-    QComboBox      *m_diskInterfaceCombo;
-
     // 虚拟机类型 / VirtualBox 专属控件
     QComboBox      *m_vmTypeCombo;
     QGroupBox      *m_vboxGroup;
     QComboBox      *m_ostypeCombo;
     QComboBox      *m_storageBackendCombo;
-    QComboBox      *m_diskFormatCombo;
     QSpinBox       *m_vboxDiskSizeSpin;
     QCheckBox      *m_vboxAcpiCb;
     QCheckBox      *m_vboxIoapicCb;
+    QCheckBox      *m_vboxUefiCb;
+    QCheckBox      *m_vboxRdpCb;
+    QSpinBox       *m_vboxRdpPortSpin;
     QComboBox      *m_vboxNicTypeCombo;
     QLineEdit      *m_vboxBridgeEdit;
 
@@ -87,9 +84,9 @@ private:
     QPushButton    *m_portAddBtn;
     QPushButton    *m_portEditBtn;
     QPushButton    *m_portRemoveBtn;
-    QPushButton    *m_dataDiskAddBtn;
-    QPushButton    *m_dataDiskEditBtn;
-    QPushButton    *m_dataDiskRemoveBtn;
+    QPushButton    *m_diskAddBtn;
+    QPushButton    *m_diskEditBtn;
+    QPushButton    *m_diskRemoveBtn;
     QPushButton    *m_pciAddBtn;
     QPushButton    *m_pciRemoveBtn;
 };

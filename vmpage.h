@@ -46,6 +46,7 @@ private:
     void updateStartButton();
     void sendQemuPowerdown(const QString &vmName);
     QString findVNCViewer() const;
+    QString findRDPClient() const;
     QString qmpSocketPath(const QString &vmName) const;
     bool checkPermissionError(const QString &stderr);
     void configureQemuSudoers(const QString &vmName);
@@ -60,6 +61,7 @@ private:
     QPushButton    *m_vncBtn;
     QTimer         *m_statusTimer;
     QString         m_vncViewer;
+    QString         m_rdpClient;
 
     // 跟踪运行的虚机进程，用于停止操作
     QMap<QString, QProcess*> m_runningProcs;

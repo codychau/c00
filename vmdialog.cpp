@@ -65,12 +65,14 @@ static bool editPortFwdDialog(QWidget *parent, PortFwd &pf, bool isNew)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  创建磁盘映像对话框（调用 qemu-img create）
+//  创建磁盘映像对话框（QEMU 走 qemu-img, VirtualBox 走 VBoxManage createmedium）
 // ═══════════════════════════════════════════════════════════════════
-static bool createDiskImageDialog(QWidget *parent, QString &outPath)
+static bool createDiskImageDialog(QWidget *parent, const QString &vmType, QString &outPath)
 {
+    const bool vbox = (vmType == "virtualbox");
+
     QDialog dlg(parent);
-    dlg.setWindowTitle("创建磁盘映像");
+    dlg.setWindowTitle(vbox ? "创建磁盘映像 (VirtualBox)" : "创建磁盘映像");
     dlg.resize(500, 220);
 
     auto *layout = new QVBoxLayout(&dlg);
@@ -78,7 +80,7 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
 
     // 保存路径
     auto *pathEdit = new QLineEdit();
-    pathEdit->setPlaceholderText("/path/to/disk.qcow2");
+    pathEdit->setPlaceholderText(vbox ? "/path/to/disk.vdi" : "/path/to/disk.qcow2");
     auto *pathBrowseBtn = new QPushButton("选择路径…");
     auto *pathRow = new QHBoxLayout();
     pathRow->addWidget(pathEdit, 1);
@@ -86,7 +88,7 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
     QObject::connect(pathBrowseBtn, &QPushButton::clicked, [&]() {
         QString path = QFileDialog::getSaveFileName(&dlg, "创建磁盘映像",
             QDir::homePath(),
-            "磁盘映像 (*.qcow2 *.raw *.img);;所有文件 (*)");
+            "磁盘映像 (*.qcow2 *.raw *.img *.vdi *.vmdk *.vhdx);;所有文件 (*)");
         if (!path.isEmpty()) pathEdit->setText(path);
     });
     form->addRow("保存路径:", pathRow);
@@ -108,8 +110,14 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
 
     // 格式
     auto *fmtCombo = new QComboBox();
-    fmtCombo->addItem("qcow2");
-    fmtCombo->addItem("raw");
+    if (vbox) {
+        fmtCombo->addItem("VDI (VirtualBox 原生)", "vdi");
+        fmtCombo->addItem("VMDK (兼容 VMware)",    "vmdk");
+        fmtCombo->addItem("VHDX (Hyper-V)",        "vhdx");
+    } else {
+        fmtCombo->addItem("qcow2", "qcow2");
+        fmtCombo->addItem("raw",   "raw");
+    }
     form->addRow("格式:", fmtCombo);
 
     layout->addLayout(form);
@@ -129,20 +137,22 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
             return;
         }
 
-        QString fmt   = fmtCombo->currentText();
+        QString fmt   = fmtCombo->currentData().toString();
         int     size  = sizeSpin->value();
-        QString unit  = unitCombo->currentText();
-        QString sizeStr = QString("%1%2").arg(size).arg(unitCombo->currentData().toString());
+        int     sizeMB = size * (unitCombo->currentData().toString() == "T" ? 1048576
+                              : unitCombo->currentData().toString() == "G" ? 1024 : 1);
 
         // 如果路径没有扩展名，自动补全
         if (!path.contains('.'))
             path += "." + fmt;
 
-        // 检查 qemu-img 是否存在
-        QString qemuImg = QStandardPaths::findExecutable("qemu-img");
-        if (qemuImg.isEmpty()) {
+        // 检查后端工具是否存在
+        const QString tool = vbox ? "VBoxManage" : "qemu-img";
+        QString toolPath = QStandardPaths::findExecutable(tool);
+        if (toolPath.isEmpty()) {
             QMessageBox::critical(&dlg, "错误",
-                "未找到 qemu-img，请先安装:\nsudo pacman -S qemu-img");
+                QString("未找到 %1，请先安装:\nsudo pacman -S %2")
+                    .arg(tool).arg(vbox ? "virtualbox" : "qemu-img"));
             return;
         }
 
@@ -155,9 +165,15 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
                 return;
         }
 
-        // 执行 qemu-img create
+        // 执行创建
         QProcess proc;
-        proc.start(qemuImg, {"create", "-f", fmt, path, sizeStr});
+        if (vbox)
+            proc.start(toolPath, {"createmedium", "disk", "--filename", path,
+                                   "--size", QString::number(sizeMB),
+                                   "--format", fmt.toUpper()});
+        else
+            proc.start(toolPath, {"create", "-f", fmt, path, QString("%1%2").arg(size).arg(unitCombo->currentData().toString())});
+
         bool finished = proc.waitForFinished(120000);  // 最多等 2 分钟
 
         if (!finished) {
@@ -165,15 +181,15 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
             proc.kill();
             proc.waitForFinished(2000);
             QMessageBox::critical(&dlg, "创建超时",
-                "qemu-img 创建磁盘超时，进程已强制终止。\n"
-                "请检查磁盘是否已存在或被其他进程占用。");
+                QString("%1 创建磁盘超时，进程已强制终止。\n"
+                        "请检查磁盘是否已存在或被其他进程占用。").arg(tool));
             return;
         }
 
         if (proc.exitCode() != 0) {
             QString err = QString::fromUtf8(proc.readAllStandardError());
             QMessageBox::critical(&dlg, "创建失败",
-                "qemu-img 创建磁盘失败:\n" + err);
+                QString("%1 创建磁盘失败:\n").arg(tool) + err);
             return;
         }
 
@@ -187,53 +203,81 @@ static bool createDiskImageDialog(QWidget *parent, QString &outPath)
 }
 
 // ═══════════════════════════════════════════════════════════════════
-//  数据盘编辑对话框
+//  磁盘编辑对话框 (系统盘与数据盘共用)
 // ═══════════════════════════════════════════════════════════════════
-static bool editDataDiskDialog(QWidget *parent, VMDataDisk &dd, bool isNew)
+static bool editDiskDialog(QWidget *parent, VMDataDisk &dd, bool isNew, const QString &vmType)
 {
+    const bool vbox = (vmType == "virtualbox");
+
     QDialog dlg(parent);
-    dlg.setWindowTitle(isNew ? "添加数据盘" : "编辑数据盘");
-    dlg.resize(520, 200);
+    dlg.setWindowTitle(isNew ? "添加磁盘" : "编辑磁盘");
+    dlg.resize(560, 260);
 
     auto *layout = new QVBoxLayout(&dlg);
     auto *form   = new QFormLayout();
 
     auto *fmtCombo = new QComboBox();
-    fmtCombo->addItem("qcow2");
-    fmtCombo->addItem("raw");
-    fmtCombo->addItem("img");
-    int fIdx = fmtCombo->findText(dd.format, Qt::MatchFixedString);
+    fmtCombo->addItem("qcow2", "qcow2");
+    fmtCombo->addItem("raw",   "raw");
+    fmtCombo->addItem("vmdk",  "vmdk");
+    fmtCombo->addItem("vdi",   "vdi");
+    fmtCombo->addItem("vhdx",  "vhdx");
+    int fIdx = fmtCombo->findData(dd.format);
     if (fIdx >= 0) fmtCombo->setCurrentIndex(fIdx);
+    else if (isNew && vbox) fmtCombo->setCurrentIndex(fmtCombo->findData("vdi"));
+    fmtCombo->setToolTip("qcow2 / raw 用于 QEMU; vdi / vmdk / vhdx 用于 VirtualBox\n(老格式 img 归一为 raw)");
 
     auto *pathEdit = new QLineEdit(dd.path);
-    pathEdit->setPlaceholderText("磁盘映像路径 (.qcow2 / .img / .raw)");
+    pathEdit->setPlaceholderText("磁盘映像路径 (.qcow2 / .raw / .vdi / .vmdk / .vhdx)");
     auto *browseBtn = new QPushButton("浏览…");
-    auto *createBtn = new QPushButton("创建 qcow2…");
-    createBtn->setToolTip("调用 qemu-img 创建新的磁盘映像");
+    auto *createBtn = new QPushButton(vbox ? "创建磁盘…" : "创建映像…");
+    createBtn->setToolTip(vbox ? "调用 VBoxManage 创建新的磁盘映像"
+                               : "调用 qemu-img 创建新的磁盘映像");
     auto *pathRow   = new QHBoxLayout();
     pathRow->addWidget(pathEdit, 1);
     pathRow->addWidget(browseBtn);
     pathRow->addWidget(createBtn);
     QObject::connect(browseBtn, &QPushButton::clicked, [&]() {
-        QString path = QFileDialog::getOpenFileName(&dlg, "选择数据盘",
+        QString path = QFileDialog::getOpenFileName(&dlg, "选择磁盘",
             pathEdit->text().isEmpty() ? QDir::homePath() : pathEdit->text(),
-            "磁盘映像 (*.qcow2 *.raw *.img);;所有文件 (*)");
+            "磁盘映像 (*.qcow2 *.raw *.img *.vdi *.vmdk *.vhdx);;所有文件 (*)");
         if (!path.isEmpty()) pathEdit->setText(path);
     });
     QObject::connect(createBtn, &QPushButton::clicked, [&]() {
         QString newPath;
-        if (createDiskImageDialog(&dlg, newPath)) {
+        if (createDiskImageDialog(&dlg, vmType, newPath)) {
             pathEdit->setText(newPath);
             // 自动匹配格式
-            if (newPath.endsWith(".raw", Qt::CaseInsensitive) || newPath.endsWith(".img", Qt::CaseInsensitive)) {
-                int idx = fmtCombo->findText("raw", Qt::MatchFixedString);
-                if (idx >= 0) fmtCombo->setCurrentIndex(idx);
-            }
+            QString ext = QFileInfo(newPath).suffix().toLower();
+            int idx = fmtCombo->findData(ext);
+            if (idx >= 0) fmtCombo->setCurrentIndex(idx);
         }
     });
     form->addRow("路径:", pathRow);
 
     form->addRow("格式:", fmtCombo);
+
+    auto *sysCb = new QCheckBox("系统盘 (启动盘)");
+    sysCb->setChecked(dd.system);
+    sysCb->setToolTip("勾选后此盘作为启动盘, 位于列表首位; 每个虚机最多一个系统盘");
+    form->addRow("", sysCb);
+
+    auto *ifaceCombo = new QComboBox();
+    ifaceCombo->addItem("virtio (高性能, 需装驱动)", "virtio");
+    ifaceCombo->addItem("SATA (AHCI)", "sata");
+    ifaceCombo->addItem("IDE", "ide");
+    int iIdx = ifaceCombo->findData(dd.iface);
+    if (iIdx >= 0) ifaceCombo->setCurrentIndex(iIdx);
+    ifaceCombo->setEnabled(dd.system);
+    ifaceCombo->setToolTip(
+        "仅系统盘生效 (数据盘固定 virtio), VirtualBox 忽略此项.\n"
+        "IDE: 原生 IDE 控制器, Win98/2000/XP/7 免驱动即认盘(推荐旧 OS)\n"
+        "SATA: AHCI 控制器, Win7 SP1+ 原生支持\n"
+        "virtio: 性能最高, 但需装入对应驱动 (Win10/11 自带, 老系统需手动装)");
+    form->addRow("系统盘接口:", ifaceCombo);
+    QObject::connect(sysCb, &QCheckBox::toggled, &dlg, [ifaceCombo](bool on) {
+        ifaceCombo->setEnabled(on);
+    });
 
     auto *cacheCombo = new QComboBox();
     cacheCombo->addItem("none",       "none");
@@ -263,10 +307,44 @@ static bool editDataDiskDialog(QWidget *parent, VMDataDisk &dd, bool isNew)
         return false;
 
     dd.path   = pathEdit->text().trimmed();
-    dd.format = fmtCombo->currentText();
+    dd.format = fmtCombo->currentData().toString();
+    dd.system = sysCb->isChecked();
+    dd.iface  = ifaceCombo->currentData().toString();
     dd.cache  = cacheCombo->currentData().toString();
     dd.aio    = aioCombo->currentData().toString();
     return !dd.path.isEmpty();
+}
+
+// ── 磁盘条目 ↔ 列表项 (显示文本 / 编码数据) ──
+static QListWidgetItem *makeDiskItem(const VMDataDisk &dd)
+{
+    QString name = QFileInfo(dd.path).fileName();
+    QString text = dd.system
+        ? QString("★ 系统盘  %1  [%2 | if:%3 | cache:%4 | aio:%5]")
+              .arg(name, dd.format, dd.iface, dd.cache, dd.aio)
+        : QString("%1  [%2 | cache:%3 | aio:%4]").arg(name, dd.format, dd.cache, dd.aio);
+
+    auto *item = new QListWidgetItem(text);
+    item->setData(Qt::UserRole,
+        QString("%1|%2|%3|%4|%5|%6").arg(dd.path, dd.format, dd.cache, dd.aio, dd.iface)
+                                    .arg(dd.system ? "1" : "0"));
+    QString tip = QString("路径:%1\n格式:%2\n缓存:%3\nAIO:%4").arg(dd.path, dd.format, dd.cache, dd.aio);
+    if (dd.system) tip += QString("\n系统盘 (启动盘), 接口:%1").arg(dd.iface);
+    item->setToolTip(tip);
+    return item;
+}
+
+static VMDataDisk diskFromItem(QListWidgetItem *item)
+{
+    QStringList parts = item->data(Qt::UserRole).toString().split('|');
+    VMDataDisk dd;
+    if (parts.size() >= 1) dd.path   = parts[0];
+    if (parts.size() >= 2) dd.format = parts[1];
+    if (parts.size() >= 3) dd.cache  = parts[2];
+    if (parts.size() >= 4) dd.aio    = parts[3];
+    if (parts.size() >= 5) dd.iface  = parts[4];
+    if (parts.size() >= 6) dd.system = (parts[5] == "1");
+    return dd;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -288,7 +366,6 @@ void VMDialog::updateVmTypeUI()
     m_netCombo->setVisible(!vbox);
     m_nicCombo->setVisible(!vbox);
     m_vncSpin->setVisible(!vbox);
-    m_diskInterfaceCombo->setVisible(!vbox);
 
     // 高级参数组 (右列): VirtualBox 时整组隐藏，窗口更短
     m_advGroup->setVisible(!vbox);
@@ -343,14 +420,6 @@ VMDialog::VMDialog(QWidget *parent)
     m_memSpin->setSingleStep(256);
     basicForm->addRow("内存:", m_memSpin);
 
-    auto *diskRow = new QHBoxLayout();
-    m_diskEdit = new QLineEdit();
-    m_diskEdit->setPlaceholderText("系统盘路径");
-    diskRow->addWidget(m_diskEdit, 1);
-    m_diskBtn = new QPushButton("浏览…");
-    diskRow->addWidget(m_diskBtn);
-    basicForm->addRow("系统盘:", diskRow);
-
     auto *isoRow = new QHBoxLayout();
     m_isoEdit = new QLineEdit();
     m_isoEdit->setPlaceholderText("安装 ISO (可选)");
@@ -358,17 +427,6 @@ VMDialog::VMDialog(QWidget *parent)
     m_isoBtn = new QPushButton("浏览…");
     isoRow->addWidget(m_isoBtn);
     basicForm->addRow("ISO:", isoRow);
-
-    m_diskInterfaceCombo = new QComboBox();
-    m_diskInterfaceCombo->addItem("virtio (高性能, 需装驱动)", "virtio");
-    m_diskInterfaceCombo->addItem("SATA (AHCI)", "sata");
-    m_diskInterfaceCombo->addItem("IDE", "ide");
-    m_diskInterfaceCombo->setCurrentIndex(0);
-    m_diskInterfaceCombo->setToolTip(
-        "IDE: 原生 IDE 控制器, Win98/2000/XP/7 免驱动即认盘(推荐旧 OS)\n"
-        "SATA: AHCI 控制器, Win7 SP1+ 原生支持\n"
-        "virtio: 性能最高, 但需装入对应驱动 (Win10/11 自带, 老系统需手动装)");
-    basicForm->addRow("系统盘接口:", m_diskInterfaceCombo);
 
     leftCol->addWidget(basicGroup);
 
@@ -384,13 +442,20 @@ VMDialog::VMDialog(QWidget *parent)
     m_ostypeCombo->addItem("Windows ME", "WindowsMe");
     m_ostypeCombo->addItem("Windows NT 4", "WindowsNT4");
     m_ostypeCombo->addItem("Windows 2000", "Windows2000");
-    m_ostypeCombo->addItem("Windows XP", "WindowsXP");
-    m_ostypeCombo->addItem("Windows 7", "Windows7");
-    m_ostypeCombo->addItem("Windows 8.1", "Windows81");
-    m_ostypeCombo->addItem("Windows 10", "Windows10");
-    m_ostypeCombo->addItem("Windows 11", "Windows11");
-    m_ostypeCombo->setCurrentText("Windows7");
-    m_ostypeCombo->setToolTip("目标操作系统. 旧 OS (Win98/XP) 也可运行, 但安装镜像需走 SATA 控制器");
+    m_ostypeCombo->addItem("Windows XP (32-bit)", "WindowsXP");
+    m_ostypeCombo->addItem("Windows XP (64-bit)", "WindowsXP_64");
+    m_ostypeCombo->addItem("Windows 7 (32-bit)", "Windows7");
+    m_ostypeCombo->addItem("Windows 7 (64-bit)", "Windows7_64");
+    m_ostypeCombo->addItem("Windows 8.1 (32-bit)", "Windows81");
+    m_ostypeCombo->addItem("Windows 8.1 (64-bit)", "Windows81_64");
+    m_ostypeCombo->addItem("Windows 10 (32-bit)", "Windows10");
+    m_ostypeCombo->addItem("Windows 10 (64-bit)", "Windows10_64");
+    m_ostypeCombo->addItem("Windows 11 (64-bit)", "Windows11_64");
+    m_ostypeCombo->setCurrentIndex(m_ostypeCombo->findData("Windows7_64"));
+    m_ostypeCombo->setToolTip(
+        "目标操作系统 (VirtualBox 的 ostype 预设).\n"
+        "64 位镜像必须选带 (64-bit) 的条目, 否则 VM 不开 long mode, 64 位安装程序无法启动.\n"
+        "旧 OS (Win98/XP) 也可运行, 但安装镜像需走 SATA 控制器.");
     vboxForm->addRow("目标 OS:", m_ostypeCombo);
 
     m_storageBackendCombo = new QComboBox();
@@ -403,21 +468,13 @@ VMDialog::VMDialog(QWidget *parent)
         "无论选哪个都会自动回退到 SATA.");
     vboxForm->addRow("存储后端:", m_storageBackendCombo);
 
-    m_diskFormatCombo = new QComboBox();
-    m_diskFormatCombo->addItem("VDI (VirtualBox 原生)", "vdi");
-    m_diskFormatCombo->addItem("VMDK (兼容 VMware)", "vmdk");
-    m_diskFormatCombo->addItem("VHDX (Hyper-V)", "vhdx");
-    m_diskFormatCombo->setCurrentText("VDI (VirtualBox 原生)");
-    m_diskFormatCombo->setToolTip("虚拟磁盘镜像格式 (新建 VM 时使用)");
-    vboxForm->addRow("磁盘格式:", m_diskFormatCombo);
-
     m_vboxDiskSizeSpin = new QSpinBox();
     m_vboxDiskSizeSpin->setRange(16, 10485760);
     m_vboxDiskSizeSpin->setValue(20480);
     m_vboxDiskSizeSpin->setSuffix(" MB");
     m_vboxDiskSizeSpin->setSingleStep(512);
-    m_vboxDiskSizeSpin->setToolTip("新建 VM 时自动创建该大小的磁盘");
-    vboxForm->addRow("虚拟磁盘大小:", m_vboxDiskSizeSpin);
+    m_vboxDiskSizeSpin->setToolTip("磁盘条目指向的文件不存在时, 按此大小自动创建 (格式取该条目自己的格式)");
+    vboxForm->addRow("建盘大小:", m_vboxDiskSizeSpin);
 
     m_vboxAcpiCb = new QCheckBox("启用 ACPI");
     m_vboxAcpiCb->setChecked(true);
@@ -428,6 +485,33 @@ VMDialog::VMDialog(QWidget *parent)
     m_vboxIoapicCb->setChecked(true);
     m_vboxIoapicCb->setToolTip("多核/中断控制器, 通常与 ACPI 一起开启.");
     vboxForm->addRow("", m_vboxIoapicCb);
+
+    m_vboxUefiCb = new QCheckBox("启用 UEFI 引导");
+    m_vboxUefiCb->setChecked(true);
+    m_vboxUefiCb->setToolTip(
+        "VirtualBox 固件: UEFI (--firmware efi) 或 BIOS.\n"
+        "UEFI: 现代系统需要 (Win10/11, GRUB-UEFI, 大于 2TB 的启动盘).\n"
+        "BIOS: 老 OS (Win98/XP/7 32-bit) 免驱动即引导.\n"
+        "注意: 已装好的系统换固件后通常无法启动, 只在新建或重装时改.");
+    vboxForm->addRow("", m_vboxUefiCb);
+
+    m_vboxRdpCb = new QCheckBox("启用 RDP 远程控制 (VRDE)");
+    m_vboxRdpCb->setChecked(false);
+    m_vboxRdpCb->setToolTip(
+        "VirtualBox 内置的 RDP 服务器 (VRDE). 开启后可用 RDP 客户端连虚机画面,\n"
+        "适合无头 / 远程管理. 只在虚机运行时监听.\n"
+        "宿主机需装 RDP 客户端: xfreerdp / rdesktop / remmina / krdc.");
+    vboxForm->addRow("", m_vboxRdpCb);
+
+    m_vboxRdpPortSpin = new QSpinBox();
+    m_vboxRdpPortSpin->setRange(1, 65535);
+    m_vboxRdpPortSpin->setValue(3389);
+    m_vboxRdpPortSpin->setToolTip("RDP 监听端口 (默认 3389). 端口被占用时 VirtualBox 会自动换端口.");
+    m_vboxRdpPortSpin->setEnabled(false);
+    vboxForm->addRow("RDP 端口:", m_vboxRdpPortSpin);
+    connect(m_vboxRdpCb, &QCheckBox::toggled, this, [this](bool on) {
+        m_vboxRdpPortSpin->setEnabled(on);
+    });
 
     m_vboxNicTypeCombo = new QComboBox();
     m_vboxNicTypeCombo->addItem("NAT", "nat");
@@ -443,26 +527,26 @@ VMDialog::VMDialog(QWidget *parent)
     m_vboxGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
     leftCol->addWidget(m_vboxGroup);
 
-    // ── 数据盘 ──
-    auto *ddGroup = new QGroupBox("数据盘");
+    // ── 磁盘 (系统盘 + 数据盘 统一列表) ──
+    auto *ddGroup = new QGroupBox("磁盘");
     auto *ddLayout = new QVBoxLayout(ddGroup);
-    auto *ddHint = new QLabel("系统盘之外的附加磁盘:");
+    auto *ddHint = new QLabel("★ 系统盘 = 启动盘 (自动置于列表首位), 其余为附加数据盘:");
     ddHint->setStyleSheet("color: #888; font-size: 11px;");
     ddLayout->addWidget(ddHint);
 
-    m_dataDiskList = new QListWidget();
-    m_dataDiskList->setAlternatingRowColors(true);
-    m_dataDiskList->setSelectionMode(QAbstractItemView::SingleSelection);
-    m_dataDiskList->setMinimumHeight(90);
-    ddLayout->addWidget(m_dataDiskList);
+    m_diskList = new QListWidget();
+    m_diskList->setAlternatingRowColors(true);
+    m_diskList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_diskList->setMinimumHeight(90);
+    ddLayout->addWidget(m_diskList);
 
     auto *ddBtnRow = new QHBoxLayout();
-    m_dataDiskAddBtn = new QPushButton("➕ 添加");
-    m_dataDiskEditBtn = new QPushButton("✏️ 编辑");
-    m_dataDiskRemoveBtn = new QPushButton("🗑️ 移除");
-    ddBtnRow->addWidget(m_dataDiskAddBtn);
-    ddBtnRow->addWidget(m_dataDiskEditBtn);
-    ddBtnRow->addWidget(m_dataDiskRemoveBtn);
+    m_diskAddBtn = new QPushButton("➕ 添加");
+    m_diskEditBtn = new QPushButton("✏️ 编辑");
+    m_diskRemoveBtn = new QPushButton("🗑️ 移除");
+    ddBtnRow->addWidget(m_diskAddBtn);
+    ddBtnRow->addWidget(m_diskEditBtn);
+    ddBtnRow->addWidget(m_diskRemoveBtn);
     ddBtnRow->addStretch();
     ddLayout->addLayout(ddBtnRow);
     leftCol->addWidget(ddGroup);
@@ -630,6 +714,14 @@ VMDialog::VMDialog(QWidget *parent)
             QMessageBox::warning(this, "提示", "请输入虚机名称");
             return;
         }
+        // 无磁盘且无 ISO → 无法引导
+        if (m_diskList->count() == 0 && m_isoEdit->text().trimmed().isEmpty()) {
+            auto ret = QMessageBox::question(this, "提示",
+                "未添加任何磁盘且未选择 ISO，虚机将无法引导。\n仍要保存吗？",
+                QMessageBox::Yes | QMessageBox::No);
+            if (ret != QMessageBox::Yes)
+                return;
+        }
         accept();
     });
     connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
@@ -652,12 +744,6 @@ VMDialog::VMDialog(QWidget *parent)
     // 虚拟机类型切换 → 显隐 VirtualBox 专属控件 / QEMU 高级控件
     connect(m_vmTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) { updateVmTypeUI(); });
-    connect(m_diskBtn, &QPushButton::clicked, this, [this]() {
-        QString path = QFileDialog::getOpenFileName(this, "选择系统盘",
-            m_diskEdit->text().isEmpty() ? QDir::homePath() : m_diskEdit->text(),
-            "磁盘映像 (*.qcow2 *.raw *.img);;所有文件 (*)");
-        if (!path.isEmpty()) m_diskEdit->setText(path);
-    });
     connect(m_isoBtn, &QPushButton::clicked, this, [this]() {
         QString path = QFileDialog::getOpenFileName(this, "选择 ISO",
             m_isoEdit->text().isEmpty() ? QDir::homePath() : m_isoEdit->text(),
@@ -694,44 +780,26 @@ VMDialog::VMDialog(QWidget *parent)
         if (row >= 0) m_portTable->removeRow(row);
     });
 
-    // 数据盘操作
-    connect(m_dataDiskAddBtn, &QPushButton::clicked, this, [this]() {
+    // 磁盘操作 (系统盘 + 数据盘 统一列表)
+    connect(m_diskAddBtn, &QPushButton::clicked, this, [this]() {
         VMDataDisk dd;
-        if (editDataDiskDialog(this, dd, true)) {
-            auto *item = new QListWidgetItem(
-                QString("%1  [%2 | cache:%3 | aio:%4]")
-                    .arg(QFileInfo(dd.path).fileName(), dd.format, dd.cache, dd.aio));
-            item->setData(Qt::UserRole,
-                QString("%1|%2|%3|%4").arg(dd.path, dd.format, dd.cache, dd.aio));
-            item->setToolTip(QString("路径:%1\n格式:%2\n缓存:%3\nAIO:%4")
-                             .arg(dd.path, dd.format, dd.cache, dd.aio));
-            m_dataDiskList->addItem(item);
-        }
+        dd.system = (m_diskList->count() == 0);  // 第一块盘默认是系统盘
+        if (editDiskDialog(this, dd, true, m_vmTypeCombo->currentData().toString()))
+            m_diskList->addItem(makeDiskItem(dd));
     });
-    connect(m_dataDiskEditBtn, &QPushButton::clicked, this, [this]() {
-        int row = m_dataDiskList->currentRow();
+    connect(m_diskEditBtn, &QPushButton::clicked, this, [this]() {
+        int row = m_diskList->currentRow();
         if (row < 0) return;
-        QStringList parts = m_dataDiskList->item(row)->data(Qt::UserRole).toString().split('|');
-        VMDataDisk dd;
-        if (parts.size() >= 1) dd.path   = parts[0];
-        if (parts.size() >= 2) dd.format = parts[1];
-        if (parts.size() >= 3) dd.cache  = parts[2];
-        if (parts.size() >= 4) dd.aio    = parts[3];
-        if (editDataDiskDialog(this, dd, false)) {
-            delete m_dataDiskList->takeItem(row);
-            auto *item = new QListWidgetItem(
-                QString("%1  [%2 | cache:%3 | aio:%4]")
-                    .arg(QFileInfo(dd.path).fileName(), dd.format, dd.cache, dd.aio));
-            item->setData(Qt::UserRole,
-                QString("%1|%2|%3|%4").arg(dd.path, dd.format, dd.cache, dd.aio));
-            item->setToolTip(QString("路径:%1\n格式:%2\n缓存:%3\nAIO:%4")
-                             .arg(dd.path, dd.format, dd.cache, dd.aio));
-            m_dataDiskList->addItem(item);
+        VMDataDisk dd = diskFromItem(m_diskList->item(row));
+        if (editDiskDialog(this, dd, false, m_vmTypeCombo->currentData().toString())) {
+            delete m_diskList->takeItem(row);
+            m_diskList->insertItem(row, makeDiskItem(dd));
+            m_diskList->setCurrentRow(row);
         }
     });
-    connect(m_dataDiskRemoveBtn, &QPushButton::clicked, this, [this]() {
-        int row = m_dataDiskList->currentRow();
-        if (row >= 0) delete m_dataDiskList->takeItem(row);
+    connect(m_diskRemoveBtn, &QPushButton::clicked, this, [this]() {
+        int row = m_diskList->currentRow();
+        if (row >= 0) delete m_diskList->takeItem(row);
     });
 
     // ── 硬件直通: PCI ──
@@ -766,44 +834,40 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     m_nameEdit->setText(vm.name);
     m_cpuSpin->setValue(vm.cpu);
     m_memSpin->setValue(vm.memory);
-    m_diskEdit->setText(vm.disk);
     m_isoEdit->setText(vm.iso);
 
-    // 虚拟机类型 + VirtualBox 专属字段
+    // 虚拟机类型 + VirtualBox 专属字段 (下拉一律用 findData 按 data 定位, 不能用 setCurrentText 传 ID)
     if (m_vmTypeCombo->findData(vm.vmType) >= 0)
         m_vmTypeCombo->setCurrentIndex(m_vmTypeCombo->findData(vm.vmType));
-    if (m_ostypeCombo)           m_ostypeCombo->setCurrentText(vm.ostype);
-    if (m_storageBackendCombo)   m_storageBackendCombo->setCurrentText(vm.storageBackend);
-    if (m_diskFormatCombo)       m_diskFormatCombo->setCurrentText(vm.diskFormat);
+    if (m_ostypeCombo) {
+        int oIdx = m_ostypeCombo->findData(vm.ostype);
+        if (oIdx >= 0) m_ostypeCombo->setCurrentIndex(oIdx);
+    }
+    if (m_storageBackendCombo) {
+        int sbIdx = m_storageBackendCombo->findData(vm.storageBackend);
+        if (sbIdx >= 0) m_storageBackendCombo->setCurrentIndex(sbIdx);
+    }
     if (m_vboxDiskSizeSpin)      m_vboxDiskSizeSpin->setValue(vm.vboxDiskSize);
     if (m_vboxAcpiCb)            m_vboxAcpiCb->setChecked(vm.vboxAcpi);
     if (m_vboxIoapicCb)          m_vboxIoapicCb->setChecked(vm.vboxIoapic);
+    if (m_vboxUefiCb)            m_vboxUefiCb->setChecked(vm.vboxUefi);
+    if (m_vboxRdpCb)             m_vboxRdpCb->setChecked(vm.vboxRdp);
+    if (m_vboxRdpPortSpin)       m_vboxRdpPortSpin->setValue(vm.vboxRdpPort);
     if (m_vboxNicTypeCombo) {
-        QString nt = vm.vboxNicType == "bridged" ? "桥接 (Bridged)" : "NAT";
-        m_vboxNicTypeCombo->setCurrentText(nt);
+        int ntIdx = m_vboxNicTypeCombo->findData(vm.vboxNicType);
+        if (ntIdx >= 0) m_vboxNicTypeCombo->setCurrentIndex(ntIdx);
     }
     if (m_vboxBridgeEdit)        m_vboxBridgeEdit->setText(vm.vboxBridgeDev);
 
     // 按当前类型刷新显隐
     updateVmTypeUI();
 
-    // 数据盘
-    m_dataDiskList->clear();
-    for (const auto &dd : vm.dataDisks) {
-        auto *item = new QListWidgetItem(
-            QString("%1  [%2 | cache:%3 | aio:%4]")
-                .arg(QFileInfo(dd.path).fileName(), dd.format, dd.cache, dd.aio));
-        item->setData(Qt::UserRole,
-            QString("%1|%2|%3|%4").arg(dd.path, dd.format, dd.cache, dd.aio));
-        item->setToolTip(QString("路径:%1\n格式:%2\n缓存:%3\nAIO:%4")
-                         .arg(dd.path, dd.format, dd.cache, dd.aio));
-        m_dataDiskList->addItem(item);
-    }
+    // 磁盘列表 (系统盘 + 数据盘)
+    m_diskList->clear();
+    for (const auto &dd : vm.disks)
+        m_diskList->addItem(makeDiskItem(dd));
 
     // 自动启动
-    // 系统盘接口下拉 (virtio / sata / ide)
-    int diIdx = m_diskInterfaceCombo->findData(vm.diskInterface);
-    if (diIdx >= 0) m_diskInterfaceCombo->setCurrentIndex(diIdx);
     m_autoStartCb->setChecked(vm.autoStart);
     m_waitMountCb->setChecked(vm.waitMount);
 
@@ -854,7 +918,6 @@ VMConfig VMDialog::vmConfig() const
     vm.name   = m_nameEdit->text().trimmed();
     vm.cpu    = m_cpuSpin->value();
     vm.memory = m_memSpin->value();
-    vm.disk   = m_diskEdit->text().trimmed();
     vm.iso    = m_isoEdit->text().trimmed();
     vm.vnc    = m_vncSpin->value();
 
@@ -866,14 +929,15 @@ VMConfig VMDialog::vmConfig() const
     vm.net        = m_netCombo->currentData().toString();
     vm.nicModel   = m_nicCombo->currentText();
     vm.ramfb      = m_ramfbCb->isChecked();
-    vm.diskInterface = m_diskInterfaceCombo->currentData().toString();
     vm.vmType      = m_vmTypeCombo->currentData().toString();
     vm.ostype      = m_ostypeCombo->currentData().toString();
     vm.storageBackend = m_storageBackendCombo->currentData().toString();
-    vm.diskFormat  = m_diskFormatCombo->currentData().toString();
     vm.vboxDiskSize = m_vboxDiskSizeSpin->value();
     vm.vboxAcpi     = m_vboxAcpiCb->isChecked();
     vm.vboxIoapic   = m_vboxIoapicCb->isChecked();
+    vm.vboxUefi     = m_vboxUefiCb->isChecked();
+    vm.vboxRdp      = m_vboxRdpCb->isChecked();
+    vm.vboxRdpPort  = m_vboxRdpPortSpin->value();
     vm.vboxNicType  = (m_vboxNicTypeCombo && m_vboxNicTypeCombo->currentText() == "桥接 (Bridged)")
                       ? "bridged" : "nat";
     vm.vboxBridgeDev = m_vboxBridgeEdit ? m_vboxBridgeEdit->text().trimmed() : "";
@@ -890,19 +954,11 @@ VMConfig VMDialog::vmConfig() const
         vm.portForwards.append(pf);
     }
 
-    // 数据盘
-    vm.dataDisks.clear();
-    for (int i = 0; i < m_dataDiskList->count(); ++i) {
-        QStringList parts = m_dataDiskList->item(i)->data(Qt::UserRole).toString().split('|');
-        if (parts.size() >= 4) {
-            VMDataDisk dd;
-            dd.path   = parts[0];
-            dd.format = parts[1];
-            dd.cache  = parts[2];
-            dd.aio    = parts[3];
-            vm.dataDisks.append(dd);
-        }
-    }
+    // 磁盘列表 (系统盘 + 数据盘)
+    vm.disks.clear();
+    for (int i = 0; i < m_diskList->count(); ++i)
+        vm.disks.append(diskFromItem(m_diskList->item(i)));
+    vm.normalizeDisks();  // 系统盘唯一且置于首位 (index=0)
 
     // 硬件直通
     vm.hugepages = m_hugepagesCb->isChecked();

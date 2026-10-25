@@ -41,7 +41,7 @@ VMPage::VMPage(QWidget *parent)
     // ── 表格（8 列，含状态）──
     m_table = new QTableWidget(0, ColCount);
     m_table->setHorizontalHeaderLabels({
-        "名称", "CPU", "内存", "磁盘", "网络", "VNC", "状态", "额外参数"
+        "名称", "CPU", "内存", "磁盘", "网络", "远程", "状态", "额外参数"
     });
     m_table->horizontalHeader()->setStretchLastSection(true);
     m_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -92,19 +92,23 @@ VMPage::VMPage(QWidget *parent)
     });
     btnRow->addWidget(m_startBtn);
 
-    m_vncBtn = new QPushButton("🖥️ VNC 连接");
+    m_vncBtn = new QPushButton("🖥️ 远程连接");
     connect(m_vncBtn, &QPushButton::clicked, this, &VMPage::connectVNC);
     btnRow->addWidget(m_vncBtn);
 
     layout->addLayout(btnRow);
 
-    // ── 检测 VNC 客户端 ──
+    // ── 检测远程连接客户端 (QEMU 用 VNC, VirtualBox 用 RDP) ──
     m_vncViewer = findVNCViewer();
-    if (m_vncViewer.isEmpty()) {
-        m_vncBtn->setToolTip("未找到 VNC 客户端（已安装 tigervnc 或 gtk-vnc？）");
+    m_rdpClient = findRDPClient();
+    if (m_vncViewer.isEmpty() && m_rdpClient.isEmpty()) {
+        m_vncBtn->setToolTip("未找到远程连接客户端 (VNC: tigervnc / gtk-vnc; RDP: xfreerdp / rdesktop / remmina)");
         m_vncBtn->setEnabled(false);
     } else {
-        m_vncBtn->setToolTip(QString("使用 %1 连接").arg(m_vncViewer));
+        QString tip = "连接: ";
+        if (!m_vncViewer.isEmpty()) tip += QString("VNC → %1").arg(m_vncViewer);
+        if (!m_rdpClient.isEmpty()) tip += (tip.endsWith(' ') ? " / " : "") + QString("RDP → %1").arg(m_rdpClient);
+        m_vncBtn->setToolTip(tip);
     }
 
     // ── 加载配置 ──
@@ -125,7 +129,17 @@ VMPage::VMPage(QWidget *parent)
 
 QString VMPage::findVNCViewer() const
 {
-    QStringList candidates = {"vncviewer", "gvncviewer", "vinagre", "krdc", "remmina"};
+    QStringList candidates = {"vncviewer", "Xtigervnc", "gvncviewer", "vinagre", "krdc", "remmina"};
+    for (const auto &candidate : candidates) {
+        QString path = QStandardPaths::findExecutable(candidate);
+        if (!path.isEmpty()) return path;
+    }
+    return {};
+}
+
+QString VMPage::findRDPClient() const
+{
+    QStringList candidates = {"xfreerdp", "xfreerdp3", "wlfreerdp", "rdesktop", "remmina", "krdc"};
     for (const auto &candidate : candidates) {
         QString path = QStandardPaths::findExecutable(candidate);
         if (!path.isEmpty()) return path;
@@ -165,12 +179,15 @@ void VMPage::refreshTable()
                 ? QString("%1 GB").arg(vm.memory / 1024.0, 0, 'f', 1)
                 : QString("%1 MB").arg(vm.memory)));
         m_table->setItem(i, ColDisk, new QTableWidgetItem(
-            vm.disk.isEmpty() ? "" : QFileInfo(vm.disk).fileName()));
+            QFileInfo(vm.systemDiskPath()).fileName()));
 
         m_table->setItem(i, ColNet, new QTableWidgetItem(vm.net));
 
-        m_table->setItem(i, ColVNC, new QTableWidgetItem(
-            vm.vnc < 0 ? "禁用" : QString::number(5900 + vm.vnc)));
+        // 远程连接列: QEMU 显示 VNC 端口, VirtualBox 显示 RDP 端口
+        QString remote = (vm.vmType == "virtualbox")
+            ? (vm.vboxRdp ? QString("RDP %1").arg(vm.vboxRdpPort) : "RDP 禁用")
+            : (vm.vnc < 0 ? "禁用" : QString("VNC %1").arg(5900 + vm.vnc));
+        m_table->setItem(i, ColVNC, new QTableWidgetItem(remote));
 
         auto *statusItem = new QTableWidgetItem("⋯ 检测中");
         statusItem->setForeground(QColor("#9ca3af"));
@@ -181,8 +198,9 @@ void VMPage::refreshTable()
             extras << (vm.extra.left(28).replace('\n', ' ')
                       + (vm.extra.length() > 28 ? "…" : ""));
         }
-        if (!vm.dataDisks.isEmpty())
-            extras << QString("💾%1").arg(vm.dataDisks.size());
+        int dataCount = vm.disks.size() - (vm.systemDiskIndex() >= 0 ? 1 : 0);
+        if (dataCount > 0)
+            extras << QString("💾%1").arg(dataCount);
         if (!vm.pciDevices.isEmpty())
             extras << QString("🖧%1").arg(vm.pciDevices.size());
         if (vm.ramfb)
@@ -247,7 +265,7 @@ void VMPage::refreshStatus()
             running = VirtualBox::isRunning(vm.name);
         } else {
             for (const auto &ql : qemuLines) {
-                if (qemuLineForVM(ql, vm.name, vm.disk)) {
+                if (qemuLineForVM(ql, vm.name, vm.systemDiskPath())) {
                     running = true;
                     break;
                 }
@@ -488,20 +506,16 @@ bool VMPage::startVMAt(int row, bool quiet)
     QString sockPath = qmpSocketPath(vm.name);
     args << "-qmp" << QString("unix:%1,server=on,wait=off").arg(sockPath);
 
-    if (!vm.disk.isEmpty()) {
-        // 系统盘接口: virtio(高性能) / sata(AHCI) / ide(原生 IDE, 旧 OS 免驱动)
-        QString if_ = vm.diskInterface;
-        if (if_ != "virtio" && if_ != "sata" && if_ != "ide") if_ = "ide";  // 非法值兜底为 IDE
-        QString driveStr = QString("file=%1,format=qcow2,if=%2,index=0,cache=none,aio=native")
-                               .arg(vm.disk, if_);
-        args << "-drive" << driveStr;
-    }
-
-    for (int di = 0; di < vm.dataDisks.size(); ++di) {
-        const auto &dd = vm.dataDisks[di];
+    // 磁盘列表: 系统盘 (index 0, 按条目所选接口) + 数据盘 (其余固定 virtio)
+    int diskIdx = 0;
+    for (const auto &dd : vm.disks) {
         if (dd.path.isEmpty()) continue;
-        args << "-drive" << QString("id=drive%1,file=%2,format=%3,if=virtio,index=%4,cache=%5,aio=%6")
-            .arg(di + 1).arg(dd.path, dd.format).arg(di + 1).arg(dd.cache, dd.aio);
+        QString if_ = "virtio";
+        if (dd.system && (dd.iface == "sata" || dd.iface == "ide"))
+            if_ = dd.iface;
+        args << "-drive" << QString("id=drive%1,file=%2,format=%3,if=%4,index=%5,cache=%6,aio=%7")
+            .arg(diskIdx).arg(dd.path, dd.format).arg(if_).arg(diskIdx).arg(dd.cache, dd.aio);
+        ++diskIdx;
     }
 
     if (!vm.iso.isEmpty())
@@ -883,7 +897,7 @@ void VMPage::startAutoStartVMs()
     }
 }
 
-// ── VNC 连接 ──
+// ── 远程连接 (QEMU: VNC / VirtualBox: RDP) ──
 
 void VMPage::connectVNC()
 {
@@ -891,14 +905,48 @@ void VMPage::connectVNC()
     if (row < 0 || row >= m_mgr.vms().size()) return;
 
     const auto &vm = m_mgr.vms()[row];
-    if (vm.vnc < 0) {
-        QMessageBox::information(this, "提示", "该虚机未配置 VNC");
-        return;
-    }
 
     auto *statusItem = m_table->item(row, ColStatus);
     if (!statusItem || !statusItem->text().contains("运行中")) {
         QMessageBox::information(this, "提示", "该虚机未运行，请先启动");
+        return;
+    }
+
+    if (vm.vmType == "virtualbox") {
+        // VirtualBox 走内置 RDP 服务器 (VRDE), 只有 VM 运行时才监听
+        if (!vm.vboxRdp) {
+            QMessageBox::information(this, "提示",
+                "该虚机未启用 RDP (VRDE)，请在配置里勾选「启用 RDP 远程控制」后重启虚机");
+            return;
+        }
+        if (m_rdpClient.isEmpty()) {
+            QMessageBox::warning(this, "提示",
+                "未找到 RDP 客户端。\n请安装其一: xfreerdp / rdesktop / remmina / krdc");
+            return;
+        }
+        QString target = QString("localhost:%1").arg(vm.vboxRdpPort);
+        QStringList args;
+        if (m_rdpClient.contains("xfreerdp"))
+            args << QString("/v:%1").arg(target) << "/dynamic-resolution";
+        else if (m_rdpClient.contains("rdesktop"))
+            args << "-g" << "1280x800" << target;
+        else if (m_rdpClient.contains("remmina"))
+            args << "-c" << QString("rdp://%1").arg(target);
+        else if (m_rdpClient.contains("krdc"))
+            args << QString("rdp://%1").arg(target);
+        else
+            args << target;
+
+        Logger::log("VM", QString("RDP 连接 %1 → %2").arg(vm.name, target));
+        if (!QProcess::startDetached(m_rdpClient, args)) {
+            QMessageBox::warning(this, "启动失败",
+                QString("无法启动 RDP 客户端:\n%1").arg(m_rdpClient));
+        }
+        return;
+    }
+
+    if (vm.vnc < 0) {
+        QMessageBox::information(this, "提示", "该虚机未配置 VNC");
         return;
     }
 
@@ -908,11 +956,7 @@ void VMPage::connectVNC()
     QString viewer = m_vncViewer;
 
     QStringList args;
-    if (viewer.contains("vncviewer"))
-        args << target;
-    else if (viewer.contains("gvncviewer"))
-        args << target;
-    else if (viewer.contains("remmina"))
+    if (viewer.contains("remmina"))
         args << "-c" << QString("vnc://%1").arg(target);
     else
         args << target;

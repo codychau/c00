@@ -1,6 +1,8 @@
 #include "vmconfig.h"
 
 #include <QDir>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QStandardPaths>
 
 #include <toml++/toml.h>
@@ -10,6 +12,25 @@ QString VMConfigManager::defaultConfigPath()
 {
     QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     return dir + "/vms.toml";
+}
+
+// 归一磁盘格式: 兼容旧配置的界面名 ("VDI (VirtualBox 原生)") 与扩展名
+static QString normalizeFormat(const QString &fmt, const QString &path)
+{
+    QString f = fmt.toLower();
+    f.remove(' ');
+    if (f.contains("vmdk")) return "vmdk";
+    if (f.contains("vhdx")) return "vhdx";
+    if (f.contains("vdi"))  return "vdi";
+    if (f.contains("qcow2")) return "qcow2";
+    if (f == "img" || f == "raw") return "raw";
+    if (f.isEmpty()) {
+        QString ext = QFileInfo(path).suffix().toLower();
+        if (ext == "vmdk" || ext == "vdi" || ext == "vhdx") return ext;
+        if (ext == "img") return "raw";
+        return "qcow2";
+    }
+    return f;
 }
 
 VMConfigManager::VMConfigManager(const QString &configPath)
@@ -40,7 +61,6 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("name"))   vm.name   = QString::fromStdString(v->value_or(""));
             if (auto *v = vmTbl->get("cpu"))    vm.cpu    = v->value_or(2);
             if (auto *v = vmTbl->get("memory")) vm.memory = v->value_or(2048);
-            if (auto *v = vmTbl->get("disk"))   vm.disk   = QString::fromStdString(v->value_or(""));
             if (auto *v = vmTbl->get("iso"))    vm.iso    = QString::fromStdString(v->value_or(""));
             if (auto *v = vmTbl->get("vnc"))    vm.vnc    = v->value_or(-1);
             if (auto *v = vmTbl->get("qemu_binary")) vm.qemuBinary = QString::fromStdString(v->value_or("qemu-system-x86_64"));
@@ -52,13 +72,6 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("machine"))    vm.machine  = QString::fromStdString(v->value_or("q35"));
             if (auto *v = vmTbl->get("cpu_type"))   vm.cpuType  = QString::fromStdString(v->value_or("host"));
             if (auto *v = vmTbl->get("kvm"))        vm.kvm      = v->value_or(true);
-            // 系统盘接口: 优先 disk_interface; 旧配置用 virtio_disk(bool) 迁移
-            if (auto *v = vmTbl->get("disk_interface")) {
-                QString s = QString::fromStdString(v->value_or(""));
-                if (s == "sata" || s == "ide" || s == "virtio") vm.diskInterface = s;
-            } else if (auto *v = vmTbl->get("virtio_disk")) {
-                vm.diskInterface = v->value_or(true) ? "virtio" : "ide";
-            }
             if (auto *v = vmTbl->get("vga"))        vm.vga      = QString::fromStdString(v->value_or("virtio"));
             if (auto *v = vmTbl->get("nic_model"))  vm.nicModel = QString::fromStdString(v->value_or("virtio-net-pci"));
 
@@ -67,14 +80,14 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("ostype")) {
                 // VirtualBox ostype ID 无空格 (Windows7/Windows10...), 旧配置若存了界面名则归一
                 QString o = QString::fromStdString(v->value_or("Windows7"));
+                if (o.contains("(64-bit)", Qt::CaseInsensitive)) {
+                    o.remove(QRegularExpression("\\s*\\(64-bit\\)",
+                                               QRegularExpression::CaseInsensitiveOption));
+                    o += "_64";   // "Windows 7 (64-bit)" → "Windows7_64"
+                }
                 o.remove(' ');
+                if (o == "Windows11") o = "Windows11_64";  // VBox 无 32 位 Windows 11 类型
                 vm.ostype = o;
-            }
-            if (auto *v = vmTbl->get("disk_format")) {
-                QString df = QString::fromStdString(v->value_or("vdi")).toLower();
-                if (df.contains("vmdk"))      vm.diskFormat = "vmdk";
-                else if (df.contains("vhdx")) vm.diskFormat = "vhdx";
-                else                          vm.diskFormat = "vdi";  // VDI (VirtualBox 原生) 等
             }
             if (auto *v = vmTbl->get("storage_backend")) {
                 QString sb = QString::fromStdString(v->value_or("sata")).toLower();
@@ -83,6 +96,9 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("vbox_disk_size"))  vm.vboxDiskSize= v->value_or(20480);
             if (auto *v = vmTbl->get("vbox_acpi"))       vm.vboxAcpi   = v->value_or(true);
             if (auto *v = vmTbl->get("vbox_ioapic"))     vm.vboxIoapic = v->value_or(true);
+            if (auto *v = vmTbl->get("vbox_uefi"))       vm.vboxUefi   = v->value_or(false);
+            if (auto *v = vmTbl->get("vbox_rdp"))        vm.vboxRdp    = v->value_or(false);
+            if (auto *v = vmTbl->get("vbox_rdp_port"))   vm.vboxRdpPort = v->value_or(3389);
             if (auto *v = vmTbl->get("vbox_nic_type"))   vm.vboxNicType = QString::fromStdString(v->value_or("nat"));
             if (auto *v = vmTbl->get("vbox_bridge_dev")) vm.vboxBridgeDev = QString::fromStdString(v->value_or(""));
 
@@ -102,22 +118,47 @@ bool VMConfigManager::load()
                 }
             }
 
-            // 数据盘
-            if (auto *v = vmTbl->get("data_disks")) {
-                if (auto *arr = v->as_array()) {
-                    for (auto &el : *arr) {
-                        auto *dt = el.as_table();
-                        if (!dt) continue;
-                        VMDataDisk dd;
-                        if (auto *pv = dt->get("path"))   dd.path   = QString::fromStdString(pv->value_or(""));
-                        if (auto *pv = dt->get("format")) dd.format = QString::fromStdString(pv->value_or("qcow2"));
-                        if (auto *pv = dt->get("cache"))  dd.cache  = QString::fromStdString(pv->value_or("none"));
-                        if (auto *pv = dt->get("aio"))    dd.aio    = QString::fromStdString(pv->value_or("native"));
-                        if (!dd.path.isEmpty())
-                            vm.dataDisks.append(dd);
-                    }
+            // 磁盘列表 (新格式 disks; 旧格式 data_disks 兼容读取)
+            toml::node *diskNode = vmTbl->get("disks");
+            if (!diskNode) diskNode = vmTbl->get("data_disks");
+            if (diskNode && diskNode->is_array()) {
+                for (auto &el : *diskNode->as_array()) {
+                    auto *dt = el.as_table();
+                    if (!dt) continue;
+                    VMDataDisk dd;
+                    if (auto *pv = dt->get("path"))   dd.path   = QString::fromStdString(pv->value_or(""));
+                    if (auto *pv = dt->get("format")) dd.format = QString::fromStdString(pv->value_or("qcow2"));
+                    if (auto *pv = dt->get("cache"))  dd.cache  = QString::fromStdString(pv->value_or("none"));
+                    if (auto *pv = dt->get("aio"))    dd.aio    = QString::fromStdString(pv->value_or("native"));
+                    if (auto *pv = dt->get("iface"))  dd.iface  = QString::fromStdString(pv->value_or("virtio"));
+                    if (auto *pv = dt->get("system")) dd.system = pv->value_or(false);
+                    dd.format = normalizeFormat(dd.format, dd.path);
+                    if (!dd.path.isEmpty())
+                        vm.disks.append(dd);
                 }
             }
+
+            // 旧配置迁移: disk(系统盘) + disk_interface / virtio_disk / disk_format → 列表首位
+            QString legacyDisk;
+            if (auto *v = vmTbl->get("disk")) legacyDisk = QString::fromStdString(v->value_or(""));
+            if (!legacyDisk.isEmpty()) {
+                VMDataDisk sys;
+                sys.path   = legacyDisk;
+                sys.system = true;
+                QString legacyFmt;
+                // disk_format 是 VirtualBox 建盘格式; QEMU 的盘按扩展名推断
+                if (vm.vmType == "virtualbox" && vmTbl->get("disk_format"))
+                    legacyFmt = QString::fromStdString(vmTbl->get("disk_format")->value_or(""));
+                sys.format = normalizeFormat(legacyFmt, legacyDisk);
+                if (auto *v = vmTbl->get("disk_interface")) {
+                    QString s = QString::fromStdString(v->value_or(""));
+                    if (s == "sata" || s == "ide" || s == "virtio") sys.iface = s;
+                } else if (auto *v = vmTbl->get("virtio_disk")) {
+                    sys.iface = v->value_or(true) ? "virtio" : "ide";
+                }
+                vm.disks.prepend(sys);
+            }
+            vm.normalizeDisks();  // 保证系统盘唯一且位于首位
 
             // 随管理器启动
             if (auto *v = vmTbl->get("auto_start")) vm.autoStart = v->value_or(false);
@@ -151,7 +192,6 @@ bool VMConfigManager::save() const
         tbl.emplace("name",   vm.name.toStdString());
         tbl.emplace("cpu",    vm.cpu);
         tbl.emplace("memory", vm.memory);
-        tbl.emplace("disk",   vm.disk.toStdString());
         tbl.emplace("iso",    vm.iso.toStdString());
         tbl.emplace("vnc",    vm.vnc);
         tbl.emplace("qemu_binary", vm.qemuBinary.toStdString());
@@ -162,16 +202,17 @@ bool VMConfigManager::save() const
         tbl.emplace("machine",    vm.machine.toStdString());
         tbl.emplace("cpu_type",   vm.cpuType.toStdString());
         tbl.emplace("kvm",        vm.kvm);
-        tbl.emplace("disk_interface", vm.diskInterface.toStdString());
         tbl.emplace("vga",        vm.vga.toStdString());
         tbl.emplace("nic_model",  vm.nicModel.toStdString());
         tbl.emplace("vm_type",        vm.vmType.toStdString());
         tbl.emplace("ostype",         vm.ostype.toStdString());
-        tbl.emplace("disk_format",    vm.diskFormat.toStdString());
         tbl.emplace("storage_backend", vm.storageBackend.toStdString());
         tbl.emplace("vbox_disk_size", vm.vboxDiskSize);
         tbl.emplace("vbox_acpi",      vm.vboxAcpi);
         tbl.emplace("vbox_ioapic",    vm.vboxIoapic);
+        tbl.emplace("vbox_uefi",      vm.vboxUefi);
+        tbl.emplace("vbox_rdp",       vm.vboxRdp);
+        tbl.emplace("vbox_rdp_port",  vm.vboxRdpPort);
         tbl.emplace("vbox_nic_type",  vm.vboxNicType.toStdString());
         tbl.emplace("vbox_bridge_dev", vm.vboxBridgeDev.toStdString());
 
@@ -190,17 +231,19 @@ bool VMConfigManager::save() const
         tbl.emplace("auto_start", vm.autoStart);
         tbl.emplace("wait_mount", vm.waitMount);
 
-        // 数据盘
+        // 磁盘列表 (系统盘 + 数据盘)
         toml::array disksArr;
-        for (const auto &dd : vm.dataDisks) {
+        for (const auto &dd : vm.disks) {
             toml::table dt;
             dt.emplace("path",   dd.path.toStdString());
             dt.emplace("format", dd.format.toStdString());
             dt.emplace("cache",  dd.cache.toStdString());
             dt.emplace("aio",    dd.aio.toStdString());
+            dt.emplace("iface",  dd.iface.toStdString());
+            dt.emplace("system", dd.system);
             disksArr.push_back(std::move(dt));
         }
-        tbl.emplace("data_disks", std::move(disksArr));
+        tbl.emplace("disks", std::move(disksArr));
 
         // 硬件直通
         tbl.emplace("hugepages", vm.hugepages);

@@ -12,10 +12,11 @@
 - **💾 存储管理** — 块设备树形查看、分区挂载、S.M.A.R.T 健康检测
   - **就绪状态检测** — 自动比对 `/etc/fstab` 与实际挂载点，显示分区「就绪/未就绪/未配置」状态
   - **隐藏 loop 设备** — 默认过滤 ISO、Snap、AppImage 等 loop 镜像挂载条目，可勾选显示；刷新时尽量保留当前选中的真实设备
-- **🖥️ 虚机管理** — QEMU/KVM 虚拟机的一站式管理
+- **🖥️ 虚机管理** — QEMU/KVM 与 VirtualBox 虚拟机的一站式管理
   - 可视化编辑虚机配置（CPU、内存、磁盘、网络、端口转发等）
-  - 创建/管理数据盘（支持 qcow2 创建）
+  - 统一磁盘列表：系统盘（启动盘，可选 virtio/SATA/IDE 接口）与数据盘在同一列表管理，支持 qemu-img / VBoxManage 建盘
   - 硬件直通（PCI 设备、Hugepages）
+  - VirtualBox 专属：目标 OS（含 64-bit 预设）、UEFI/BIOS 固件、ACPI/IOAPIC、RDP 远程控制（VRDE）
   - 自动启动
   - **等待挂载点** — 启动前主动挂载 fstab 中未就绪的设备，解决硬盘开机延迟挂载问题
   - 一键启动/停止，VNC 连接

@@ -7,6 +7,8 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QDateTime>
+#include <QSet>
+#include <QHash>
 
 #include "logger.h"
 
@@ -31,10 +33,19 @@ static int runVBox(const QStringList &args, QString *err)
     return rc;
 }
 
+// showvminfo --machinereadable 的解析结果
+struct VboxLayout {
+    QHash<QString, int> portcounts;  // 控制器名 → 当前端口数
+    QSet<QString> media;             // 已挂载的媒体路径
+};
+
 // 前置声明 (定义在文件下方)
-static int addController(const QString &vmName, const QString &name,
-                         const QString &type, QString *err);
+static VboxLayout readLayout(const QString &vmName);
+static int addController(const QString &vmName, const QString &ctrlName,
+                         const QString &type, int portcount,
+                         const VboxLayout &lay, QString *err);
 static int applySettings(const VMConfig &vm, QString *err);
+static bool attachDisks(const VMConfig &vm, QString *err);
 
 // VirtualBox 7.x 中 storageattach 的 IDE 控制器存在 CLI 缺陷
 // (HDD/DVD 一律报 "Device not specified"), 故统一使用 SATA 控制器.
@@ -71,16 +82,22 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
     const QString name = vm.name;
 
     if (vmExists(name)) {
-        // 已存在: 只回写核心设置 (内存/CPU/ostype/网络/显示). 控制器/磁盘/ISO 保持原样.
+        // 已存在: 回写核心设置, 并补挂尚未挂载的磁盘 (已挂载的条目跳过)
         // 注意: applySettings 返回 int (0=成功), 必须显式比较, 不能直接 return
-        return applySettings(vm, err) == 0;
+        if (applySettings(vm, err) != 0) return false;
+        return attachDisks(vm, err);
     }
 
     // ── 新建 ──
     // 1) createvm (若 .vbox 残留未注册, 自动 registervm 复用而非报错)
     QString createOut;
-    if (runVBox({"createvm", "--name", name,
-                 "--ostype", vm.ostype, "--register"}, &createOut) != 0) {
+    int rc = runVBox({"createvm", "--name", name, "--ostype", vm.ostype, "--register"}, &createOut);
+    if (rc != 0 && createOut.contains("invalid guest OS type", Qt::CaseInsensitive)) {
+        // 旧配置里的 ostype 可能是界面名或无效 ID (如 Windows11): 回退通用 64 位 Windows
+        Logger::log("VirtualBox", QString("⚠️ ostype '%1' 无效, 回退 WindowsNT_64").arg(vm.ostype));
+        rc = runVBox({"createvm", "--name", name, "--ostype", "WindowsNT_64", "--register"}, &createOut);
+    }
+    if (rc != 0) {
         if (createOut.contains("already exists", Qt::CaseInsensitive)) {
             QString vboxFile = QDir::homePath() + "/VirtualBox VMs/" + name + "/" + name + ".vbox";
             if (runVBox({"registervm", vboxFile}, err) != 0) {
@@ -94,52 +111,11 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
         }
     }
 
-    // 2) 存储控制器 (SATA; IDE 在本版不可用)
-    QString backend = resolveBackend(vm.storageBackend);
-    const bool useSata = (backend == "sata");
-    if (useSata) {
-        if (int rc = addController(name, "SATA", "sata", err); rc != 0) {
-            if (err) *err = "添加 SATA 控制器失败: " + *err;
-            return false;
-        }
-    }
+    // 2) 磁盘列表 (系统盘 + 数据盘) 与 ISO; 控制器按需创建
+    if (!attachDisks(vm, err))
+        return false;
 
-    // 3) 磁盘映像: 存在则直接挂载, 否则创建后挂载
-    if (!vm.disk.isEmpty()) {
-        QDir().mkpath(QFileInfo(vm.disk).absolutePath());
-        const bool fileExists = QFile::exists(vm.disk);
-        const QString fmt = vm.diskFormat.toUpper();
-        if (!fileExists) {
-            int rc = runVBox({"createmedium", "disk", "--filename", vm.disk,
-                              "--size", QString::number(vm.vboxDiskSize),
-                              "--format", fmt}, err);
-            if (rc != 0) {
-                if (err) *err = "创建磁盘失败: " + *err;
-                return false;
-            }
-        }
-        QStringList da = {"storageattach", name};
-        if (useSata) {
-            da << "--storagectl" << "SATA" << "--port" << "0"
-               << "--medium" << vm.disk << "--type" << "hdd";
-        }
-        if (int rc = runVBox(da, err); rc != 0) {
-            if (err) *err = "挂载磁盘失败: " + *err;
-            return false;
-        }
-    }
-
-    // 4) 安装 ISO (光驱)
-    if (!vm.iso.isEmpty()) {
-        QStringList ia = {"storageattach", name, "--storagectl", "SATA",
-                          "--port", "1", "--type", "dvddrive", "--medium", vm.iso};
-        if (int rc = runVBox(ia, err); rc != 0) {
-            // ISO 可能是占位路径 (尚未选择): 仅告警, 不阻断启动
-            Logger::log("VirtualBox", QString("⚠️ ISO 挂载失败 (%1), 可能尚未选择镜像").arg(vm.iso));
-        }
-    }
-
-    // 5) 核心设置
+    // 3) 核心设置
     if (int rc = applySettings(vm, err); rc != 0)
         return false;
 
@@ -175,20 +151,126 @@ bool VirtualBox::stop(const QString &name, bool force)
 //  内部辅助
 // ═══════════════════════════════════════════════════════════════════
 
-static int addController(const QString &vmName, const QString &name,
-                         const QString &type, QString *err)
+// VirtualBox 建盘格式: qcow2 / img 不被支持, 归一为 VDI
+static QString vboxFormat(const QString &fmt)
 {
-    QStringList exists = {"storagectl", vmName, "--list"};
-    QString listOut;
-    runVBox(exists, &listOut);  // 忽略错误 (某些版本 --list 需 --details)
+    QString f = fmt.toUpper();
+    if (f == "VDI" || f == "VMDK" || f == "VHDX" || f == "RAW" || f == "QED")
+        return f;
+    return "VDI";
+}
 
-    QString lower = listOut.toLower();
-    bool has = lower.contains("\"" + name.toLower() + "\"")
-            || lower.contains(name.toLower());
-    if (has) return 0;  // 已存在
+// 解析 showvminfo --machinereadable: 控制器名/端口数 + 已挂载媒体路径
+static VboxLayout readLayout(const QString &vmName)
+{
+    VboxLayout lay;
+    QString out;
+    if (runVBox({"showvminfo", vmName, "--machinereadable"}, &out) != 0)
+        return lay;
 
-    QStringList add = {"storagectl", vmName, "--name", name, "--add", type};
-    return runVBox(add, err);
+    for (int i = 0; i < 8; ++i) {
+        QString idx = QString::number(i);
+        QRegularExpression nameRe("storagecontrollername" + idx + "=\"([^\"]*)\"");
+        auto nm = nameRe.match(out);
+        if (!nm.hasMatch()) continue;
+        QRegularExpression pcRe("storagecontrollerportcount" + idx + "=\"(\\d+)\"");
+        auto pc = pcRe.match(out);
+        lay.portcounts.insert(nm.captured(1), pc.hasMatch() ? pc.captured(1).toInt() : 0);
+    }
+
+    // 已挂载媒体: 键格式 "<控制器名>-<端口>-<设备>"="路径" (空位是 "none")
+    for (const auto &ctrl : lay.portcounts.keys()) {
+        QRegularExpression medRe("\"" + QRegularExpression::escape(ctrl)
+                                 + "-\\d+-\\d+\"=\"([^\"]+)\"");
+        auto it = medRe.globalMatch(out);
+        while (it.hasNext()) {
+            QString p = it.next().captured(1);
+            if (p != "none" && !p.isEmpty())
+                lay.media.insert(p);
+        }
+    }
+    return lay;
+}
+
+// 挂载磁盘列表: 系统盘 → SATA 端口 0, 其余数据盘依次占后续端口, ISO 光驱占最后一个端口.
+// 文件不存在时按 vboxDiskSize 建盘. 已挂载的路径跳过, 因此对已存在的 VM 可安全重复调用.
+// 系统盘失败返回 false; 数据盘失败仅告警.
+static bool attachDisks(const VMConfig &vm, QString *err)
+{
+    const QString name = vm.name;
+    const QString backend = resolveBackend(vm.storageBackend);
+
+    // 端口: 磁盘 0..N-1, 光驱 N (VBox 7.2 的 SATA 控制器最多 30 端口)
+    const int ports = qMax(2, vm.disks.size() + (vm.iso.isEmpty() ? 0 : 1));
+
+    const VboxLayout lay = readLayout(name);
+    if (addController(name, "SATA", backend, ports, lay, err) != 0) {
+        if (err) *err = "添加 SATA 控制器失败: " + *err;
+        return false;
+    }
+
+    int port = 0;
+    for (int i = 0; i < vm.disks.size(); ++i) {
+        const VMDataDisk &dd = vm.disks[i];
+        if (dd.path.isEmpty()) continue;
+
+        QDir().mkpath(QFileInfo(dd.path).absolutePath());
+        if (!QFile::exists(dd.path)) {
+            QString out;
+            if (runVBox({"createmedium", "disk", "--filename", dd.path,
+                         "--size", QString::number(vm.vboxDiskSize),
+                         "--format", vboxFormat(dd.format)}, &out) != 0) {
+                if (dd.system) {
+                    if (err) *err = "创建系统盘失败: " + out;
+                    return false;
+                }
+                Logger::log("VirtualBox", QString("⚠️ 数据盘 %1 创建失败: %2").arg(dd.path, out));
+                ++port;
+                continue;
+            }
+        }
+
+        if (lay.media.contains(dd.path)) { ++port; continue; }  // 已挂载, 跳过
+        QString out;
+        if (runVBox({"storageattach", name, "--storagectl", "SATA",
+                     "--port", QString::number(port), "--type", "hdd",
+                     "--medium", dd.path}, &out) != 0) {
+            if (dd.system) {
+                if (err) *err = "挂载系统盘失败: " + out;
+                return false;
+            }
+            Logger::log("VirtualBox", QString("⚠️ 数据盘 %1 挂载失败: %2").arg(dd.path, out));
+        }
+        ++port;
+    }
+
+    // ISO 光驱
+    if (!vm.iso.isEmpty() && !lay.media.contains(vm.iso)) {
+        QString out;
+        if (runVBox({"storageattach", name, "--storagectl", "SATA",
+                     "--port", QString::number(port), "--type", "dvddrive",
+                     "--medium", vm.iso}, &out) != 0) {
+            // ISO 可能是占位路径 (尚未选择): 仅告警, 不阻断启动
+            Logger::log("VirtualBox", QString("⚠️ ISO 挂载失败 (%1), 可能尚未选择镜像").arg(vm.iso));
+        }
+    }
+
+    return true;
+}
+
+// 确保控制器存在且端口够用: 不存在则新建, 端口不足则扩容
+static int addController(const QString &vmName, const QString &ctrlName,
+                         const QString &type, int portcount,
+                         const VboxLayout &lay, QString *err)
+{
+    auto it = lay.portcounts.constFind(ctrlName);
+    if (it != lay.portcounts.constEnd()) {
+        if (it.value() >= portcount) return 0;  // 已存在且端口够用
+        return runVBox({"storagectl", vmName, "--name", ctrlName,
+                        "--portcount", QString::number(portcount)}, err);
+    }
+    return runVBox({"storagectl", vmName, "--name", ctrlName, "--add", type,
+                    "--portcount", QString::number(portcount)}, err);
 }
 
 static int applySettings(const VMConfig &vm, QString *err)
@@ -196,6 +278,10 @@ static int applySettings(const VMConfig &vm, QString *err)
     QStringList a = {"modifyvm", vm.name};
     a << "--acpi" << (vm.vboxAcpi ? "on" : "off");
     a << "--ioapic" << (vm.vboxIoapic ? "on" : "off");
+    a << "--firmware" << (vm.vboxUefi ? "efi" : "bios");
+    a << "--vrde" << (vm.vboxRdp ? "on" : "off");
+    if (vm.vboxRdp)
+        a << "--vrde-port" << QString::number(vm.vboxRdpPort);
     a << "--cpus" << QString::number(vm.cpu);
     a << "--memory" << QString::number(vm.memory);
     a << "--os-type" << vm.ostype;
