@@ -56,9 +56,18 @@ StatusPage::StatusPage(QWidget *parent)
     title->setFont(f);
     layout->addWidget(title);
 
-    // ── 系统信息网格 ──
+    // ── 系统概览：左 = 主板画板，右 = 概览信息 ──
     auto *sysGroup = new QGroupBox("系统概览");
     auto *gridOuter = new QVBoxLayout(sysGroup);
+    auto *sysRow = new QHBoxLayout();
+    sysRow->setSpacing(12);
+
+    m_board = new MotherboardWidget(sysGroup);
+    m_board->setMinimumSize(340, 500);
+    m_board->setMaximumWidth(500);
+    sysRow->addWidget(m_board);
+    connect(m_board, &MotherboardWidget::partClicked, this, &StatusPage::onBoardPartClicked);
+
     auto *grid = new QGridLayout();
     grid->setVerticalSpacing(6);
 
@@ -75,12 +84,16 @@ StatusPage::StatusPage(QWidget *parent)
         grid->addWidget(k, i / 2, (i % 2) * 2);
         grid->addWidget(m_labels[i], i / 2, (i % 2) * 2 + 1);
     }
-    gridOuter->addLayout(grid);
+
+    sysRow->addLayout(grid, 1);
+    gridOuter->addLayout(sysRow);
     layout->addWidget(sysGroup);
 
-    // ── 磁盘监控 ──
-    auto *diskGroup = new QGroupBox("磁盘状态");
-    auto *diskLayout = new QVBoxLayout(diskGroup);
+    // ── 磁盘监控（折叠分组，默认收起） ──
+    m_diskBody = new QWidget();
+    auto *diskLayout = new QVBoxLayout(m_diskBody);
+    diskLayout->setContentsMargins(0, 8, 0, 0);
+    diskLayout->setSpacing(6);
 
     m_diskTable = new QTableWidget(0, ColDiskCount);
     m_diskTable->setHorizontalHeaderLabels({"设备", "型号", "温度", "容量", "已用", "挂载点"});
@@ -95,11 +108,12 @@ StatusPage::StatusPage(QWidget *parent)
     m_diskStatus->setStyleSheet("color: #888; font-size: 12px;");
     diskLayout->addWidget(m_diskStatus);
 
-    layout->addWidget(diskGroup);
+    layout->addWidget(makeCollapsible("磁盘状态", m_diskBody, true, m_diskToggle));
 
-    // ── GPU 温度监控 ──
-    auto *gpuGroup = new QGroupBox("显卡温度");
-    auto *gpuLayout = new QVBoxLayout(gpuGroup);
+    // ── GPU 温度监控（折叠分组，默认收起） ──
+    m_gpuBody = new QWidget();
+    auto *gpuLayout = new QVBoxLayout(m_gpuBody);
+    gpuLayout->setContentsMargins(0, 8, 0, 0);
 
     m_gpuTable = new QTableWidget(0, 7);
     m_gpuTable->setHorizontalHeaderLabels({"GPU", "型号", "PCI 槽位", "核心频率", "显存占用", "风扇", "温度"});
@@ -114,7 +128,7 @@ StatusPage::StatusPage(QWidget *parent)
             this, &StatusPage::onGpuContextMenu);
     gpuLayout->addWidget(m_gpuTable);
 
-    layout->addWidget(gpuGroup);
+    layout->addWidget(makeCollapsible("显卡温度", m_gpuBody, true, m_gpuToggle));
 
     scroll->setWidget(container);
     outerLayout->addWidget(scroll);
@@ -330,8 +344,171 @@ void StatusPage::runCmd(const QString &cmd, const QStringList &args,
 void StatusPage::setLine(int row, const QString &val, const QString &suffix)
 {
     if (row < 0 || row >= 12) return;
-    m_labels[row]->setText(val + suffix);
+    const QString text = val + suffix;
+    m_labels[row]->setText(text);
+    m_lineVals[row] = text;   // 主板画板复用同一份数据
+    syncBoard();
 }
+
+// ── 折叠分组工具 ──
+QWidget *StatusPage::makeCollapsible(const QString &title, QWidget *body, bool collapsed,
+                                     QPushButton *&toggle)
+{
+    auto *wrap = new QWidget();
+    auto *lay = new QVBoxLayout(wrap);
+    lay->setContentsMargins(0, 0, 0, 0);
+    lay->setSpacing(2);
+
+    toggle = new QPushButton();
+    toggle->setCursor(Qt::PointingHandCursor);
+    toggle->setStyleSheet(
+        "QPushButton { text-align: left; padding: 6px 10px; font-weight: bold;"
+        " background: #eef2f7; border: 1px solid #cbd5e1; border-radius: 6px; }"
+        "QPushButton:hover { background: #e2e8f0; }");
+
+    body->setVisible(!collapsed);
+    toggle->setText(QString("%1  %2").arg(collapsed ? "▸" : "▾", title));
+
+    lay->addWidget(toggle);
+    lay->addWidget(body);
+
+    connect(toggle, &QPushButton::clicked, this, [this, body]() {
+        const bool open = !body->isVisible();
+        body->setVisible(open);
+        updateGroupHeaders();
+    });
+    return wrap;
+}
+
+void StatusPage::setGroupOpen(QPushButton *toggle, QWidget *body, bool open)
+{
+    if (!body || body->isVisible() == open) return;
+    body->setVisible(open);
+    updateGroupHeaders();
+}
+
+void StatusPage::onBoardPartClicked(const QString &id)
+{
+    if (id.startsWith("gpu"))
+        setGroupOpen(m_gpuToggle, m_gpuBody, true);
+    else if (id.startsWith("m2") || id.startsWith("sata"))
+        setGroupOpen(m_diskToggle, m_diskBody, true);
+}
+
+// ── 容量字符串解析（"31.2Gi" / "100G" / "19.58 GiB"） ──
+static QPair<double, double> parseSize(const QString &s)
+{
+    const QString t = s.trimmed();
+    static QRegularExpression re(R"(^(\d+(?:\.\d+)?)\s*([KMGT]?i?B?)$)");
+    auto m = re.match(t);
+    if (!m.hasMatch()) return {-1.0, 1.0};
+
+    const double v = m.captured(1).toDouble();
+    const QString u = m.captured(2);
+    const double base = u.contains('i') ? 1024.0 : 1000.0;
+    double mult = 1.0;
+    if (u.startsWith("K"))      mult = base;
+    else if (u.startsWith("M")) mult = base * base;
+    else if (u.startsWith("G")) mult = base * base * base;
+    else if (u.startsWith("T")) mult = base * base * base * base;
+    return {v, mult};
+}
+
+double StatusPage::parseHumanSize(const QString &s)
+{
+    auto r = parseSize(s);
+    return r.first < 0.0 ? -1.0 : r.first * r.second;
+}
+
+double StatusPage::ratioOf(const QString &text)
+{
+    const QStringList p = text.split(" / ");
+    if (p.size() < 2) return -1.0;
+
+    auto a = parseSize(p[0]);
+    auto b = parseSize(p[1]);
+    if (a.first < 0.0 || b.first <= 0.0) return -1.0;
+    // 单位只写一次（如 "19.58 / 31.86 GiB"）时补成同一单位
+    if (a.second == 1.0 && b.second != 1.0) a.second = b.second;
+    else if (b.second == 1.0 && a.second != 1.0) b.second = a.second;
+    return (a.first * a.second) / (b.first * b.second);
+}
+
+// ── 把采集到的数据推送到主板画板 ──
+void StatusPage::syncBoard()
+{
+    if (!m_board) return;
+
+    m_board->setBoardInfo(m_lineVals.value(0, "—"), m_lineVals.value(1, "—"),
+                          m_lineVals.value(2, "—"));
+    m_board->setCpu(m_lineVals.value(3, "—"), m_lineVals.value(9, "—"));
+    m_board->setMemory(m_lineVals.value(4, "—"), ratioOf(m_lineVals.value(4, "—")));
+    m_board->setSwap(m_lineVals.value(5, "—"), ratioOf(m_lineVals.value(5, "—")));
+    m_board->setNetwork(m_lineVals.value(8, "—"));
+    m_board->setNvmeTemp(m_lineVals.value(10, "—"));
+
+    QVector<MotherboardWidget::DiskPart> disks;
+    for (const auto &d : m_diskRows) {
+        MotherboardWidget::DiskPart dp;
+        dp.name = d.name; dp.model = d.model; dp.size = d.size;
+        dp.used = d.used; dp.mount = d.mount; dp.temp = d.temp;
+        dp.nvme = d.nvme; dp.fill = d.fill;
+        disks.append(dp);
+    }
+    m_board->setDisks(disks);
+
+    QVector<MotherboardWidget::GpuPart> gpus;
+    for (int i = 0; i < m_gpus.size(); ++i) {
+        MotherboardWidget::GpuPart gp;
+        gp.name = QString("GPU%1").arg(i);
+        gp.model = m_gpus[i].model; gp.slot = m_gpus[i].slot;
+        gp.temp  = m_gpus[i].temp;  gp.sclk = m_gpus[i].sclk;
+        gp.vram  = m_gpus[i].vram;  gp.fan  = m_gpus[i].fan;
+        gp.fill  = ratioOf(m_gpus[i].vram);
+        gpus.append(gp);
+    }
+    m_board->setGpus(gpus);
+
+    updateGroupHeaders();
+}
+
+// ── 折叠标题上的摘要：收起时也能一眼看到关键数据 ──
+void StatusPage::updateGroupHeaders()
+{
+    auto chevron = [](QWidget *body) { return (body && body->isVisible()) ? "▾" : "▸"; };
+
+    QString dSum;
+    if (m_diskRows.isEmpty()) {
+        dSum = "未检测到磁盘";
+    } else {
+        int hot = -1;
+        double usedSum = 0, totalSum = 0;
+        for (const auto &d : m_diskRows) {
+            const int pos = d.temp.indexOf("°");
+            if (pos > 0) hot = qMax(hot, d.temp.left(pos).toInt());
+            const QStringList halves = d.used.split(" / ");
+            if (halves.size() == 2) {
+                usedSum += parseHumanSize(halves[0]);
+                totalSum += parseHumanSize(halves[1]);
+            }
+        }
+        dSum = QString("共 %1 块").arg(m_diskRows.size());
+        if (hot > 0) dSum += QString(" · 最高 %1°C").arg(hot);
+        if (totalSum > 0 && usedSum > 0)
+            dSum += QString(" · 已用 %1%").arg(100.0 * usedSum / totalSum, 0, 'f', 1);
+    }
+    if (m_diskToggle)
+        m_diskToggle->setText(QString("%1  磁盘状态  %2").arg(chevron(m_diskBody), dSum));
+
+    QString gSum;
+    if (m_gpus.isEmpty())
+        gSum = "未检测到显卡";
+    else
+        gSum = QString("共 %1 块 · %2 · %3").arg(m_gpus.size()).arg(m_gpus[0].model).arg(m_gpus[0].temp);
+    if (m_gpuToggle)
+        m_gpuToggle->setText(QString("%1  显卡温度  %2").arg(chevron(m_gpuBody), gSum));
+}
+
 
 void StatusPage::showEvent(QShowEvent *event)
 {
@@ -423,6 +600,12 @@ void StatusPage::fetchDiskTemp(const QString &devName, int tableRow)
             }
         }
         m_tempCache[cacheKey] = tempStr;
+
+        // 画板上的槽位温度同步
+        if (row >= 0 && row < m_diskRows.size()) {
+            m_diskRows[row].temp = tempStr;
+            syncBoard();
+        }
     });
     const QString smartctl = smartctlPath();
     if (smartctl.isEmpty()) {
@@ -921,6 +1104,7 @@ void StatusPage::fetchGpuTemps()
             m_gpuTable->setItem(0, 5, new QTableWidgetItem("—"));
             m_gpuTable->setItem(0, 6, new QTableWidgetItem("—"));
             setLine(11, "N/A");
+            syncBoard();
             return;
         }
 
@@ -953,6 +1137,7 @@ void StatusPage::fetchGpuTemps()
                 setLine(11, g.temp);
             m_gpus[i] = g;
         }
+        syncBoard();   // 主板上的 PCIe 槽位
     });
 }
 
@@ -1037,8 +1222,12 @@ void StatusPage::refresh()
     // NVMe temp via sensors
     runCmd("sh", {"-c", "sensors 2>/dev/null | grep 'Composite' | awk '{print $2}' | head -1"},
            [this](const QString &out) {
-               if (!out.isEmpty()) setLine(10, out);
-               else setLine(10, "N/A");
+               QString v = out.trimmed();
+               v.remove('+');   // sensors 形如 "+43.9°C"
+               if (!v.isEmpty())
+                   setLine(10, v.contains("°") ? v : QString("%1°C").arg(v));
+               else
+                   setLine(10, "N/A");
            });
 
     // GPU temp（概览行取第一块可用 GPU）
@@ -1112,6 +1301,22 @@ void StatusPage::refresh()
                 mountPath.isEmpty() ? "—" : mountPath));
         }
 
+        // 同步一份给主板画板（画板上的 M.2 / SATA 槽位）
+        m_diskRows.clear();
+        for (const auto &d : disks) {
+            DiskRow row;
+            row.name  = d.name;
+            row.model = d.model;
+            row.size  = d.size;
+            row.mount = d.mount;
+            row.nvme  = d.name.startsWith("nvme");
+            row.temp  = m_tempCache.value(d.name, "…");
+            row.used  = d.mount.isEmpty() ? "未挂载" : "…";
+            row.fill  = -1.0;
+            m_diskRows.append(row);
+        }
+        syncBoard();
+
         m_diskStatus->setText(QString("共 %1 块物理磁盘").arg(disks.size()));
 
         // 首次检测到磁盘后自动读取一次温度（含一次性免密授权）
@@ -1132,9 +1337,13 @@ void StatusPage::refresh()
                             if (lines.size() < 2) return;
                             auto p = lines[1].split(QRegularExpression("\\s+"));
                             if (p.size() >= 4) {
-                                m_diskTable->setItem(i, ColUsed,
-                                    new QTableWidgetItem(
-                                        QString("%1 / %2").arg(p[2], p[1])));
+                                const QString txt = QString("%1 / %2").arg(p[2], p[1]);
+                                m_diskTable->setItem(i, ColUsed, new QTableWidgetItem(txt));
+                                if (i < m_diskRows.size()) {
+                                    m_diskRows[i].used = txt;
+                                    m_diskRows[i].fill = ratioOf(txt);
+                                    syncBoard();
+                                }
                             }
                         });
                         break;

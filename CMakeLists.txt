@@ -13,6 +13,8 @@ add_executable(server-toolbox
     mainwindow.h
     statuspage.cpp
     statuspage.h
+    motherboardwidget.cpp
+    motherboardwidget.h
     scenepage.cpp
     scenepage.h
     scenedialog.cpp

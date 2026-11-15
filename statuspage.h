@@ -9,7 +9,10 @@
 #include <QProcess>
 #include <QHash>
 #include <QList>
+#include <QVector>
 #include <functional>
+
+#include "motherboardwidget.h"
 
 class QShowEvent;
 
@@ -24,6 +27,7 @@ private slots:
     void refresh();
     void fetchAllTemps();
     void onGpuContextMenu(const QPoint &pos);
+    void onBoardPartClicked(const QString &id);
 
 protected:
     void showEvent(QShowEvent *event) override;
@@ -34,6 +38,15 @@ private:
     void runCmd(const QString &cmd, const QStringList &args,
                 std::function<void(const QString &)> cb);
     void setLine(int row, const QString &val, const QString &suffix = QString());
+
+    // 主板画板 + 折叠分组
+    void syncBoard();                       // 把采集到的数据推送到画板
+    void updateGroupHeaders();              // 折叠标题上的摘要
+    void setGroupOpen(QPushButton *toggle, QWidget *body, bool open);
+    QWidget *makeCollapsible(const QString &title, QWidget *body, bool collapsed,
+                             QPushButton *&toggle);
+    static double parseHumanSize(const QString &s);   // "31.2Gi" / "100G" -> 字节
+    static double ratioOf(const QString &text);       // "12.3Gi / 31.2Gi" -> 使用率
 
     // smartctl 免密权限（借鉴 AI 方案：sudo -n smartctl）
     QString smartctlPath() const;                  // 查找当前系统的 smartctl 可执行文件
@@ -79,6 +92,19 @@ private:
     bool m_smartSetupAsked = false; // 每会话只询问一次
     bool m_smartSetupDone = false;  // 免密已配置成功
     QHash<QString, QString> m_tempCache; // 设备 -> 上次温度，供刷新时保留
+
+    QHash<int, QString> m_lineVals;      // 概览各行当前值，画板复用
+    MotherboardWidget *m_board = nullptr;
+
+    struct DiskRow {
+        QString name, model, size, used, mount, temp;
+        bool nvme = false;
+        double fill = -1.0;
+    };
+    QVector<DiskRow> m_diskRows;
+
+    QWidget *m_diskBody = nullptr;   QPushButton *m_diskToggle = nullptr;
+    QWidget *m_gpuBody = nullptr;    QPushButton *m_gpuToggle = nullptr;
 };
 
 #endif // STATUSPAGE_H

@@ -3,3 +3,4 @@ build/
 *.user
 moc_*
 proxy-rs/target/
+preview/
