@@ -1,6 +1,10 @@
 build/
-# AppImage 打包产物（单个 .AppImage 十几 MB，不进版本库）
+# AppImage 打包产物（单个 .AppImage 几十 MB，不进版本库）
 dist/
+# 方便取用而拷到仓库根目录的副本
+/*.AppImage
+# 打包用的干净 Release 目录（build/ 已忽略，这个是另一份）
+build-release/
 *.o
 *.user
 moc_*
