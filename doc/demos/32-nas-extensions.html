@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>NAS 面板样式 Demo · 2U 前面板 + SMB/iSCSI 导出</title>
+<style>
+/* ══════════════════════════════════════════════════════════════
+   2U 服务器前面板样式 Demo
+   色值全部取自 theme.h，保证确认后能 1:1 迁到 Qt：
+     bg #0b0f14  bgRaised #0e141b  surface #131a23  surface2 #1a2430
+     surface3 #202d3b  border #26333f  borderHi #33475b
+     text #e6edf3  dim #8b9bab  mute #5b6b7b
+     accent #38bdf8  accent2 #a78bfa  ok #4ade80  warn #fbbf24  bad #f87171
+     字体：正文 Noto Sans CJK SC；编号用 JetBrains Mono（机箱铭牌感）
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0b0f14; --bg-raised:#0e141b; --surface:#131a23; --surface2:#1a2430;
+  --surface3:#202d3b; --border:#26333f; --border-hi:#33475b;
+  --text:#e6edf3; --dim:#8b9bab; --mute:#5b6b7b;
+  --accent:#38bdf8; --accent2:#a78bfa; --on-accent:#04121c;
+  --ok:#4ade80; --warn:#fbbf24; --bad:#f87171; --info:#60a5fa;
+  --mono:"JetBrains Mono","DejaVu Sans Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:"Noto Sans CJK SC","PingFang SC","Microsoft YaHei",sans-serif;
+  font-size:13px; padding:26px; line-height:1.5;
+}
+h1{font-size:16px;font-weight:700;margin-bottom:4px}
+.sub{color:var(--mute);font-size:12px;margin-bottom:20px}
+
+/* ── 机箱：2U 机箱是宽扁的，比例约 3.2:1 ──
+   真实前面板从上到下的层次：耳朵(挂耳) → 面板本体 → 耳朵上的螺丝 */
+.chassis{
+  position:relative; width:100%; max-width:1120px;
+  background:linear-gradient(180deg,#161d26 0%,#0f151c 18%,#0c1117 100%);
+  border:1px solid #060a0e; border-radius:5px;
+  box-shadow:0 12px 40px rgba(0,0,0,.55),
+             inset 0 1px 0 rgba(255,255,255,.045);
+  padding:14px 56px;                 /* 左右留挂耳空间 */
+}
+/* 挂耳：机箱两端竖条，各带 2 颗螺丝（2U 是 4 颗固定螺丝） */
+.ear{
+  position:absolute; top:0; bottom:0; width:44px;
+  background:linear-gradient(90deg,#11171e,#0c1218);
+  border-right:1px solid #060a0e;
+}
+.ear.right{right:0;border-right:none;border-left:1px solid #060a0e;
+           background:linear-gradient(270deg,#11171e,#0c1218)}
+.ear.left{left:0}
+.screw{
+  position:absolute; left:50%; width:13px;height:13px;margin-left:-6.5px;
+  border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#4a5a6b,#1a232c 70%);
+  border:1px solid #05080b;
+  box-shadow:inset 0 1px 1px rgba(255,255,255,.18);
+}
+/* 十字槽 */
+.screw::before,.screw::after{
+  content:"";position:absolute;background:#0a0e12;border-radius:1px}
+.screw::before{left:50%;top:2.5px;width:1.5px;height:8px;margin-left:-.75px}
+.screw::after{top:50%;left:2.5px;height:1.5px;width:8px;margin-top:-.75px}
+.screw.t1{top:16px} .screw.t2{bottom:16px}
+
+/* ── 左侧控制区：真实 2U 在这里放电源键、指示 LED、VGA、UID 按钮 ── */
+.ctrl{
+  display:flex;flex-direction:column;gap:9px;
+  padding-right:16px;margin-right:16px;
+  border-right:1px solid #060a0e;
+}
+.pwr{
+  width:34px;height:34px;border-radius:50%;
+  background:radial-gradient(circle at 40% 35%,#243040,#141c26);
+  border:1px solid #05080b;
+  box-shadow:inset 0 1px 2px rgba(255,255,255,.12), 0 0 10px rgba(56,189,248,.16);
+  display:grid;place-items:center;color:var(--accent);font-size:15px;
+}
+.leds{display:flex;flex-direction:column;gap:5px}
+.led{display:flex;align-items:center;gap:6px;font-size:9px;color:var(--mute);
+     font-family:var(--mono);letter-spacing:.5px}
+.bulb{width:7px;height:7px;border-radius:50%;background:#1c2530;
+      border:1px solid #05080b;flex:none}
+.bulb.on{background:var(--ok);box-shadow:0 0 6px var(--ok),inset 0 0 2px #fff}
+.bulb.act{background:var(--warn);box-shadow:0 0 6px var(--warn);animation:blink 1.1s steps(1) infinite}
+.bulb.uid{background:var(--accent2);box-shadow:0 0 6px var(--accent2)}
+@keyframes blink{50%{opacity:.25}}
+/* UID 按钮：机架设备的"识别"按钮，亮起时前后板同步闪蓝 */
+.uid-btn{
+  width:34px;height:15px;border-radius:3px;
+  background:linear-gradient(180deg,#1b2532,#141b23);
+  border:1px solid #05080b;box-shadow:inset 0 1px 1px rgba(255,255,255,.07);
+  position:relative;
+}
+.uid-btn::after{
+  content:"UID";position:absolute;inset:0;display:grid;place-items:center;
+  font:600 7px/1 var(--mono);color:var(--accent2);letter-spacing:.5px}
+
+/* ── 盘位阵列：2U 常见 12×3.5"(2 行×6 列) 或 24×2.5"(2 行×12 列) ──
+   这里演示 12 盘位。真盘位是**横长条**，不是方块。 */
+.bays{flex:1;display:grid;grid-template-columns:repeat(6,1fr);
+      grid-template-rows:repeat(2,1fr);gap:7px}
+
+/* ── 单个硬盘托架（caddy）──
+   真实 hot-swap 托架的元素：
+     ① 扳手/释放把手（latch）—— 占托架左侧约 22%，可开合
+     ② 把手转轴 —— 上下各一个圆点
+     ③ 指纹/通风网孔 —— 中间区域
+     ④ 两个 LED：上=活动(activity 黄闪) 下=状态(status 绿/橙)
+     ⑤ 盘号标签
+   这里用竖版托架（Dell R740xd / HPE DL380 那一类：把手在上，LED 在右上）*/
+.bay{
+  position:relative; aspect-ratio:1/1.32;
+  background:linear-gradient(178deg,#1b232d 0%,#151c25 55%,#111820 100%);
+  border:1px solid #05080b; border-radius:3px;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.05),
+             inset 0 -2px 4px rgba(0,0,0,.45),
+             0 1px 2px rgba(0,0,0,.5);
+  cursor:grab; transition:transform .14s,box-shadow .14s,border-color .14s;
+  overflow:hidden;
+}
+.bay:hover{transform:translateY(-2px);border-color:var(--border-hi);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 6px 16px rgba(0,0,0,.6)}
+.bay:active{cursor:grabbing}
+
+/* ① 释放把手：上窄下宽的斜边，金属感 */
+.handle{
+  position:absolute;left:5%;right:5%;top:5%;height:26%;
+  background:linear-gradient(180deg,#2b3a4a,#1c2732);
+  border:1px solid #05080b;border-radius:2px;
+  box-shadow:inset 0 1px 1px rgba(255,255,255,.14),0 1px 2px rgba(0,0,0,.5);
+}
+/* 把手上的握持凹槽 */
+.handle::before{
+  content:"";position:absolute;left:16%;right:16%;top:34%;height:32%;
+  background:linear-gradient(180deg,#0d1319,#161f29);
+  border-radius:2px;box-shadow:inset 0 1px 2px rgba(0,0,0,.7);
+}
+/* ② 转轴：把手两端的小圆 */
+.pivot{position:absolute;width:5px;height:5px;border-radius:50%;
+  background:radial-gradient(circle at 35% 30%,#566a7c,#161f28);
+  border:1px solid #05080b;top:31%}
+.pivot.l{left:3%} .pivot.r{right:3%}
+
+/* ③ 通风网孔：三排长条，用 repeating-linear-gradient 表现冲孔网 */
+.vent{
+  position:absolute;left:9%;right:9%;top:38%;height:42%;border-radius:2px;
+  background:
+    repeating-linear-gradient(180deg,
+      rgba(0,0,0,.72) 0 2px, rgba(255,255,255,.028) 2px 4px),
+    linear-gradient(180deg,#0e141a,#0b1016);
+  box-shadow:inset 0 1px 3px rgba(0,0,0,.85);
+}
+
+/* ④ LED 组：真实托架是上下两个小灯，藏在塑料导光柱里 */
+.led-col{position:absolute;right:6%;top:34%;display:flex;
+         flex-direction:column;gap:4px;align-items:center}
+.drv-led{width:5px;height:5px;border-radius:1px;background:#151d26;
+         border:1px solid #04070a}
+.drv-led.act.on{background:var(--warn);box-shadow:0 0 5px var(--warn);
+                animation:blink .5s steps(1) infinite}
+.drv-led.st.on{background:var(--ok);box-shadow:0 0 5px var(--ok)}
+.drv-led.st.fault{background:var(--bad);box-shadow:0 0 5px var(--bad)}
+.drv-led.st.rebuild{background:var(--warn);box-shadow:0 0 5px var(--warn);
+                    animation:blink .8s ease-in-out infinite}
+
+/* ⑤ 盘号 */
+.slot{
+  position:absolute;left:8%;bottom:5%;font:700 9px/1 var(--mono);
+  color:var(--mute);letter-spacing:.5px;
+}
+
+/* 容量小字 */
+.cap{position:absolute;right:7%;bottom:6%;font:9px/1 var(--mono);color:var(--mute)}
+
+/* ── 状态语义（这是重点：面板要一眼看出盘在干什么）── */
+/* 空闲：整体压暗，不发光 */
+.bay.empty{opacity:.5;filter:saturate(.4)}
+/* 已选为阵列成员：主色描边 + 外发光 */
+.bay.member{border-color:var(--accent);
+  box-shadow:0 0 0 1px rgba(56,189,248,.45),0 0 14px rgba(56,189,248,.3),
+             inset 0 1px 0 rgba(255,255,255,.08)}
+.bay.member .slot{color:var(--accent)}
+/* 条带序号：成员盘的**右上角**标 RAID 条带顺序，这是 RAID0 最需要的信息 */
+.stripe{
+  position:absolute;right:6%;top:34%;
+  min-width:15px;height:15px;padding:0 3px;border-radius:3px;
+  background:var(--accent);color:var(--on-accent);
+  font:700 9px/15px var(--mono);text-align:center;
+  box-shadow:0 0 8px rgba(56,189,248,.5);
+}
+/* 故障/不可选：红色斜线带 + 红 LED */
+.bay.blocked{border-color:rgba(248,113,113,.55)}
+.bay.blocked .vent{opacity:.45}
+.bay.blocked .slot{color:var(--bad)}
+.bay.blocked::after{
+  content:"";position:absolute;inset:0;pointer-events:none;
+  background:repeating-linear-gradient(135deg,
+    transparent 0 8px,rgba(248,113,113,.11) 8px 16px);
+}
+/* 系统盘：锁标志，永远不可选 */
+.lock{position:absolute;right:6%;top:34%;font-size:11px;opacity:.75}
+/* 被阵列占用（已写入配置，非本次选择）：紫 */
+.bay.inUse{border-color:rgba(167,139,250,.5)}
+.bay.inUse .slot{color:var(--accent2)}
+
+/* ── 右侧：阵列状态条（相当于阵列卡的位置）── */
+.rail{
+  display:flex;align-items:center;gap:14px;margin-top:16px;
+  padding:11px 14px;background:var(--surface);
+  border:1px solid var(--border);border-radius:4px;
+}
+.rail .lbl{font:700 11px/1 var(--mono);letter-spacing:1px;color:var(--mute)}
+.rail .val{font:600 14px/1 var(--mono);color:var(--text)}
+.rail .val.good{color:var(--ok)} .rail .val.warn{color:var(--warn)}
+.rail .sep{width:1px;height:22px;background:var(--border)}
+.rail .hint{margin-left:auto;color:var(--mute);font-size:11px}
+
+.eng{
+  background:var(--surface2); color:var(--dim); cursor:pointer;
+  border:1px solid var(--border); border-radius:999px;
+  padding:5px 13px; font-size:11px; font-weight:600;
+  font-family:"Noto Sans CJK SC","PingFang SC",sans-serif;
+}
+.eng:hover{color:var(--text);border-color:var(--border-hi);background:var(--surface3)}
+.eng.on{background:var(--accent);color:var(--on-accent);border-color:var(--accent)}
+/* 底部图例 */
+.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;
+        font-size:11px;color:var(--mute)}
+.legend span{display:flex;align-items:center;gap:5px}
+.sw{width:9px;height:9px;border-radius:2px;border:1px solid var(--border)}
+
+/* ── 导出参数区 ─────────────────────────────────────────────
+   选 1 个分区时出现「导出方式」切换：SMB（文件共享）/ iSCSI（块）。
+   ≥2 个分区只能 iSCSI RAID，此时只显示 iSCSI 参数。 */
+.params{
+  max-width:1120px; margin-top:18px;
+  background:linear-gradient(180deg,var(--surface),var(--bg-raised));
+  border:1px solid var(--border); border-radius:8px; padding:16px 18px;
+}
+.params h3{font-size:13px;font-weight:700;margin-bottom:12px;
+  display:flex;align-items:center;gap:8px}
+.params h3 .tag{font:600 10px/1 var(--mono);letter-spacing:.5px;
+  color:var(--accent);background:rgba(56,189,248,.12);
+  border:1px solid rgba(56,189,248,.3);padding:3px 6px;border-radius:4px}
+
+/* 导出方式切换（仅单分区出现） */
+.modeswitch{display:flex;gap:0;margin-bottom:16px;border:1px solid var(--border);
+  border-radius:7px;overflow:hidden;width:fit-content}
+.modeswitch button{background:transparent;border:none;color:var(--dim);
+  font:600 12px/1 var(--mono);padding:9px 16px;cursor:pointer;
+  border-right:1px solid var(--border);transition:.15s}
+.modeswitch button:last-child{border-right:none}
+.modeswitch button.on{background:var(--accent);color:var(--on-accent)}
+.modeswitch button:disabled{opacity:.35;cursor:not-allowed}
+
+/* 表单 */
+.form{display:grid;grid-template-columns:96px 1fr;gap:10px 14px;align-items:center;max-width:640px}
+.form label{color:var(--dim);font-size:12px;text-align:right}
+.form .fld{display:flex;flex-direction:column;gap:4px}
+.form input[type=text],.form select{
+  background:var(--bg);border:1px solid var(--border);border-radius:5px;
+  color:var(--text);font-family:var(--mono);font-size:12px;padding:7px 9px;outline:none}
+.form input[type=text]:focus,.form select:focus{border-color:var(--accent)}
+.form .note{color:var(--mute);font-size:11px;line-height:1.4}
+.form .check{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:12px}
+.form input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px}
+
+/* 危险提示：guest 可写 / 系统路径 */
+.danger{border:1px solid var(--bad);background:rgba(248,113,113,.08);
+  border-radius:6px;padding:10px 12px;color:#fecaca;font-size:12px;line-height:1.5;
+  max-width:640px;margin-top:10px;display:none}
+.danger.show{display:block}
+.danger b{color:var(--bad)}
+
+.hide{display:none !important}
+
+/* ── 导出参数包一层标签页 ───────────────────────────── */
+.exTabs {
+  display: flex; gap: 2px; margin: -6px -18px 16px;
+  padding: 0 18px; border-bottom: 1px solid var(--border);
+}
+.exTab {
+  appearance: none; background: none; border: none;
+  border-bottom: 2px solid transparent;
+  padding: 9px 14px 8px; cursor: pointer;
+  font: 500 12.5px/1 var(--mono); letter-spacing: .02em;
+  color: var(--mute); display: flex; align-items: center; gap: 7px;
+}
+.exTab:hover { color: var(--dim); }
+.exTab.on { color: var(--accent); border-bottom-color: var(--accent); }
+.exTab .cnt {
+  font-size: 10px; padding: 1px 5px; border-radius: 8px;
+  background: var(--surface3); color: var(--dim);
+}
+.exTab.on .cnt { background: rgba(56,189,248,.16); color: var(--accent); }
+.exPanel { display: none; }
+.exPanel.on { display: block; }
+
+/* ── 扩展服务卡片 ───────────────────────────────────── */
+.extList { display: flex; flex-direction: column; gap: 10px; }
+.extCard {
+  display: grid; grid-template-columns: 34px 1fr auto; gap: 13px;
+  align-items: start; padding: 13px 14px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.extCard.ready { border-color: rgba(74,222,128,.3); }
+.extCard.locked { opacity: .72; }
+.extIcon {
+  width: 34px; height: 34px; border-radius: 7px;
+  display: grid; place-items: center;
+  background: var(--surface2); border: 1px solid var(--border);
+  font-size: 15px;
+}
+.extName { font: 600 13px/1.3 var(--mono); color: var(--text); }
+.extDesc { font: 400 11.5px/1.55 var(--mono); color: var(--dim); margin-top: 4px; }
+.extMeta { font: 400 10.5px/1.5 var(--mono); color: var(--mute); margin-top: 6px; }
+.extState { text-align: right; }
+.pill {
+  display: inline-block; font: 500 10px/1 var(--mono);
+  padding: 4px 8px; border-radius: 4px; letter-spacing: .04em;
+}
+.pill.run { background: rgba(74,222,128,.14); color: var(--ok); }
+.pill.gap { background: rgba(251,191,36,.14); color: var(--warn); }
+.pill.off { background: var(--surface3); color: var(--mute); }
+.pill.bad { background: rgba(248,113,113,.14); color: var(--bad); }
+
+/* 依赖检查：缺什么一目了然，不假装能跑 */
+.deps { margin-top: 10px; display: flex; flex-wrap: wrap; gap: 6px; }
+.dep {
+  font: 400 10.5px/1 var(--mono); padding: 4px 7px; border-radius: 4px;
+  background: var(--surface2); border: 1px solid var(--border); color: var(--mute);
+}
+.dep.has { border-color: rgba(74,222,128,.35); color: var(--ok); }
+.dep.miss { border-color: rgba(248,113,113,.35); color: var(--bad); }
+.cmd {
+  display: block; margin-top: 8px; padding: 7px 9px;
+  background: #0a0e13; border: 1px solid var(--border); border-radius: 5px;
+  font: 400 10.5px/1.5 var(--mono); color: var(--dim);
+  white-space: pre-wrap; word-break: break-all;
+}
+.cmd b { color: var(--accent); font-weight: 500; }
+
+/* 索引结果表 */
+.idx { margin-top: 12px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.idx table { width: 100%; border-collapse: collapse; }
+.idx th {
+  text-align: left; padding: 7px 10px; background: var(--surface2);
+  font: 500 10px/1 var(--mono); color: var(--mute);
+  letter-spacing: .06em; border-bottom: 1px solid var(--border);
+}
+.idx td {
+  padding: 8px 10px; font: 400 11px/1.45 var(--mono);
+  border-bottom: 1px solid var(--border); color: var(--text); vertical-align: top;
+}
+.idx tr:last-child td { border-bottom: none; }
+.idx td.dim { color: var(--dim); }
+.idx td.mut { color: var(--mute); }
+.unverified {
+  margin-top: 9px; padding: 8px 10px; border-radius: 5px;
+  background: rgba(167,139,250,.08); border: 1px solid rgba(167,139,250,.28);
+  font: 400 10.5px/1.6 var(--mono); color: var(--accent2);
+}
+
+</style>
+</head>
+<body>
+
+<h1>NAS 面板 · 2U 前面板样式 Demo</h1>
+<div class="sub">
+  拖动盘位把它"插入"阵列；点已选中的盘可拔出。样式确认后我照这个改 Qt 的 NasBoardWidget。
+  · 选 1 个分区时可切换到 SMB 文件共享</div>
+
+<div class="chassis">
+  <div class="ear left"><div class="screw t1"></div><div class="screw t2"></div></div>
+  <div class="ear right"><div class="screw t1"></div><div class="screw t2"></div></div>
+
+  <div style="display:flex;align-items:stretch">
+    <div class="ctrl">
+      <div class="pwr">⏻</div>
+      <div class="leds">
+        <div class="led"><i class="bulb on"></i>PWR</div>
+        <div class="led"><i class="bulb act"></i>HDD</div>
+        <div class="led"><i class="bulb uid"></i>UID</div>
+      </div>
+      <div class="uid-btn"></div>
+    </div>
+
+    <div style="flex:1;display:flex;flex-direction:column;gap:10px">
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="eng" id="engMdadm">mdadm（内核 RAID，会抹分区）</button>
+        <button class="eng" id="engNasrs">nasrs（自家 RAID0，只写文件）</button>
+        <span style="color:var(--mute);font-size:11px;margin-left:auto" id="engNote"></span>
+      </div>
+      <div class="bays" id="bays"></div>
+    </div>
+  </div>
+</div>
+
+<div class="rail">
+  <div class="lbl">ARRAY</div><div class="val" id="aName">—</div>
+  <div class="sep"></div>
+  <div class="lbl">LEVEL</div><div class="val">RAID0</div>
+  <div class="sep"></div>
+  <div class="lbl">MEMBERS</div><div class="val" id="aCnt">0</div>
+  <div class="sep"></div>
+  <div class="lbl">USABLE</div><div class="val warn" id="aCap">—</div>
+  <div class="hint" id="hint">拖动盘位加入阵列</div>
+</div>
+
+<div class="legend">
+  <span><i class="sw" style="border-color:var(--accent);box-shadow:0 0 6px rgba(56,189,248,.5)"></i>本次选为成员</span>
+  <span><i class="sw" style="background:var(--accent2);opacity:.6"></i>已在阵列中</span>
+  <span><i class="sw" style="background:var(--bad);opacity:.5"></i>不可选（系统盘/已挂载/已损坏）</span>
+  <span><i class="sw" style="background:var(--warn)"></i>重建中</span>
+  <span>🔒 系统盘，永不可选</span>
+
+<div class="exTabs" id="exTabs">
+  <button class="exTab on" data-tab="svc">导出服务</button>
+  <button class="exTab" data-tab="ext">扩展服务 <span class="cnt" id="extCnt">1</span></button>
+</div>
+<div class="params" id="params">
+  <div class="exPanel on" id="panelSvc">
+  <h3><span class="tag" id="pTag">SMB</span><span id="pTitle">文件共享参数</span></h3>
+
+  <!-- 导出方式切换：仅当恰好选了 1 个分区时可用 -->
+  <div class="modeswitch" id="modeSwitch">
+    <button id="mSmb">SMB 文件共享</button>
+    <button id="mIscsi">iSCSI 块存储</button>
+  </div>
+  <div class="note" id="modeNote" style="color:var(--mute);font-size:11px;margin-bottom:14px"></div>
+
+  <!-- SMB 参数 -->
+  <div class="form" id="smbForm">
+    <label>共享名</label>
+    <div class="fld"><input type="text" id="smbName" value="nas-share"></div>
+
+    <label>共享路径</label>
+    <div class="fld"><input type="text" id="smbPath" value="/mnt/d"></div>
+
+    <label>访问方式</label>
+    <div class="fld">
+      <select id="smbAuth">
+        <option value="pwd">需账号密码（推荐）</option>
+        <option value="ro">匿名只读</option>
+        <option value="rw">匿名可写（危险）</option>
+      </select>
+    </div>
+
+    <label>映射用户</label>
+    <div class="fld">
+      <input type="text" id="smbUser" value="cody">
+      <div class="note">Samba 以此 Linux 用户的权限读写文件；需先 smbpasswd -a 设过 Samba 密码</div>
+    </div>
+
+    <label>可写</label>
+    <div class="fld"><div class="check"><input type="checkbox" id="smbWrite" checked> 允许写入（只读共享请取消）</div></div>
+  </div>
+
+  <!-- iSCSI 参数 -->
+  <div class="form hide" id="iscsiForm">
+    <label>卷名</label>
+    <div class="fld"><input type="text" id="iqName" value="nas-data"></div>
+    <label>条带粒度</label>
+    <div class="fld"><input type="text" id="iqChunk" value="512 KiB"></div>
+    <label>iSCSI IQN</label>
+    <div class="fld"><input type="text" id="iqIqn" value="iqn.2026-11.local:servertoolbox-01"></div>
+    <label>监听地址</label>
+    <div class="fld">
+      <input type="text" id="iqPortal" value="192.168.1.10" placeholder="本机内网地址">
+      <div class="note">LIO 只认 initiator IQN；要限网段需另配 nftables</div>
+    </div>
+    <label></label>
+    <div class="fld"><div class="check"><input type="checkbox" id="iqAnon"> 允许未登记 IQN 的发起端（仅调试）</div></div>
+  </div>
+
+  <!-- 危险提示：guest 可写 / 命中系统路径 -->
+  <div class="danger" id="smbDanger"></div>
+  </div>
+
+  <!-- ══════════ 扩展服务 ══════════ -->
+  <div class="exPanel" id="panelExt">
+    <div class="note" style="color:var(--mute);font-size:11px;margin-bottom:12px">
+      扩展服务是可选的独立能力，关掉不影响导出。每台服务都先做依赖检查：
+      <b style="color:var(--dim)">缺的东西会直接说缺，不显示假的运行状态。</b>
+    </div>
+    <div class="extList">
+
+      <div class="extCard locked" id="cardTv">
+        <div class="extIcon">📺</div>
+        <div>
+          <div class="extName">电视墙</div>
+          <div class="extDesc">
+            扫描挂载分区里的影视文件，建立<b style="color:var(--dim)">只读</b>索引：
+            按文件名猜标题/年份/季集，读取已有 <code>nfo</code> 里的真实元数据。
+            不重命名、不删除、不移动任何媒体文件。
+          </div>
+          <div class="extMeta">
+            扫描根：<span id="tvRoot">（跟随上方所选分区）</span>
+            &nbsp;·&nbsp; 已索引 <span id="tvCount">0</span> 项
+          </div>
+          <div class="deps" id="tvDeps"></div>
+          <div class="idx" id="tvIdx" style="display:none">
+            <table>
+              <thead><tr>
+                <th style="width:30%">标题 / 年份</th>
+                <th style="width:20%">季集</th>
+                <th style="width:16%">元数据来源</th>
+                <th>文件名</th>
+              </tr></thead>
+              <tbody id="tvBody"></tbody>
+            </table>
+          </div>
+          <div class="unverified" id="tvNote"></div>
+        </div>
+        <div class="extState">
+          <span class="pill off" id="tvPill">未索引</span>
+          <div style="margin-top:9px; display:flex; flex-direction:column; gap:6px">
+            <button class="btn" id="tvScan" style="font-size:11px;padding:6px 11px">扫描此分区</button>
+            <button class="btn" id="tvExport" disabled style="font-size:11px;padding:6px 11px">导出 SMB 供电视读取</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="extCard locked">
+        <div class="extIcon">🎞</div>
+        <div>
+          <div class="extName">接外部媒体服务（Jellyfin / Emby）</div>
+          <div class="extDesc">
+            本工具<b style="color:var(--bad)">不实现</b> Jellyfin 的 REST API —— 那套协议是
+            Jellyfin 自己实现的东西，自研等于重写一个媒体服务器。
+            这里只负责把索引结果与 SMB 共享准备好，交给真正的媒体服务。
+          </div>
+          <div class="deps" id="jfDeps"></div>
+          <code class="cmd" id="jfCmd"></code>
+        </div>
+        <div class="extState">
+          <span class="pill bad">未安装</span>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+</div>
+
+<script>
+// 模拟本机真实设备（对应 lsblk 的 sda/sdb/nvme0n1）
+const DISKS = [
+  {n:0, name:"sda1",  size:3.64, st:"free"},
+  {n:1, name:"sdb1",  size:5.46, st:"free"},
+  {n:2, name:"nvme0n1p2", size:0.237, st:"sys",  reason:"系统盘"},
+  {n:3, name:"sdc1",  size:8.0,  st:"inUse", array:"nas-data"},
+  {n:4, name:"sdd1",  size:8.0,  st:"inUse", array:"nas-data"},
+  {n:5, name:"sde1",  size:2.0,  st:"fault", reason:"SMART 告警"},
+  {n:6, name:"sdf1",  size:4.0,  st:"free"},
+  {n:7, name:"sdg1",  size:4.0,  st:"mounted", reason:"已挂载 /mnt/x"},
+  {n:8, name:"sr0",   size:0,    st:"empty"},
+  {n:9, name:"sdh1",  size:16.0, st:"free"},
+  {n:10,name:"sdi1",  size:16.0, st:"free"},
+  {n:11,name:"md0",   size:0,    st:"empty"},
+];
+let engine = "mdadm";
+let picked = [];
+
+const box = document.getElementById("bays");
+DISKS.forEach(d=>{
+  const el = document.createElement("div");
+  el.className = "bay";
+  // 可用性取决于当前引擎，与 Qt 的 judge() 同一套规则：
+  //   mdadm 会抹分区 → 已挂载不可选
+  //   nasrs 往已有文件系统写文件 → 已挂载反而是前提
+  const isBlocked = () => {
+    if (d.st==="sys" || d.st==="fault" || d.st==="empty") return true;
+    if (d.st==="mounted") return engine === "mdadm";
+    return false;
+  };
+  if (d.st==="empty")  el.classList.add("empty");
+  if (d.st==="inUse")  el.classList.add("inUse");
+  // inUse 是"已被别的阵列占用"，不是故障 → 用紫色，不叠红斜纹
+  if (isBlocked() && d.st!=="inUse") el.classList.add("blocked");
+
+  let topRight = "";
+  if (d.st==="sys")     topRight = '<div class="lock">🔒</div>';
+  else if (d.st==="fault")   topRight = '<div class="led-col"><i class="drv-led st fault on"></i><i class="drv-led"></i></div>';
+  else if (d.st==="inUse")   topRight = '<div class="led-col"><i class="drv-led st on rebuild"></i><i class="drv-led act on"></i></div>';
+  else if (d.st==="free")    topRight = '<div class="led-col"><i class="drv-led st"></i><i class="drv-led act"></i></div>';
+  else                       topRight = '<div class="led-col"><i class="drv-led"></i><i class="drv-led"></i></div>';
+
+  el.innerHTML = `
+    <div class="handle"></div>
+    <div class="pivot l"></div><div class="pivot r"></div>
+    <div class="vent"></div>
+    ${topRight}
+    <div class="slot">${String(d.n+1).padStart(2,"0")}</div>
+    <div class="cap">${d.size? d.size+"T" : "--"}</div>`;
+  el.title = d.name + (d.reason ? "\n" + d.reason : "");
+  el.dataset.n = d.n;
+
+  el.addEventListener("click", ()=>{
+    if (isBlocked()){
+      show("hint", "盘 " + (d.n+1) + " 不可用：" + (d.reason||"空位"), true); return;
+    }
+    const i = picked.indexOf(d.n);
+    if (i >= 0) picked.splice(i,1);
+    else if (picked.length < 8) picked.push(d.n);
+    else { show("hint","RAID0 最多 8 个成员", true); return; }
+    render();
+  });
+  box.appendChild(el);
+});
+
+function fmt(t){ return t >= 1 ? t.toFixed(2)+" TiB" : (t*1024).toFixed(0)+" GiB"; }
+function show(id,t,bad){
+  const e = document.getElementById(id);
+  e.textContent = t;
+  e.style.color = bad ? "var(--bad)" : "";
+}
+
+function render(){
+  document.querySelectorAll(".bay").forEach(el=>{
+    const n = +el.dataset.n;
+    const d = DISKS[n];
+    el.querySelectorAll(".stripe").forEach(x=>x.remove());
+    // 引擎切换后可用性会变，重画斜纹
+    const bad = (d.st==="sys"||d.st==="fault"||d.st==="empty")
+             || (d.st==="mounted" && engine==="mdadm");
+    el.classList.toggle("blocked", bad && d.st!=="inUse");
+    const idx = picked.indexOf(n);
+    if (idx < 0){ el.classList.remove("member"); return; }
+    el.classList.add("member");
+    // 条带序号画在盘上：RAID0 写的时候是 0,1,2,3… 轮流下发，
+    // 顺序直接决定数据落在哪个盘，所以必须可见
+    const s = document.createElement("div");
+    s.className = "stripe"; s.textContent = idx;
+    el.appendChild(s);
+  });
+  document.getElementById("aCnt").textContent = picked.length;
+  const nm = document.getElementById("aName");
+  const cap = document.getElementById("aCap");
+  if (!picked.length){ nm.textContent="—"; cap.textContent="—"; syncParams(); return; }
+  nm.textContent = "nas-data";
+  if (picked.length === 1){
+    cap.textContent = fmt(DISKS[picked[0]].size);
+    cap.className = "val warn";
+    show("hint","单盘不算 RAID，等同直连", true); syncParams(); return;
+  }
+  // RAID0 可用 = 最小成员 × 成员数（不是求和！）
+  const sizes = picked.map(i=>DISKS[i].size);
+  const min = Math.min(...sizes);
+  const usable = min*picked.length, waste = sizes.reduce((a,b)=>a+b,0)-usable;
+  cap.textContent = fmt(usable);
+  cap.className = "val " + (waste > 0.01 ? "warn" : "good");
+  show("hint", waste > 0.01
+    ? "按最小的 "+fmt(min)+" 计，多出的 "+fmt(waste)+" 用不上"
+    : picked.length+" 路条带，容量等长无浪费");
+  syncParams();
+  lastPicked = picked.length;   // 记录本帧成员数，供下帧判断是否刚从多盘掉到 1
+}
+function setEngine(e){
+  engine = e;
+  document.getElementById("engMdadm").classList.toggle("on", e==="mdadm");
+  document.getElementById("engNasrs").classList.toggle("on", e==="nasrs");
+  document.getElementById("engNote").textContent = e==="mdadm"
+    ? "抹分区 → 已挂载的盘不可选" : "写文件 → 已挂载的盘才可用";
+  // 换引擎后原选中盘可能变不可用，必须清掉，否则会生成非法方案
+  picked = picked.filter(i => {
+    const s = DISKS[i].st;
+    return !(s==="sys"||s==="fault"||s==="empty"||(s==="mounted"&&e==="mdadm"));
+  });
+  render();
+}
+
+// ── 导出方式：单分区可切 SMB / iSCSI，≥2 个只能 iSCSI ──────────
+let exportMode = "iscsi";
+
+// 上一帧的成员数。只有 [刚从 >1 掉到 1] 这一跳变才自动切 SMB；
+// 不能写成 [只要等于 1 就切]，否则改引擎下拉框（成员数不变）也会
+// 把用户显式选的 iSCSI 强翻成 SMB，等于和用户抢方向盘。
+let lastPicked = 0;   // 默认 iSCSI（与现网行为一致）
+
+// 这些挂载点视为"系统/敏感路径"，共享要红字强确认。
+// 与 nasmodel::isRiskySharePath 同一套口径。
+const SYS_MOUNTS = ["/", "/boot", "/home", "/boot/efi"];
+function isRiskyPath(p){
+  p = (p||"").trim();
+  if(!p) return true;
+  if(p === "/") return true;
+  for(const m of SYS_MOUNTS){
+    if(m === "/") continue;              // 根单独判，否则 startsWith('/') 命中一切
+    if(p === m) return true;
+    if(p.startsWith(m + "/")) return true;
+    if(m.startsWith(p + "/")) return true;
+  }
+  return false;
+}
+
+function syncParams(){
+  const n = picked.length;
+  const sw = document.getElementById("modeSwitch");
+  // 只有恰好 1 个分区才允许 SMB
+  if(n === 1){
+    sw.classList.remove("hide");
+    document.getElementById("mSmb").disabled = false;
+    // 刚从多盘减到单盘 -> 主动切 SMB。触发条件用 lastPicked>1，
+    // 不是 [当前==1 就切]：这样切引擎下拉（成员数不变）不会误触发。
+    if(exportMode !== "smb" && lastPicked > 1)
+      show("hint", "只剩 1 个分区，已切到 SMB 文件共享（可手动切回 iSCSI）");
+    setMode(exportMode === "smb" || lastPicked > 1 ? "smb" : "iscsi");
+    document.getElementById("modeNote").textContent =
+      "选中的是单个分区：可走 SMB（文件级，最常用）或 iSCSI（块级）。";
+  } else {
+    // 0 个 或 ≥2 个：只能 iSCSI，SMB 按钮禁用并说明原因
+    if(n === 0) document.getElementById("modeNote").textContent =
+      "先在上方点选分区。选 1 个可切 SMB，选 ≥2 个做 iSCSI RAID0。";
+    else document.getElementById("modeNote").textContent =
+      "已选 "+n+" 个分区：多盘只能做 iSCSI RAID（SMB 不跨盘条带）。";
+    document.getElementById("mSmb").disabled = true;
+    setMode("iscsi");
+  }
+}
+
+function setMode(m){
+  exportMode = m;
+  document.getElementById("mSmb").classList.toggle("on", m==="smb");
+  document.getElementById("mIscsi").classList.toggle("on", m==="iscsi");
+  document.getElementById("smbForm").classList.toggle("hide", m!=="smb");
+  document.getElementById("iscsiForm").classList.toggle("hide", m!=="iscsi");
+  document.getElementById("pTag").textContent = m==="smb" ? "SMB" : "iSCSI";
+  document.getElementById("pTitle").textContent = m==="smb" ? "文件共享参数" : "iSCSI 参数";
+  // SMB 段名沿用卷名，保持两处一致
+  if(m==="smb"){
+    const sel = DISKS[picked[0]];
+    if(sel){
+      document.getElementById("smbPath").value = "/mnt/" + sel.name.replace(/[^a-z0-9]/gi,"").slice(-1);
+    }
+  }
+  refreshDanger();
+}
+
+// 危险提示：guest 可写、或路径命中系统挂载 → 红字
+function refreshDanger(){
+  const box = document.getElementById("smbDanger");
+  if(exportMode !== "smb"){ box.classList.remove("show"); return; }
+  const auth = document.getElementById("smbAuth").value;
+  const path = document.getElementById("smbPath").value;
+  const rw = document.getElementById("smbWrite").checked;
+  const msgs = [];
+  if(auth === "rw") msgs.push("<b>匿名可写</b>：局域网内任何设备无需密码即可写入/删除这里的文件。");
+  if(auth === "ro") msgs.push("匿名只读：局域网内任何设备都能浏览并下载，无需密码。");
+  if(auth === "pwd" && rw) msgs.push("可写共享：拿到账号密码的设备能写入。请确认映射用户 <b>"+document.getElementById("smbUser").value+"</b> 确实是你要授权的人。");
+  if(isRiskyPath(path)) msgs.push("路径 <b>"+(path||"(空)")+"</b> 命中系统/家目录挂载点，会暴露不该暴露的内容。");
+  if(msgs.length){ box.innerHTML = "⚠ " + msgs.join("<br>⚠ "); box.classList.add("show"); }
+  else box.classList.remove("show");
+}
+
+document.getElementById("mSmb").onclick = (e)=>{ if(!e.currentTarget.disabled) setMode("smb"); };
+document.getElementById("mIscsi").onclick = ()=> setMode("iscsi");
+["smbAuth","smbPath","smbWrite","smbUser"].forEach(id=>
+  document.getElementById(id).addEventListener("input", refreshDanger));
+
+document.getElementById("engMdadm").onclick = ()=>setEngine("mdadm");
+document.getElementById("engNasrs").onclick = ()=>setEngine("nasrs");
+setEngine("mdadm");
+
+// ── 扩展服务：电视墙 ───────────────────────────────────────
+// 与 C++ 侧 Nas::guessFromFileName / Nas::parseNfo 同一套规则。
+// 这里是 JS 演示版；真实实现在 nasmodel.cpp，由 media_probe 断言覆盖。
+
+// 依赖检查照搬本机实测结果：没装就是没装，不猜。
+const TV_DEPS = [
+  { name: 'ffmpeg',     has: false, why: '缩略图/时长' },
+  { name: 'ffprobe',    has: false, why: '容器与流信息' },
+  { name: 'TMDB 可达',  has: false, why: '在线刮削（实测不可达）' },
+  { name: 'omdb API key', has: false, why: '实测返回 No API key provided' },
+];
+const JF_DEPS = [
+  { name: 'jellyfin', has: false, why: '媒体服务器本体' },
+  { name: 'docker',   has: false, why: '备选部署方式' },
+];
+
+function renderDeps(el, deps) {
+  var html = '';
+  for (var i = 0; i < deps.length; i++) {
+    var d = deps[i];
+    html += '<span class="dep ' + (d.has ? 'has' : 'miss') + '">' +
+            (d.has ? '✓ ' : '✗ ') + d.name + ' · ' + d.why + '</span>';
+  }
+  el.innerHTML = html;
+}
+// 文件名 → 标题/年份/季集。与 C++ 侧同规则：
+// 年份取最后一个独立四位数（'Blade.Runner.2049.2017' 的年份是 2017）。
+function guessName(file) {
+  let base = file.replace(/^.*\//, '').replace(/\.[^.]+$/, '');
+  let year = 0;
+  const ys = [...base.matchAll(/(?<![0-9])(19[0-9]{2}|20[0-9]{2})(?![0-9])/g)];
+  if (ys.length) year = parseInt(ys[ys.length - 1][1], 10);   // 最后一个
+  let season = 0, episode = 0;
+  const se = base.match(/[Ss](\d{1,2})[\s._-]*[Ee](\d{1,3})/);
+  if (se) { season = +se[1]; episode = +se[2]; }
+  else {
+    const x = base.match(/(?<![0-9])(\d{1,2})[xX](\d{1,3})(?![0-9])/);
+    if (x) { season = +x[1]; episode = +x[2]; }
+  }
+  let cut = base.length;
+  if (se) cut = Math.min(cut, se.index);
+  if (ys.length) cut = Math.min(cut, ys[ys.length - 1].index);
+  let title = base.slice(0, cut).replace(/[._]+/g, ' ').replace(/[\s\-\(\[]+$/, '').trim();
+  return { title, year, season, episode };
+}
+
+// nfo 解析：有 title 才算成功。只有 id 没标题的 nfo 必须算失败，
+// 否则界面会出现一张空白卡片假装'已刮削'。
+function parseNfo(xml) {
+  if (!xml || xml.indexOf('<') < 0) return { ok: false };
+  const tag = (t) => {
+    const a = xml.indexOf('<' + t + '>');
+    if (a < 0) return '';
+    const b = xml.indexOf('</' + t + '>', a);
+    if (b < 0) return '';
+    return xml.slice(a + t.length + 2, b).trim();
+  };
+  const title = tag('title');
+  return {
+    ok: title.length > 0, title,
+    year: (parseInt(tag('premiered'), 10) || parseInt(tag('year'), 10) || 0),
+    season: parseInt(tag('season'), 10) || 0,
+    episode: parseInt(tag('episode'), 10) || 0,
+  };
+}
+
+// 演示数据：真实扫描在 C++ 侧；这里给一份能体现三种状态的样本。
+// 「已索引但元数据未知」是刻意保留的，不是遗漏。
+const TV_SAMPLES = [
+  { file: '/mnt/d/Video/The.Expanse.S03E05.1080p.WEB.h264.mkv', size: '2.1 GB', nfo: null },
+  { file: '/mnt/d/Video/Blade.Runner.2049.2017.2160p.HDR.x265.mkv', size: '68 GB', nfo: null },
+  { file: '/mnt/d/Video/Big.Buck.Bunny.2008.mkv', size: '270 MB',
+    nfo: '<movie><title>Big Buck Bunny</title><premiered>2008-05-13</premiered></movie>' },
+  // 这一条没有季集标记：必须显示「未知」，不能编一个 S01E01
+  { file: '/mnt/d/Video/IMG_20240115_112233.mp4', size: '88 MB', nfo: null },
+  // 源码文件：.ts 歧义的活样本，扫描后不该出现
+  { file: '/mnt/d/Strata/apps/host/vite.config.ts', size: '3 KB', ts: true },
+];
+
+function runTvScan() {
+  var rows = [];
+  for (var i = 0; i < TV_SAMPLES.length; i++) {
+    var s = TV_SAMPLES[i];
+    // .ts 歧义：小文件判为源码，跳过。这是本机实测踩过的坑
+    //（vite.config.ts 曾被当成视频列进候选）。
+    if (s.ts) continue;
+    var g = guessName(s.file);
+    var n = s.nfo ? parseNfo(s.nfo) : { ok: false };
+    var use = n.ok ? n : g;
+    var title = n.ok ? n.title : (g.title || '（无法从文件名判断）');
+    var year = (n.ok && n.year) ? n.year : g.year;
+    var se = '—';
+    if (use.season || use.episode)
+      se = 'S' + String(use.season).padStart(2, '0') + 'E' + String(use.episode).padStart(2, '0');
+    // 元数据来源必须如实标：把「文件名推断」包装成「已刮削」是骗人
+    var src = n.ok ? '本地 nfo' : (g.title ? '文件名推断' : '未识别');
+    var cls = n.ok ? 'dim' : 'mut';
+    rows.push('<tr><td>' + title +
+      (year ? ' <span class="mut">(' + year + ')</span>' : '') + '</td>' +
+      '<td class="' + (se === '—' ? 'mut' : 'dim') + '">' + se + '</td>' +
+      '<td class="' + cls + '">' + src + '</td>' +
+      '<td class="mut">' + s.file.replace(/^.*\//, '') + ' · ' + s.size + '</td></tr>');
+  }
+  document.getElementById('tvBody').innerHTML = rows.join('');
+  document.getElementById('tvIdx').style.display = 'block';
+  document.getElementById('tvCount').textContent = rows.length;
+  var pill = document.getElementById('tvPill');
+  pill.textContent = '已索引';
+  pill.className = 'pill run';
+  document.getElementById('cardTv').classList.remove('locked');
+  document.getElementById('tvExport').disabled = false;
+  // 未验证的部分写明白，不含糊
+  document.getElementById('tvNote').innerHTML =
+    '标 ' + "'文件名推断'" + ' 的条目<b>未经任何在线校验</b>：本机 ' +
+    "'TMDB 不可达'" + '，omdb 需要 API key（实测返回 No API key provided）。' +
+    '标题与年份可能与实际不符；季集判断不了时显示 ' + "'—'" +
+    '，不编一个 S01E01 出来。' +
+    '<br>本机无 ffmpeg：本轮不生成缩略图与时长，也不显示假封面。';
+}
+
+// ── 标签页切换 ──────────────────────────────────────────
+document.querySelectorAll('.exTab').forEach(function (e) {
+  e.onclick = function () {
+    const t = e.currentTarget.dataset.tab;
+    document.querySelectorAll('.exTab').forEach(function (b) {
+      b.classList.toggle('on', b.dataset.tab === t);
+    });
+    document.getElementById('panelSvc').classList.toggle('on', t === 'svc');
+    document.getElementById('panelExt').classList.toggle('on', t === 'ext');
+    if (t === 'ext') {
+      document.getElementById('tvRoot').textContent = picked.length
+        ? picked.map(function (d) { return d.mp; }).join('、')
+        : '（未选分区，先在上方点选）';
+    }
+  };
+});
+
+renderDeps(document.getElementById('tvDeps'), TV_DEPS);
+renderDeps(document.getElementById('jfDeps'), JF_DEPS);
+document.getElementById('jfCmd').innerHTML =
+  '<b>装 Jellyfin 之后再接：</b>' + NL +
+  'sudo apt install jellyfin        # 或官方 docker 镜像' + NL +
+  'sudo systemctl enable --now jellyfin' + NL +
+  '# 再把媒体库路径指到本工具导出的 SMB 共享' + NL +
+  '# 本工具不调用 Jellyfin 的 API，也不代它刮削' + NL +
+  '<span style="color:var(--mute)">本机实测：jellyfin / docker / podman 均未安装</span>';
+document.getElementById('tvScan').onclick = runTvScan;
+document.getElementById('tvExport').onclick = function () {
+  document.querySelector('[data-tab=svc]').click();
+  setMode('smb');
+};
+</script>
+</body>
+</html>
