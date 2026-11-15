@@ -36,6 +36,7 @@
 ## 依赖
 
 - Qt6 (Core, Widgets)
+- emoji 字体（界面图标用；多数发行版默认不带，缺了图标显示成 `□`，见「图标字体」）
 - toml++ (C++17 TOML 解析库，已集成)
 - QEMU (运行时，虚机管理需要)
 - `systemd` (服务管理需要)
@@ -109,7 +110,52 @@ sudo ./build-install.sh
 
 安装后通过 `~/.local/bin/server-toolbox` 运行。若该路径未在你的 `PATH` 中，可执行 `export PATH="$HOME/.local/bin:$PATH"`。
 
+## 图标字体
+
+界面里的 📊💾🖥️📂⚙️ 等图标是 Unicode emoji，由字体渲染。**多数发行版默认不带
+emoji 字体**（Ubuntu server 完全没有，`fc-list | grep -ci emoji` 得 0），图标会
+渲染成 `□`。
+
+装上字体通常还不够 —— 还需要 fontconfig 的 emoji 通用名重写规则，它由包的
+maintainer script 安装。只解包字体文件（`dpkg-deb -x`）而不跑安装脚本时规则
+缺失，症状是 `fc-list` 能列出字体、`fc-match emoji` 也正常，但按字符匹配仍拿
+不到 emoji 字体。
+
+```bash
+sudo apt install fonts-noto-color-emoji    # Debian/Ubuntu
+sudo pacman -S noto-fonts-emoji            # Arch
+# 无 sudo 时：字体放 ~/.local/share/fonts/，再补一条 fontconfig 规则
+mkdir -p ~/.config/fontconfig/fonts
+cat > ~/.config/fontconfig/fonts/99-emoji-fallback.conf <<'EOF'
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <match target="pattern">
+    <test qual="any" name="family"><string>emoji</string></test>
+    <edit name="family" mode="assign" binding="same"><string>Noto Color Emoji</string></edit>
+  </match>
+</fontconfig>
+EOF
+fc-cache -f
+```
+
+验证要用 Qt 的判据，别用 `fc-match <字符>` —— 该命令行不做 charset 匹配，
+只证明字体没被索引，不能证明渲染会缺字：
+
+```cpp
+QFontMetricsF fm(QFont());        // 真实回退链下的覆盖情况
+fm.inFontUcs4(0x1F4CA);           // true = 能画出来
+```
+
+`U+FE0F`（变体选择符）在 `inFontUcs4` 下恒为 false，属正常 —— 它本就不该有字形。
+实测它在 Qt 里不会画成方块，代码里保留 `⚠️` `▶️` 这类带 FE0F 的写法是安全的。
+
+AppImage 已内置该字体，不受本节影响。
+
 ## 打包 AppImage
+
+字体已随包（约 27 MB）。`EMOJI_FONT=none` 可去掉字体（省 9.5 MB），
+`EMOJI_FONT=/path/to.ttf` 可指定别的字体。
 
 一条命令产出单文件可执行程序（免安装，拷到别的 x86_64 Linux 上直接跑）：
 
@@ -148,8 +194,7 @@ cp build/app_main.png doc/img/screenshot.png        # 顶部主画面用这张
 第三个参数是滚动像素，`./build/app_shot - 230` 用来看顶栏毛玻璃——静态首屏时
 玻璃背后只有页面边距，滚起来才看得出模糊。
 
-注意无头环境默认没有 emoji 字体，导航图标会渲染成 `□` 方块；装一个 emoji
-字体（如 `fonts-noto-color-emoji`）后再截即可。
+截图前先确认 emoji 字体可用，否则图标会是 `□`，见下一节。
 
 ## 许可证
 

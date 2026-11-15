@@ -124,6 +124,105 @@ for p in platforms/platforms imageformats/imageformats styles/styles; do
     done
 done
 
+# ── 3b. 内置 emoji 字体 ────────────────────────────────────
+# 界面里的 📊💾🖥️📂⚙️ 等图标全靠 emoji 字体，而多数服务器发行版默认不装
+# （Ubuntu server 就完全没有，fc-list 里零 emoji 覆盖），图标会渲染成 □。
+# AppImage 的意义是换机器也能跑，所以把字体一起带上，不依赖宿主的字体配置。
+# EMOJI_FONT=none 可关闭（包能小 9.5 MB）；EMOJI_FONT=/path/to.ttf 可指定。
+FONTDIR="$APPDIR/usr/share/fonts/truetype/noto"
+FONT_NAME=NotoColorEmoji.ttf
+FONT_LIC="$APPDIR/usr/share/doc/noto-color-emoji/copyright"
+EMOJI_FONT="${EMOJI_FONT:-auto}"
+FONT_OK=0
+
+if [ "$EMOJI_FONT" != "none" ]; then
+    if [ -n "${EMOJI_FONT:-}" ] && [ "$EMOJI_FONT" != "auto" ] && [ -f "$EMOJI_FONT" ]; then
+        src="$EMOJI_FONT"
+    else
+        # 按可信度依次找：系统包 → 用户目录 → 本仓库下载缓存
+        src=""
+        for c in \
+            /usr/share/fonts/truetype/noto/$FONT_NAME \
+            "$HOME/.local/share/fonts/$FONT_NAME" \
+            build/fonts/$FONT_NAME; do
+            [ -f "$c" ] && src="$c" && break
+        done
+        # 都没有就从 deb 里取（apt 的国内镜像比 GitHub 快得多）
+        if [ -z "$src" ] && command -v apt-get >/dev/null 2>&1; then
+            echo "    本机无 emoji 字体，尝试用 apt 取 fonts-noto-color-emoji"
+            mkdir -p build/fonts
+            deb="$(ls build/fonts/fonts-noto-color-emoji_*.deb 2>/dev/null | head -1 || true)"
+            if [ -z "$deb" ]; then
+                ( cd build/fonts && apt-get download fonts-noto-color-emoji >/dev/null 2>&1 ) || true
+                deb="$(ls build/fonts/fonts-noto-color-emoji_*.deb 2>/dev/null | head -1 || true)"
+            fi
+            if [ -n "$deb" ]; then
+                rm -rf build/fonts/x && mkdir -p build/fonts/x
+                dpkg-deb -x "$deb" build/fonts/x 2>/dev/null || true
+                src="$(find build/fonts/x -name "$FONT_NAME" 2>/dev/null | head -1 || true)"
+            fi
+        fi
+    fi
+
+    if [ -n "$src" ] && [ -f "$src" ]; then
+        mkdir -p "$FONTDIR" "$(dirname "$FONT_LIC")"
+        cp -L "$src" "$FONTDIR/$FONT_NAME"
+        # 让 fontconfig 认这个字体，需要三件事，缺一不可：
+        #   1) 一份主配置（AppRun 用 FONTCONFIG_CONFIG 指过去）
+        #   2) 配置里用 <dir> 登记字体目录
+        #   3) 一个可写的 <cachedir>
+        # 踩过的两个坑：
+        #  - 只设 FONTCONFIG_PATH 没用 —— 它是"配置文件目录"，不是字体目录。
+        #  - <dir> 写绝对路径打包机路径，AppImage 挂到别处就失效；
+        #    prefix="relative" 的基准是配置**所在目录的上一级**，所以字体目录
+        #    必须是 usr/share/fonts/... 而配置放 usr/share/fontconfig/ 下，
+        #    相对路径写成 ../fonts/... 才指得对。
+        mkdir -p "$APPDIR/usr/share/fontconfig" "$APPDIR/usr/share/fontconfig/cache"
+        # 预热缓存：fontconfig 的 <cachedir> 里一旦有"配置未变"的有效缓存，
+        # 就不会重新扫描。这里在打包机上先扫一次，把包内字体写进缓存再打包，
+        # 解压后无需 fc-cache 即可命中（打包机与目标机路径不同也没关系，
+        # 缓存里记的是 relative 解析后的实际字体文件）。
+        cat > "$APPDIR/usr/share/fontconfig/$APP-emoji.conf" <<FCONF
+<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <dir prefix="relative">../fonts/truetype/noto</dir>
+  <cachedir prefix="relative">cache</cachedir>
+  <match target="pattern">
+    <test qual="any" name="family"><string>emoji</string></test>
+    <edit name="family" mode="assign" binding="same"><string>Noto Color Emoji</string></edit>
+  </match>
+</fontconfig>
+FCONF
+        # 预热字体缓存（有 fc-cache 才做；没有也不影响，只是首次启动慢一点）
+        if command -v fc-cache >/dev/null 2>&1; then
+            FONTCONFIG_FILE="$APPDIR/usr/share/fontconfig/$APP-emoji.conf" \
+                fc-cache -f "$FONTDIR" >/dev/null 2>&1 \
+                && echo "    + 字体缓存已预热" \
+                || echo "    （fc-cache 预热未成功，首次启动会现场扫描）"
+        fi
+        echo "    + 字体 $(basename "$src") ($(du -h "$FONTDIR/$FONT_NAME" | cut -f1))"
+        # SIL OFL 1.1 允许再分发，但要求随附许可证文本
+        lic=""
+        for c in \
+            /usr/share/doc/fonts-noto-color-emoji/copyright \
+            build/fontpkg/usr/share/doc/fonts-noto-color-emoji/copyright; do
+            [ -f "$c" ] && lic="$c" && break
+        done
+        if [ -n "$lic" ]; then
+            cp "$lic" "$FONT_LIC"
+            echo "    + 许可证 (SIL OFL 1.1)"
+        else
+            echo "!! 未找到字体许可证文本，OFL 要求随附，自检会失败" >&2
+        fi
+        FONT_OK=1
+    else
+        echo "!! 找不到 emoji 字体：AppImage 里的图标在没装字体的机器上会是 □" >&2
+        echo "   （要跳过这项检查设 EMOJI_FONT=none；要自带设 EMOJI_FONT=/path/to.ttf）" >&2
+    fi
+fi
+
 # ── 4. AppRun ──────────────────────────────────────────────
 echo "==> 写 AppRun"
 cat > "$APPDIR/AppRun" <<'APPRUN'
@@ -135,6 +234,13 @@ export QT_PLUGIN_PATH="$here/usr/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
 export QT_TRANSLATION_PATH="$here/usr/translations"
 # 不覆盖用户已有的 QT_QPA_PLATFORM（方便 QT_QPA_PLATFORM=offscreen 自检）
 export QT_AUTO_SCREEN_SCALE_FACTOR="${QT_AUTO_SCREEN_SCALE_FACTOR:-1}"
+# 随包的 emoji 字体：让 fontconfig 改用包内主配置。该配置 include 系统的
+# /etc/fonts/fonts.conf，宿主字体照常生效，只是多登记包内这一个字体目录。
+# 注意别用 FONTCONFIG_PATH —— 它是"配置文件目录"，指过去而配置里没有 <dir>
+# 登记字体目录的话，字体根本不会被发现（这里就绕了这个弯）。
+if [ -f "$here/usr/share/fontconfig/server-toolbox-emoji.conf" ]; then
+    export FONTCONFIG_CONFIG="$here/usr/share/fontconfig/server-toolbox-emoji.conf"
+fi
 exec "$here/usr/bin/server-toolbox" "$@"
 APPRUN
 chmod +x "$APPDIR/AppRun"
@@ -151,8 +257,23 @@ fi
 
 echo "==> 打包 $OUT"
 rm -f "$OUT"
+
+# appimagetool 默认要从 GitHub 现下 type2-runtime，内网/弱网下这一步经常失败
+# （实测报 "server returned status code 0"）。runtime 只有 1 MB，提前存一份
+# 用 --runtime-file 传进去就不联网了。取法：
+#   curl -L -o build/runtime-x86_64 \\
+#     https://github.com/AppImage/type2-runtime/releases/download/continuous/runtime-x86_64
+RUNTIME_ARGS=()
+if [ -f "${RUNTIME_FILE:-build/runtime-x86_64}" ]; then
+    RUNTIME_ARGS=(--runtime-file "${RUNTIME_FILE:-build/runtime-x86_64}")
+    echo "    用本地 runtime: ${RUNTIME_FILE:-build/runtime-x86_64}"
+else
+    echo "    未找到本地 runtime，appimagetool 将尝试联网下载"
+fi
+
 # ARCHFLAGS=x86_64 避免工具去猜机器名
-ARCHFLAGS=x86_64 "$TOOL" --appimage-extract-and-run "$APPDIR" "$OUT" 2>&1 | tail -6
+ARCHFLAGS=x86_64 "$TOOL" --appimage-extract-and-run "${RUNTIME_ARGS[@]}" \
+    "$APPDIR" "$OUT" 2>&1 | tail -6
 
 # appimagetool 有时按 AppDir 名字命名产物，兜底改名
 if [ ! -f "$OUT" ]; then
@@ -186,7 +307,11 @@ if [ ! -f "$APPDIR/usr/plugins/platforms/libqxcb.so" ] &&
    [ ! -f "$APPDIR/usr/plugins/platforms/libqwayland.so" ]; then
     fail "缺 xcb/wayland 平台插件（注意：缺了也不会报错，Qt 会静默用系统 Qt）"
 fi
-echo "    ✅ AppDir 结构完整（AppRun / desktop / 图标 / Qt 库 / 平台插件）"
+if [ "$EMOJI_FONT" != "none" ]; then
+    [ "$FONT_OK" = 1 ]                     || fail "emoji 字体没能打包进去"
+    [ -f "$FONT_LIC" ]                     || fail "缺字体许可证文本（SIL OFL 要求随附）"
+fi
+echo "    ✅ AppDir 结构完整（AppRun / desktop / 图标 / Qt 库 / 平台插件 / emoji 字体）"
 
 # 6b. 真跑一次，确认能起来且不立刻退出
 export APPIMAGE_EXTRACT_AND_RUN=1   # 无 FUSE 的环境（容器/CI）需要
