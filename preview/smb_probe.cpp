@@ -80,6 +80,47 @@ int main(int argc, char **argv)
               "路径分号被转义，未产生独立配置行");
     }
 
+    printf("\n=== suggestShareName（默认值必须合法）===\n");
+    {
+        const QString n = Nas::suggestShareName("/mnt/d", "sda1");
+        check(n == "d", QString("挂载点 /mnt/d 取末段 -> %1").arg(n));
+        check(Nas::validateShareName(n).isEmpty(), "生成的默认共享名合法");
+    }
+    {
+        // 无挂载点：退回分区名
+        const QString n = Nas::suggestShareName("", "sdb1");
+        check(n == "sdb1", QString("无挂载点退回分区名 -> %1").arg(n));
+        check(Nas::validateShareName(n).isEmpty(), "退回名合法");
+    }
+    {
+        // 命中保留名 HOMES 必须被规避
+        const QString n = Nas::suggestShareName("/mnt/HOMES", "x");
+        check(n.toUpper() != "HOMES", QString("保留名 HOMES 被改写 -> %1").arg(n));
+        check(Nas::validateShareName(n).isEmpty(), "规避后仍合法");
+    }
+    {
+        // 非法字符替换为 -，且首尾不留 -/.
+        const QString n = Nas::suggestShareName("/mnt/a b/c*d", "x");
+        check(!n.startsWith('-') && !n.endsWith('-') && !n.endsWith('.'),
+              QString("首尾无 -/. -> %1").arg(n));
+        check(Nas::validateShareName(n).isEmpty(), "脏输入生成名合法");
+    }
+    {
+        // 以 $ 结尾会被 validateShareName 拒，suggest 必须加后缀规避
+        const QString n = Nas::suggestShareName("/mnt/secret$", "x");
+        check(Nas::validateShareName(n).isEmpty(),
+              QString("以 $ 结尾的输入被规避 -> %1").arg(n));
+    }
+    {
+        // 超长截到 31
+        const QString n = Nas::suggestShareName(QString("/mnt/") + QString(50, 'x'), "x");
+        check(n.size() <= 31, QString("超长被截断到 %1 字符").arg(n.size()));
+    }
+
+    printf("\n=== defaultSharePath ===\n");
+    check(Nas::defaultSharePath("/mnt/d") == "/mnt/d", "已挂载返回挂载点");
+    check(Nas::defaultSharePath("  ").isEmpty(), "未挂载返回空串（UI 据此提示）");
+
     printf("\n%s (%d 失败)\n", fail ? "!! 有失败" : "OK 全部通过", fail);
     return fail ? 1 : 0;
 }

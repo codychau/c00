@@ -1,4 +1,7 @@
 #include "nasmodel.h"
+#include <QByteArray>
+#include <pwd.h>
+#include <unistd.h>
 
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -454,4 +457,89 @@ QString makeShareSection(const SmbShare &share)
     return s;
 }
 
+
+QString suggestShareName(const QString &mountpoint, const QString &partitionName)
+{
+    // 优先用挂载点最后一段（/mnt/d → d），否则退回分区名。
+    QString base = mountpoint.trimmed();
+    if (!base.isEmpty()) {
+        const QString seg = base.split('/', Qt::SkipEmptyParts).last();
+        if (!seg.isEmpty()) base = seg;
+    }
+    if (base.isEmpty()) base = partitionName.trimmed();
+    if (base.isEmpty()) base = QStringLiteral("share");
+
+    // 只保留 SMB 允许的字符，其余换成 -。
+    QString clean;
+    clean.reserve(base.size());
+    for (const QChar &c : base) {
+        if (c == ' ' || c == '-') { clean += c; continue; }
+        if (c.isLetterOrNumber() || c == '.' || c == '_') clean += c;
+        else clean += '-';
+    }
+    // 去首尾空白/连字符，限长 31
+    clean = clean.trimmed();
+    while (clean.startsWith('-')) clean.remove(0, 1);
+    while (clean.endsWith('-') || clean.endsWith('.')) clean.chop(1);
+    if (clean.size() > 31) clean = clean.left(31);
+    if (clean.isEmpty()) clean = QStringLiteral("share");
+
+    // 命中保留名 / 以 $ 结尾会被 validateShareName 拒掉，这里直接规避：
+    // 命中就加数字后缀，保证 UI 预填的默认值一定合法。
+    static const QStringList reserved = {
+        "IPC$", "ADMIN$", "print$", "HOMES", "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3" };
+    if (reserved.contains(clean.toUpper()) || clean.endsWith("$"))
+        clean += "2";
+    return clean;
+}
+
+QString defaultSharePath(const QString &mountpoint)
+{
+    const QString p = mountpoint.trimmed();
+    return p;   // 空串 = 未挂载，调用方据此提示
+}
+
+QString currentUserName()
+{
+    // 优先 SUDO_USER：以 pkexec/sudo 起来时 USER 常是 root，
+    // 把 root 写成 force user 等于让局域网访客拿到 root 权限的文件。
+    const QByteArray su = qgetenv("SUDO_USER");
+    if (!su.isEmpty() && su != "root") return QString::fromLocal8Bit(su);
+    const QByteArray u = qgetenv("USER");
+    if (!u.isEmpty() && u != "root") return QString::fromLocal8Bit(u);
+    const QByteArray hl = qgetenv("LOGNAME");
+    if (!hl.isEmpty() && hl != "root") return QString::fromLocal8Bit(hl);
+
+    // 环境变量常常不可靠：从桌面启动器、systemd 用户实例、或通过
+    // pkexec 起来时 USER/LOGNAME 都可能缺失。回落到真实 uid 的账号名，
+    // 这比环境变量更权威 —— 它反映的是进程实际的属主，而不是谁设过变量。
+    if (struct passwd *pw = getpwuid(geteuid())) {
+        const QString n = QString::fromLocal8Bit(pw->pw_name);
+        if (!n.isEmpty() && n != "root") return n;
+    }
+    return QString();   // 真的拿不到就留空，UI 会要求手填
+}
+
+
+QStringList systemMountPoints(const QVector<Block> &blocks,
+                              const QString &procMounts)
+{
+    QStringList out;
+    // 系统盘：承载 / 与 /boot 的那些盘。刻意复用 judge() 用的同一个
+    // systemDiskNames —— 两处判定口径必须一致，否则会出现
+    // 「这个分区能选为 RAID 成员，却不能被 SMB 共享」这种自相矛盾。
+    const QVector<QString> sys = systemDiskNames(procMounts);
+    for (const Block &b : blocks) {
+        if (b.mountpoint.isEmpty()) continue;
+        const QString mp = b.mountpoint;
+        if ((mp == "/" || mp == "/boot" || mp == "/home") && !out.contains(mp)) {
+            out << mp; continue;
+        }
+        const QString parent = parentDiskOf(b.name);
+        if (!parent.isEmpty() && sys.contains(parent) && !out.contains(mp))
+            out << mp;
+    }
+    return out;
+}
 } // namespace Nas
