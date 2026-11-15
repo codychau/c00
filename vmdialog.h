@@ -11,8 +11,12 @@
 #include <QCheckBox>
 #include <QTableWidget>
 #include <QGroupBox>
+#include <QHash>
+#include <QPair>
 
 #include "vmconfig.h"
+
+class QVBoxLayout;
 
 class VMDialog : public QDialog
 {
@@ -57,6 +61,7 @@ private:
     QCheckBox      *m_waitMountCb;
 
     // 硬件直通
+    QGroupBox      *m_hptGroup;        // 整组为 QEMU 专属 (VirtualBox 无 PCI 直通)
     QListWidget    *m_pciList;
     QCheckBox      *m_hugepagesCb;
     QCheckBox      *m_vfioMultiCb;      // multifunction=on (同 slot 多 function)
@@ -68,6 +73,12 @@ private:
     QCheckBox      *m_uefiCb;
     QLineEdit      *m_uefiCodeEdit;
     QLineEdit      *m_uefiVarsEdit;
+
+    // 三列布局: 类型专属组在隐藏时移出布局 (Qt 里隐藏控件仍计入布局最小高度)
+    QVBoxLayout *m_leftCol  = nullptr;
+    QVBoxLayout *m_midCol   = nullptr;
+    QVBoxLayout *m_rightCol = nullptr;
+    QHash<QWidget *, QPair<QVBoxLayout *, int>> m_groupSlot;   // 组 → (所在列, 原索引)
 
     // 显示 (无显示, 与 VNC 互斥)
     QCheckBox      *m_displayNoneCb;

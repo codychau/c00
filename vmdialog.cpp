@@ -485,9 +485,23 @@ void VMDialog::updateVmTypeUI()
 {
     const bool vbox = (m_vmTypeCombo->currentData() == "virtualbox");
 
-    // VirtualBox 专属设置组
-    m_vboxGroup->setVisible(vbox);
-    m_vboxGpuGroup->setVisible(vbox);
+    // 类型专属的整组: 隐藏时移出布局 —— Qt 的隐藏控件仍计入布局最小高度,
+    // 不移出的话窗口最小高度被 VirtualBox 组撑到 1200+px, 压不进 1080 屏幕。
+    auto syncGroup = [this](QGroupBox *g, bool show) {
+        g->setVisible(show);
+        if (show) {
+            const auto it = m_groupSlot.find(g);
+            if (it != m_groupSlot.end() && it->first->indexOf(g) < 0)
+                it->first->insertWidget(qMin(it->second, it->first->count()), g);
+            return;
+        }
+        for (auto *col : { m_leftCol, m_midCol, m_rightCol }) {
+            const int idx = col->indexOf(g);
+            if (idx >= 0) { m_groupSlot.insert(g, { col, idx }); col->removeWidget(g); return; }
+        }
+    };
+    syncGroup(m_vboxGpuGroup, vbox);
+    syncGroup(m_vboxGroup,   vbox);
 
     // 网络设置组: 按类型显示对应页
     m_netGroup->setVisible(true);
@@ -503,16 +517,17 @@ void VMDialog::updateVmTypeUI()
     m_vncSpin->setVisible(!vbox);
 
     // 高级参数组 (右列): VirtualBox 时整组隐藏，窗口更短
-    m_advGroup->setVisible(!vbox);
+    syncGroup(m_advGroup, !vbox);
 
     // 额外参数组是 QEMU 专属，VirtualBox 时整组隐藏（窗口更短）
-    m_extraGroup->setVisible(!vbox);
+    syncGroup(m_extraGroup, !vbox);
 
     // QEMU 专属: UEFI 固件 / 音频 / USB 直通 / Root 钩子 / 无显示 / 直通增强
-    m_uefiGroup->setVisible(!vbox);
-    m_audioGroup->setVisible(!vbox);
-    m_usbGroup->setVisible(!vbox);
-    m_rootHookGroup->setVisible(!vbox);
+    syncGroup(m_hptGroup,    !vbox);   // VirtualBox 忽略 PCI 直通与 hugepages
+    syncGroup(m_uefiGroup,   !vbox);
+    syncGroup(m_audioGroup,  !vbox);
+    syncGroup(m_usbGroup,    !vbox);
+    syncGroup(m_rootHookGroup, !vbox);
     m_displayNoneCb->setVisible(!vbox);
     m_runRootCb->setVisible(!vbox);
     m_vfioMultiCb->setVisible(!vbox);
@@ -534,15 +549,24 @@ VMDialog::VMDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("编辑虚机配置");
-    resize(880, 820);
+    resize(1240, 940);
 
     auto *outer = new QVBoxLayout(this);
 
-    // ── 双列主体 ──
+    // ── 三列主体 (左: 基本/磁盘/钩子 · 中: 网络/直通/端口 · 右: 显示/固件/音频/USB) ──
     auto *cols = new QHBoxLayout();
 
     // ════════ 左列 ════════
-    auto *leftCol = new QVBoxLayout();
+    m_leftCol = new QVBoxLayout();
+    auto *leftCol = m_leftCol;
+
+    // ════════ 中列 ════════
+    m_midCol = new QVBoxLayout();
+    auto *midCol = m_midCol;
+
+    // ════════ 右列 ════════
+    m_rightCol = new QVBoxLayout();
+    auto *rightCol = m_rightCol;
 
     auto *basicGroup = new QGroupBox("基本参数");
     auto *basicForm  = new QFormLayout(basicGroup);
@@ -628,7 +652,7 @@ VMDialog::VMDialog(QWidget *parent)
     });
 
     m_vboxGpuGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
-    leftCol->addWidget(m_vboxGpuGroup);
+    midCol->addWidget(m_vboxGpuGroup);
 
     // ── 网络设置 ── 统一组: 按虚拟机类型显示 QEMU / VirtualBox 页
     m_netGroup = new QGroupBox("网络设置");
@@ -702,7 +726,7 @@ VMDialog::VMDialog(QWidget *parent)
 
     netOuter->addWidget(m_netPageQemu);
     netOuter->addWidget(m_netPageVbox);
-    // 注意: 加到右列 (见下方 rightCol), 不占左列高度
+    // 注意: 本组 (含 QEMU/VBox 两个子页) 由下方 rightCol/midCol 决定归属, 此处只建控件
 
     // ── VirtualBox 专属设置 ── (按虚拟机类型显示/隐藏)
     m_vboxGroup = new QGroupBox("VirtualBox 设置");
@@ -788,7 +812,7 @@ VMDialog::VMDialog(QWidget *parent)
     });
 
     m_vboxGroup->setVisible(false);  // 默认隐藏, 非 VirtualBox 时不显示
-    leftCol->addWidget(m_vboxGroup);
+    midCol->addWidget(m_vboxGroup);
 
     // ── 磁盘 (系统盘 + 数据盘 统一列表) ──
     auto *ddGroup = new QGroupBox("磁盘");
@@ -815,7 +839,8 @@ VMDialog::VMDialog(QWidget *parent)
     leftCol->addWidget(ddGroup);
 
     // ── 硬件直通 ──
-    auto *hptGroup = new QGroupBox("硬件直通");
+    m_hptGroup = new QGroupBox("硬件直通");
+    auto *hptGroup = m_hptGroup;
     auto *hptLayout = new QVBoxLayout(hptGroup);
 
     m_pciList = new QListWidget();
@@ -863,7 +888,7 @@ VMDialog::VMDialog(QWidget *parent)
     hole64RowLay->addWidget(m_hole64Combo, 1);
     hptLayout->addWidget(m_hole64Row);
 
-    leftCol->addWidget(hptGroup);
+    midCol->addWidget(m_hptGroup);
 
     // ── 音频 (QEMU audiodev) ──
     m_audioGroup = new QGroupBox("音频 (QEMU)");
@@ -930,7 +955,7 @@ VMDialog::VMDialog(QWidget *parent)
     usbBtnRow->addStretch();
     usbLayout->addLayout(usbBtnRow);
 
-    leftCol->addWidget(m_usbGroup);
+    rightCol->addWidget(m_usbGroup);
 
     // ── Root 钩子 (GPU 切换脚本) ──
     m_rootHookGroup = new QGroupBox("Root 钩子 (GPU 切换脚本)");
@@ -960,7 +985,7 @@ VMDialog::VMDialog(QWidget *parent)
                               "BDF 以 06:00.0 / 06:00.1 为默认，需在 PCI 列表里选你自己的设备。");
     hookLayout->addWidget(m_rootLoadBtn);
 
-    leftCol->addWidget(m_rootHookGroup);
+    rightCol->addWidget(m_rootHookGroup);
 
     // ── 额外参数 ──
     m_extraGroup = new QGroupBox("额外 QEMU 参数");
@@ -969,12 +994,7 @@ VMDialog::VMDialog(QWidget *parent)
     m_extraEdit->setPlaceholderText("以上控件未覆盖的参数写在这里");
     m_extraEdit->setMaximumHeight(70);
     extraLayout->addWidget(m_extraEdit);
-    leftCol->addWidget(m_extraGroup);
-
-    cols->addLayout(leftCol, 1);
-
-    // ════════ 右列 ════════
-    auto *rightCol = new QVBoxLayout();
+    midCol->addWidget(m_extraGroup);
 
     m_advGroup = new QGroupBox("高级参数");
     auto *advForm  = new QFormLayout(m_advGroup);
@@ -1066,10 +1086,10 @@ VMDialog::VMDialog(QWidget *parent)
         "若有则主动尝试挂载。适用于硬盘在开机时无法立即挂载的场景。");
     autoLayout->addWidget(m_waitMountCb);
 
-    rightCol->addWidget(autoGroup);
+    leftCol->addWidget(autoGroup);
 
     // 网络设置放到右列 (借用端口转发组缩短后腾出的空间)
-    rightCol->addWidget(m_netGroup);
+    midCol->addWidget(m_netGroup);
 
     // ── UEFI 固件 (QEMU, pflash) ──
     m_uefiGroup = new QGroupBox("UEFI 固件 (QEMU)");
@@ -1121,7 +1141,7 @@ VMDialog::VMDialog(QWidget *parent)
     });
 
     rightCol->addWidget(m_advGroup);
-    rightCol->addWidget(m_uefiGroup);
+    leftCol->addWidget(m_uefiGroup);
 
     // ── 端口转发 ──
     m_portGroup = new QGroupBox("端口转发 (user 模式)");
@@ -1145,9 +1165,29 @@ VMDialog::VMDialog(QWidget *parent)
     portBtnRow->addWidget(m_portRemoveBtn);
     portBtnRow->addStretch();
     portLayout->addLayout(portBtnRow);
-    rightCol->addWidget(m_portGroup);
-    rightCol->addStretch(1);   // 让各组按内容高度排列, 不被拉伸成大外框
+    midCol->addWidget(m_portGroup);
 
+    // 列内顺序微调 (控件创建较晚, 这里按职责重排):
+    //  左列: 基本参数 → 磁盘 → 启动管理 → UEFI 固件 → 音频
+    //  中列: VirtualBox 设置 → 硬件直通 → 网络设置 → 端口转发 → 额外参数
+    //  右列: 高级参数(显示/root 运行) → USB 直通 → Root 钩子
+    // 注意: Qt 的 insertWidget 对已在布局中的控件会「再插一份」(重复项撑高度),
+    // 所以重排必须先 removeWidget 再插到目标位置。
+    auto moveGroup = [](QVBoxLayout *col, QGroupBox *g, int idx) {
+        col->removeWidget(g);
+        col->insertWidget(qMin(idx, col->count()), g);
+    };
+    moveGroup(leftCol, autoGroup, 2);
+    moveGroup(leftCol, m_uefiGroup, 3);
+    moveGroup(rightCol, m_advGroup, 0);
+
+    // 各列按内容高度排列, 不被拉伸成大外框
+    leftCol->addStretch(1);
+    midCol->addStretch(1);
+    rightCol->addStretch(1);
+
+    cols->addLayout(leftCol, 1);
+    cols->addLayout(midCol, 1);
     cols->addLayout(rightCol, 1);
     outer->addLayout(cols);
 
