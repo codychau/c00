@@ -542,4 +542,193 @@ QStringList systemMountPoints(const QVector<Block> &blocks,
     }
     return out;
 }
+// ── 电视墙（只读影视库索引）────────────────────────────────
+//
+// 只读是硬约束：不重命名、不删除、不改任何媒体文件。刮削器最可怕
+// 的不是读，是替用户改文件名，一旦弄错就是不可逆地打乱整个库。
+
+qint64 minVideoBytes() { return qint64(20) * 1024 * 1024; }
+
+static QString extOf(const QString &path)
+{
+    const int s = path.lastIndexOf('.');
+    if (s < 0 || s == path.size() - 1) return QString();
+    return path.mid(s + 1).toLower();
+}
+
+bool isVideoExtension(const QString &path)
+{
+    // 刻意不含 "ts"。.ts 既是 MPEG-TS 也是 TypeScript。把判定责任丢给
+    // 调用方（"记得再用体积过滤"）等于埋一个必然踩到的坑：只要有一处
+    // 忘了，源代码就会被当成影片列进电视墙。所以这里直接不认，
+    // 需要认 MPEG-TS 的调用方必须显式走 isVideoFile()。
+    static const QSet<QString> v = {
+        "mkv", "mp4", "m4v", "avi", "mov",
+        "wmv", "flv", "webm", "mpg", "mpeg",
+        "m2ts", "mts", "vob", "iso", "strm",
+    };
+    return v.contains(extOf(path));
+}
+
+bool isSubtitleExtension(const QString &path)
+{
+    static const QSet<QString> s = { "srt", "ass", "ssa", "sub", "vtt", "idx" };
+    return s.contains(extOf(path));
+}
+
+// 完整的「这文件像不像视频」判定：扩展名与 .ts 的体积歧义一起处理。
+// 扫目录应该用这个，而不是 isVideoExtension 再自己记得过滤。
+bool isVideoFile(const QString &path, qint64 sizeBytes)
+{
+    if (extOf(path) == "ts")
+        return looksLikeMpegTs(path, sizeBytes);
+    return isVideoExtension(path);
+}
+
+bool looksLikeMpegTs(const QString &path, qint64 sizeBytes)
+{
+    // .ts 是 TypeScript 还是 MPEG-TS，光看扩展名无法区分。
+    // 实测就把 vite.config.ts 认成过视频，所以用体积兜一道：
+    // 源码文件不可能上百 MB，而 MPEG-TS 分片通常至少几 MB。
+    if (extOf(path) != "ts") return true;   // 非 .ts 不经这一关
+    return sizeBytes >= minVideoBytes();
+}
+
+NameGuess guessFromFileName(const QString &fileName)
+{
+    NameGuess g;
+    QString base = fileName;
+    const int slash = base.lastIndexOf('/');
+    if (slash >= 0) base = base.mid(slash + 1);
+    const int dot = base.lastIndexOf('.');
+    if (dot > 0) base = base.left(dot);
+
+    // 年份。踩过两个坑：
+    //  · 组号歧义。(19|20) 是捕获组、(?:19|20) 才是非捕获的。早先写
+    //    captured(lastCapturedIndex()) 时取到的是 "20" 而不是 "2010"。
+    //    这里只用一个捕获组，组号恒为 1。
+    //  · 裸四位数不等于年份。"Blade.Runner.2049.2017" 里的 2049 合法地
+    //    落在 1900-2099、前后也不是数字，lookaround 挡不住。经验上年份
+    //    是最后一个独立四位数（片名在前、年份在后、再接分辨率标签），
+    //    所以取最后一个而不是第一个 —— 这条是被变异测试锁住的。
+    // 括号形式不需要单独分支：(?<![0-9]) / (?![0-9]) 已经覆盖了
+    // "(2019)" 的边界。曾有一条 yearParen 分支，实测删掉后行为完全不变，
+    // 属于只会误导读者的死代码，故移除。
+    static const QRegularExpression yearRe("(?<![0-9])(19[0-9]{2}|20[0-9]{2})(?![0-9])");
+    QRegularExpressionMatch ym;
+    {
+        QRegularExpressionMatchIterator it = yearRe.globalMatch(base);
+        while (it.hasNext()) ym = it.next();   // 取最后一个，不是第一个
+    }
+    if (ym.hasMatch()) g.year = ym.captured(1).toInt();
+
+    // 季集：S01E02 / s1e2 / 1x02
+    static const QRegularExpression seRe("[Ss]([0-9]{1,2})[\\s._-]*[Ee]([0-9]{1,3})");
+    const QRegularExpressionMatch sm = seRe.match(base);
+    if (sm.hasMatch()) {
+        g.season  = sm.captured(1).toInt();
+        g.episode = sm.captured(2).toInt();
+    } else {
+        static const QRegularExpression xRe("(?<![0-9])([0-9]{1,2})[xX]([0-9]{1,3})(?![0-9])");
+        const QRegularExpressionMatch xm = xRe.match(base);
+        if (xm.hasMatch()) {
+            g.season  = xm.captured(1).toInt();
+            g.episode = xm.captured(2).toInt();
+        }
+    }
+
+    // 标题 = 年份/季集标记之前的部分。取较早的那个切点，
+    // 否则 "Show.2019.S01E02" 会把年份留在标题里。
+    QString title = base;
+    int cut = title.size();
+    if (sm.hasMatch()) cut = qMin(cut, sm.capturedStart());
+    if (ym.hasMatch()) cut = qMin(cut, ym.capturedStart());
+    title = title.left(cut);
+    title.replace(QRegularExpression("[._]+"), " ");
+    title.replace(QRegularExpression("[\\s\\-\\(\\[]+$"), QString());
+    g.title = title.trimmed();
+    return g;
+}
+
+// 取 <tag>…</tag> 的文本。nfo 是扁平 XML、元素不嵌套同名，显式取
+// 标签比引入完整 XML 解析器更好读也更好测（Qt6 已移除 QDom）。
+static QString nfoTag(const QString &xml, const QString &tag)
+{
+    const QString open  = QString("<%1>").arg(tag);
+    const QString close = QString("</%1>").arg(tag);
+    const int a = xml.indexOf(open);
+    if (a < 0) return QString();
+    const int b = xml.indexOf(close, a + open.size());
+    if (b < 0) return QString();
+    QString v = xml.mid(a + open.size(), b - a - open.size()).trimmed();
+    if (v.startsWith("<![CDATA[") && v.endsWith("]]>"))
+        v = v.mid(9, v.size() - 12).trimmed();
+    v.replace("&lt;",   "<");
+    v.replace("&gt;",   ">");
+    v.replace("&quot;", QString(QChar(0x22)));
+    v.replace("&apos;", QString(QChar(0x27)));
+    v.replace("&amp;",  "&");   // 必须最后做，否则 &amp;lt; 会被二次解错
+    return v;
+}
+
+static QStringList nfoTags(const QString &xml, const QString &tag)
+{
+    QStringList out;
+    const QString open  = QString("<%1>").arg(tag);
+    const QString close = QString("</%1>").arg(tag);
+    int from = 0;
+    while (true) {
+        const int a = xml.indexOf(open, from);
+        if (a < 0) break;
+        const int b = xml.indexOf(close, a + open.size());
+        if (b < 0) break;
+        const QString v = xml.mid(a + open.size(), b - a - open.size()).trimmed();
+        if (!v.isEmpty()) out << v;
+        from = b + close.size();
+    }
+    return out;
+}
+
+NfoInfo parseNfo(const QString &xml)
+{
+    NfoInfo n;
+    // 空文件或压根不是 XML：直接失败，让调用方回退到原始文件名，
+    // 而不是显示一个空条目假装"已刮削"。
+    if (xml.trimmed().isEmpty() || !xml.contains('<')) return n;
+
+    n.title         = nfoTag(xml, "title");
+    n.originalTitle = nfoTag(xml, "originaltitle");
+    n.sortTitle     = nfoTag(xml, "sorttitle");
+    n.plot          = nfoTag(xml, "plot");
+    n.tagline       = nfoTag(xml, "tagline");
+    n.imdbId        = nfoTag(xml, "imdbid");
+    n.tmdbId        = nfoTag(xml, "tmdbid");
+    n.mediatype     = nfoTag(xml, "mediatype");
+
+    // premiered 形如 2019-05-21；year 通常就是四位数。两个都试。
+    static const QRegularExpression yearRe("(19|20)[0-9]{2}");
+    for (const QString &cand : { nfoTag(xml, "premiered"), nfoTag(xml, "year") }) {
+        const QRegularExpressionMatch m = yearRe.match(cand);
+        if (m.hasMatch()) { n.year = m.captured(0).toInt(); break; }
+    }
+
+    n.season  = nfoTag(xml, "season").toInt();
+    n.episode = nfoTag(xml, "episode").toInt();
+    n.genres  = nfoTags(xml, "genre");
+    n.studios = nfoTags(xml, "studio");
+    // <actor><name>…</name></actor>：只取 name
+    n.actors  = nfoTags(xml, "name");
+    n.rating  = nfoTag(xml, "rating").toDouble();
+
+    // 没有标题就算失败。只有 id 没标题的 nfo 不足以展示，
+    // 装作成功会让用户看到一个空白卡片。
+    n.ok = !n.title.isEmpty();
+    return n;
+}
+
+bool looksLikeNfoFile(const QString &path)
+{
+    return extOf(path) == "nfo";
+}
+
 } // namespace Nas

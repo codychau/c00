@@ -201,6 +201,64 @@ QString currentUserName();
 // 返回空串表示未挂载，UI 应提示"先挂载才能共享"。
 QString defaultSharePath(const QString &mountpoint);
 
+// ── 电视墙（扩展服务：影视库索引）──────────────────────────
+//
+// v1 只做**只读**索引：扫目录、认视频文件、读已有 nfo。
+// 不重命名、不删除、不写任何媒体文件 —— 刮削器最可怕的不是读，
+// 是替用户改文件名，一旦弄错是不可逆地打乱整个影视库。
+
+// 支持的容器扩展名（大小写不敏感）。
+// 注意 .ts：既是 TypeScript 也是 MPEG-TS。只靠扩展名会把
+// vite.config.ts 认成视频（实测踩过），所以调用方必须再用体积
+// 下限过滤，见 kMinVideoBytes。
+bool isVideoExtension(const QString &path);
+bool isSubtitleExtension(const QString &path);
+
+// .ts 的歧义专门处理：true 表示这个 .ts 更像 MPEG-TS 而不是源码。
+// 依据是体积（源码文件不会上百 MB）与同目录是否有视频伴侣文件。
+bool looksLikeMpegTs(const QString &path, qint64 sizeBytes);
+
+// 完整判定：扩展名 + .ts 的体积歧义一起处理。扫目录用它。
+bool isVideoFile(const QString &path, qint64 sizeBytes);
+
+// 视频体积下限：低于此值不当视频。用 20 MiB —— 一个真正的
+// MPEG-TS 分片不会这么小，而 .ts 源码文件几乎不可能这么大。
+qint64 minVideoBytes();
+
+// 从文件名猜标题/年份/季集。刮削的主要输入就是文件名，
+// 所以这一步值得单独测。解析不出来时返回空串，绝不瞎猜。
+struct NameGuess {
+    QString title;
+    int     year = 0;
+    int     season = 0;
+    int     episode = 0;
+    bool    hasSeasonEpisode() const { return season > 0 || episode > 0; }
+};
+NameGuess guessFromFileName(const QString &fileName);
+
+// nfo 解析结果（Kodi 生态的既定格式）
+struct NfoInfo {
+    QString title;
+    QString originalTitle;
+    QString sortTitle;
+    QString plot;
+    QString tagline;
+    int     year = 0;
+    QString imdbId;
+    QString tmdbId;
+    QString mediatype;          // movie / tvshow / episode
+    int     season = 0;
+    int     episode = 0;
+    QStringList genres;
+    QStringList studios;
+    QStringList actors;
+    double  rating = 0.0;
+    bool    ok = false;         // 解析是否成功（失败时调用方显示原始名）
+};
+NfoInfo parseNfo(const QString &xml);
+
+// 是否像一段 nfo/xml（用于决定是否值得尝试解析）
+bool looksLikeNfoFile(const QString &path);
 } // namespace Nas
 
 #endif // NASMODEL_H
