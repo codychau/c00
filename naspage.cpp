@@ -27,6 +27,13 @@
 #include <QList>
 #include <QButtonGroup>
 #include <QRadioButton>
+#include <QStandardPaths>
+#include <QApplication>
+#include <QTabWidget>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QDirIterator>
+#include <QDateTime>
 #include <algorithm>
 
 static constexpr int kTopbarInset = 52;   // 与 MainWindow 顶栏一致，正文自行让出
@@ -88,11 +95,19 @@ NasPage::NasPage(QWidget *parent)
     connect(m_board, &NasBoardWidget::slotRejected, this, &NasPage::onSlotRejected);
 
     // ── 参数区 ──
-    auto *cfg = new QGroupBox("导出参数");
+    auto *cfg = new QGroupBox("文件共享服务");
     // 参数框按内容高度，不吸收页面多余空间。否则它会吃掉画板下方的
     // 全部富余高度，把画板顶到中间，看起来就是机箱上方一大片空白。
     cfg->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    auto *outer = new QVBoxLayout(cfg);
+    auto *cfgLay = new QVBoxLayout(cfg);
+
+    // ── 标签页：导出服务 / 扩展服务 ──
+    // 刻意分成两页而不是堆在一起：扩展服务（影视索引）失败或还没装
+    // 依赖时，不该连带让人以为导出也用不了。两页失败域隔离。
+    m_tabs = new QTabWidget();
+    m_svcTab = new QWidget();
+    auto *outer = new QVBoxLayout(m_svcTab);
+    outer->setContentsMargins(0, 8, 0, 0);
 
     // ── 导出方式：单分区可在 SMB / iSCSI 间选，多盘只能 iSCSI ──
     auto *modeRow = new QHBoxLayout();
@@ -188,6 +203,10 @@ NasPage::NasPage(QWidget *parent)
     outer->addWidget(m_smbWarn);
 
     m_smbBox->setVisible(false);   // 初始 0 个成员，只显示 iSCSI
+
+    m_tabs->addTab(m_svcTab, "文件共享服务");
+    m_tabs->addTab(buildExtensionsTab(), "扩展服务");
+    cfgLay->addWidget(m_tabs);
     layout->addWidget(cfg);
 
     // ── 按钮行 ──
@@ -753,4 +772,263 @@ void NasPage::setStatus(const QString &text, bool bad)
 {
     m_status->setText(text);
     m_status->setStyleSheet(bad ? ("color:" + Theme::bad().name()) : QString());
+}
+
+// ── 扩展服务页 ────────────────────────────────────────────
+//
+// v1 的「电视墙」只做只读索引：扫目录、认视频文件、读已有 nfo。
+// 不重命名、不删除、不改任何媒体文件，也不写任何用户目录。
+// 刮削的在线部分本机不可用（TMDB 不可达、omdb 需 API key、无 ffmpeg），
+// 所以这里一律如实标注来源，绝不显示编造的标题或封面。
+
+QWidget *NasPage::buildExtensionsTab()
+{
+    auto *w = new QWidget();
+    auto *v = new QVBoxLayout(w);
+    v->setContentsMargins(0, 8, 0, 0);
+
+    auto *intro = new QLabel(
+        "扩展服务是可选能力，关掉不影响导出。缺的依赖会直接说缺，"
+        "不显示假的运行状态。");
+    // QLabel 默认 Qt::AutoText：纯文本里写尖括号标签会原样显示。这段本来只要强调，去掉标签最省事。
+    intro->setProperty("role", "mute");
+    intro->setWordWrap(true);
+    v->addWidget(intro);
+
+    // ── 电视墙 ──
+    auto *tv = new QGroupBox("电视墙 · 影视库只读索引");
+    auto *tvv = new QVBoxLayout(tv);
+
+    auto *desc = new QLabel(
+        "扫描所选分区的挂载点，列出影视文件：按文件名推断标题/年份/季集，"
+        "有 nfo 时读 nfo 里的真实元数据。只读，不重命名、不删除、不移动任何文件。");
+    desc->setWordWrap(true);
+    desc->setProperty("role", "mute");
+    tvv->addWidget(desc);
+
+    auto *meta = new QHBoxLayout();
+    m_tvRoot = new QLabel("（未选分区，先在上方点选）");
+    m_tvRoot->setProperty("role", "mute");
+    m_tvCount = new QLabel("已索引 0 项");
+    m_tvCount->setProperty("role", "mute");
+    m_tvPill = new QLabel("未索引");
+    m_tvPill->setProperty("role", "pill");
+    meta->addWidget(m_tvRoot, 1);
+    meta->addWidget(m_tvCount);
+    meta->addSpacing(8);
+    meta->addWidget(m_tvPill);
+    tvv->addLayout(meta);
+
+    // 依赖自检：本机实测缺什么就写什么。这栏存在的意义是让人不必
+    // 猜「为什么没有封面」—— 不说清楚就会被当成程序坏了。
+    m_tvDeps = new QLabel();
+    m_tvDeps->setWordWrap(true);
+    m_tvDeps->setTextFormat(Qt::RichText);
+    m_tvDeps->setTextFormat(Qt::RichText);
+    tvv->addWidget(m_tvDeps);
+
+    m_tvTable = new QTableWidget(0, 4);
+    m_tvTable->setHorizontalHeaderLabels({"标题 / 年份", "季集", "元数据来源", "文件名"});
+    m_tvTable->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    m_tvTable->horizontalHeader()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
+    m_tvTable->horizontalHeader()->setSectionResizeMode(2, QHeaderView::ResizeToContents);
+    m_tvTable->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Stretch);
+    m_tvTable->verticalHeader()->setVisible(false);
+    m_tvTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_tvTable->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_tvTable->setMaximumHeight(190);
+    tvv->addWidget(m_tvTable);
+
+    m_tvNote = new QLabel();
+    m_tvNote->setWordWrap(true);
+    m_tvNote->setTextFormat(Qt::RichText);
+    m_tvNote->setProperty("role", "note");
+    m_tvNote->setText(
+        "尚未扫描。扫描只读文件内容与文件名，不写入任何位置。");
+    tvv->addWidget(m_tvNote);
+
+    auto *btnRow = new QHBoxLayout();
+    btnRow->addStretch(1);
+    m_tvScan = new QPushButton("扫描所选分区");
+    m_tvScan->setToolTip("遍历所选分区挂载点下的影视文件。只读。");
+    btnRow->addWidget(m_tvScan);
+    tvv->addLayout(btnRow);
+    connect(m_tvScan, &QPushButton::clicked, this, &NasPage::onTvScanClicked);
+
+    v->addWidget(tv);
+
+    // ── 接外部媒体服务：明确「不实现」，并给出真实安装路径 ──
+    auto *jf = new QGroupBox("接外部媒体服务（Jellyfin / Emby）");
+    auto *jfv = new QVBoxLayout(jf);
+    auto *jfd = new QLabel(
+        "本工具不实现 Jellyfin 的 REST API —— 那套协议由 Jellyfin 自己实现，"
+        "自研等于重写一个媒体服务器。这里只把影视目录通过 SMB 导出来，"
+        "交给真正的媒体服务去建库和刮削。");
+    jfd->setWordWrap(true);
+    jfd->setProperty("role", "mute");
+    jfv->addWidget(jfd);
+
+    auto *cmd = new QLabel(
+        "<pre style=\"margin:0\">sudo apt install jellyfin      # 或官方 docker 镜像\n"
+        "sudo systemctl enable --now jellyfin\n"
+        "# 然后把媒体库路径指到本工具导出的 SMB 共享</pre>");
+    cmd->setTextFormat(Qt::RichText);
+    cmd->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    cmd->setProperty("role", "code");
+    jfv->addWidget(cmd);
+    v->addWidget(jf);
+
+    v->addStretch(1);
+    refreshTvDeps();
+    return w;
+}
+
+// 依赖自检。写死成实测结论前先探测一遍，避免哪天装了还在喊缺。
+void NasPage::refreshTvDeps()
+{
+    struct Row { const char *name; bool has; const char *why; };
+    const auto have = [](const char *exe) {
+        return !QStandardPaths::findExecutable(QString::fromLatin1(exe)).isEmpty();
+    };
+    const QList<Row> rows = {
+        { "ffmpeg",  have("ffmpeg"),  "缩略图/时长" },
+        { "ffprobe", have("ffprobe"), "容器与流信息" },
+        // 在线源是运行期才知道的，这里只说明状态，不下结论说永久不可用
+        { "TMDB",    false, "在线刮削（本机实测不可达）" },
+        { "omdb key", false, "实测返回 No API key provided" },
+    };
+    QString html = "<span style=\"color:" + Theme::textMute().name() + "\">依赖：</span>";
+    for (const Row &r : rows) {
+        const QString col = r.has ? Theme::ok().name() : Theme::bad().name();
+        html += "<span style=\"color:" + col + "\"> " +
+                (r.has ? QString("✓ ") : QString("✗ ")) +
+                QString::fromLatin1(r.name) +
+                " <span style=\"color:" + Theme::textMute().name() + "\">· " +
+                QString::fromUtf8(r.why) + "</span></span>";
+    }
+    m_tvDeps->setText(html);
+}
+
+void NasPage::onTvScanClicked()
+{
+    const QVector<QString> members = m_board->members();
+    if (members.isEmpty()) {
+        setStatus("先在上方点选一个分区，电视墙才知道扫哪里");
+        return;
+    }
+    // 只扫成员分区自己的挂载点，不去遍历整块盘，更不去碰 /。
+    QStringList roots;
+    for (const QString &dev : members) {
+        for (const NasBoardWidget::Disk &d : m_disks) {
+            if (d.device == dev && !d.mountpoint.isEmpty() && d.mountpoint != "/")
+                roots << d.mountpoint;
+        }
+    }
+    if (roots.isEmpty()) {
+        setStatus("所选分区没有挂载点，无法扫描");
+        return;
+    }
+    m_tvRoot->setText(roots.join("、"));
+    m_tvPill->setText("扫描中…");
+    m_tvPill->setStyleSheet("padding:2px 8px; border-radius:4px;background:" +
+                            Theme::surface3().name() + ";color:" + Theme::warn().name() + ";");
+    QApplication::processEvents();
+
+    struct Row { QString title, se, src, file, size; };
+    QList<Row> rows;
+    qint64 visited = 0;
+    // 两个上限都要能被区分出来：扫到一半停手 和 真的扫完了，
+    // 对用户是两个完全不同的结论。混报会让缺文件的分区看起来像没影视。
+    bool truncatedWalk = false;
+    bool truncatedRows = false;
+    constexpr qint64 kMaxVisit = 60000;   // 再大会让界面假死几分钟
+    for (const QString &rootDir : roots) {
+        QDirIterator it(rootDir, QDir::Files,
+                        QDirIterator::Subdirectories | QDirIterator::FollowSymlinks);
+        while (it.hasNext()) {
+            const QString path = it.next();
+            if (++visited > kMaxVisit) { truncatedWalk = true; break; }
+            const QFileInfo fi(path);
+            const qint64 sz = fi.size();
+            if (!Nas::isVideoFile(path, sz)) continue;   // .ts 歧义在模型层处理
+
+            Nas::NameGuess g = Nas::guessFromFileName(fi.fileName());
+            // 同目录同名 .nfo 才认，避免把别的条目的元数据张冠李戴
+            QString nfoPath = fi.absolutePath() + "/" + fi.completeBaseName() + ".nfo";
+            QFile nf(nfoPath);
+            Nas::NfoInfo n;
+            if (nf.open(QIODevice::ReadOnly | QIODevice::Text))
+            {
+                // Qt6 的 readAll() 没有 maxSize 重载。nfo 正常只有几 KB，
+                // 但扫描的是用户目录，得防一个超大文件把界面冻住。
+                if (nf.size() <= (1 << 20))
+                    n = Nas::parseNfo(QString::fromUtf8(nf.readAll()));
+            }
+
+            Row r;
+            if (n.ok) {
+                r.title = n.title;
+                if (n.year) r.title += QString(" (%1)").arg(n.year);
+                r.se = (n.season || n.episode)
+                     ? QString("S%1E%2").arg(n.season, 2, 10, QChar('0'))
+                                        .arg(n.episode, 2, 10, QChar('0'))
+                     : QString("—");
+                r.src = "本地 nfo";
+            } else {
+                r.title = g.title.isEmpty() ? QString("（无法从文件名判断）") : g.title;
+                if (g.year) r.title += QString(" (%1)").arg(g.year);
+                r.se = (g.season || g.episode)
+                     ? QString("S%1E%2").arg(g.season, 2, 10, QChar('0'))
+                                        .arg(g.episode, 2, 10, QChar('0'))
+                     : QString("—");
+                // 来源如实标：把推断包装成"已刮削"是骗人
+                r.src = g.title.isEmpty() ? "未识别" : "文件名推断";
+            }
+            r.file = fi.fileName() + " · " + Nas::humanSize(sz);
+            rows << r;
+            if (rows.size() >= 400) { truncatedRows = true; break; }
+        }
+    }
+
+    m_tvTable->setRowCount(rows.size());
+    for (int i = 0; i < rows.size(); ++i) {
+        m_tvTable->setItem(i, 0, new QTableWidgetItem(rows[i].title));
+        m_tvTable->setItem(i, 1, new QTableWidgetItem(rows[i].se));
+        m_tvTable->setItem(i, 2, new QTableWidgetItem(rows[i].src));
+        m_tvTable->setItem(i, 3, new QTableWidgetItem(rows[i].file));
+    }
+    m_tvCount->setText(QString("已索引 %1 项").arg(rows.size()));
+    m_tvScanned = true;
+    m_tvPill->setText(rows.isEmpty() ? "无影视文件" : "已索引");
+    m_tvPill->setStyleSheet("padding:2px 8px; border-radius:4px;background:" +
+        (rows.isEmpty() ? Theme::surface3().name() : Theme::alpha(Theme::ok(), 36).name()) + ";color:" +
+        (rows.isEmpty() ? Theme::textMute().name() : Theme::ok().name()) + ";");
+
+    // 未验证的部分写明白。这条说明的价值在于防止"看起来像刮削好了"。
+    m_tvNote->setText(
+        "标 <b>文件名推断</b> 的条目未经任何在线校验：本机 TMDB 不可达、"
+        "omdb 需要 API key。标题与年份可能与实际不符；季集判断不了时显示 "
+        "<b>—</b>，不编造。若装了 ffmpeg，可补缩略图与时长 —— 当前未接。");
+    if (rows.isEmpty() && !truncatedWalk && !truncatedRows) {
+        // 空结果就说空结果。继续挂着「文件名推断不可信」那段，
+        // 会让人以为有条目被藏起来了。
+        m_tvNote->setText(QString::fromUtf8(
+            "所选分区下没有找到影视文件。若影视放在别的目录，"
+            "把那个目录所在的分区选上再扫。"));
+        setStatus(QString::fromUtf8(
+            "电视墙：所选分区下没有影视文件（只读，未改动任何文件）"));
+    } else if (truncatedWalk || truncatedRows) {
+        // 说清楚没扫完，而不是给一个看起来完整的数字
+        QString why = truncatedWalk
+            ? QString("已遍历 %1 个条目后停止（上限 %2），结果不完整").arg(visited).arg(kMaxVisit)
+            : QString("结果已达 %1 条上限，可能还有更多未列出").arg(rows.size());
+        m_tvPill->setText("结果不完整");
+        m_tvPill->setStyleSheet("padding:2px 8px; border-radius:4px;background:" +
+                                Theme::alpha(Theme::warn(), 36).name() + ";color:" +
+                                Theme::warn().name() + ";");
+        m_tvNote->setText(m_tvNote->text() + "<br><b>" + why + "</b>");
+        setStatus("电视墙扫描被上限打断：" + why);
+    } else {
+        setStatus(QString("电视墙扫描完成：%1 项（只读，未改动任何文件）").arg(rows.size()));
+    }
 }

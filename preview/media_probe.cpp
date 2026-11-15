@@ -160,6 +160,19 @@ int main(int argc, char **argv)
         check(!n.ok, "标题全空白 -> 失败");
     }
 
+    printf("\n=== TypeScript 类型声明不得当视频（实测踩过）===\n");
+    // .d.mts / .d.cts / .d.ts 是 TS 类型声明。mts/cts 看着像 MPEG-TS，
+    // 真实扫描把 index.d.mts 列成了影片。这类不能靠体积区分：
+    // 类型声明可能几百 KB，真正的 .mts 分片也可能小于阈值。
+    check(!Nas::isVideoExtension("/p/index.d.mts"), "index.d.mts 不是视频");
+    check(!Nas::isVideoExtension("/p/index.d.cts"), "index.d.cts 不是视频");
+    check(!Nas::isVideoExtension("/p/index.D.MTS"), "大小写不敏感");
+    check(!Nas::isVideoFile("/p/index.d.mts", 500 * 1024), "isVideoFile 也挡（给足体积）");
+    check(!Nas::isVideoFile("/p/index.d.ts", 90 * 1024 * 1024), "d.ts 即使很大也不算");
+    check(Nas::isVideoExtension("/p/movie.mts"), "真 .mts 仍算视频");
+    check(Nas::isVideoExtension("/a/DCS_TRUE.iso"), "iso 仍算（蓝光原盘）");
+    check(Nas::isVideoFile("/a/DCS_TRUE.iso", 3158LL * 1024 * 1024), "大 iso 通过完整判定");
+
     printf("\n=== nfo 文件识别 ===\n");
     check(Nas::looksLikeNfoFile("/m/movie.nfo"), "movie.nfo");
     check(Nas::looksLikeNfoFile("/m/SHOW.NFO"), "大小写不敏感");

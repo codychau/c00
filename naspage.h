@@ -17,6 +17,9 @@
 class QCheckBox;
 class QLabel;
 class QButtonGroup;
+class QTabWidget;
+class QTableWidget;
+class QPushButton;
 class QRadioButton;
 class QWidget;
 
@@ -67,6 +70,9 @@ private:
     // 按成员数刷新导出区：恰好 1 个才允许 SMB；从 >1 掉到 1 时自动切 SMB
     void syncExportMode(int memberCount);
     void refreshSmbWarning();
+    QWidget *buildExtensionsTab();
+    void refreshTvDeps();
+    void onTvScanClicked();
     // 逐条展示命令并要用户确认；返回要执行的步骤（可能为空 = 用户取消）
     QVector<NasController::Step> confirmSteps(const QVector<NasController::Step> &steps,
                                               const QString &title);
@@ -115,6 +121,21 @@ private:
     // 上一帧成员数。判断「刚从 >1 掉到 1」这个跳变，不能只看当前值：
     // 否则改引擎下拉（成员数不变）也会把用户显式选的 iSCSI 翻成 SMB。
     int m_lastMemberCount = 0;
+
+    // ── 扩展服务（电视墙）──
+    // 标签页把「导出服务」和「扩展服务」分开：扩展关掉不影响导出，
+    // 两者的失败域必须隔离，不能让影视扫描出错连带挡住导出。
+    QTabWidget *m_tabs = nullptr;
+    QWidget    *m_svcTab = nullptr;
+    QWidget    *m_extTab = nullptr;
+    QLabel     *m_tvRoot = nullptr;      // 当前扫描根（跟随所选分区）
+    QLabel     *m_tvCount = nullptr;
+    QLabel     *m_tvPill = nullptr;
+    QLabel     *m_tvDeps = nullptr;
+    QLabel     *m_tvNote = nullptr;
+    QTableWidget *m_tvTable = nullptr;
+    QPushButton *m_tvScan = nullptr;
+    bool        m_tvScanned = false;
 };
 
 #endif // NASPAGE_H

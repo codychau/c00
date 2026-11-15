@@ -562,6 +562,15 @@ bool isVideoExtension(const QString &path)
     // 调用方（"记得再用体积过滤"）等于埋一个必然踩到的坑：只要有一处
     // 忘了，源代码就会被当成影片列进电视墙。所以这里直接不认，
     // 需要认 MPEG-TS 的调用方必须显式走 isVideoFile()。
+
+    // 同理，TypeScript 的类型声明 .d.ts / .d.mts / .d.cts 必须挡掉：
+    // mts/cts 看起来像 MPEG-TS，实测真把 index.d.mts 列成了影片。
+    // 这里不靠体积兜 —— 类型声明也可能几十 KB 以上，而真正的 .mts
+    // 影片分片也会小于阈值，用体积区分这两类只会两边都错。
+    const QString lower = path.toLower();
+    if (lower.endsWith(".d.mts") || lower.endsWith(".d.cts")
+        || lower.endsWith(".d.ts"))
+        return false;
     static const QSet<QString> v = {
         "mkv", "mp4", "m4v", "avi", "mov",
         "wmv", "flv", "webm", "mpg", "mpeg",
@@ -591,6 +600,7 @@ bool looksLikeMpegTs(const QString &path, qint64 sizeBytes)
     // 实测就把 vite.config.ts 认成过视频，所以用体积兜一道：
     // 源码文件不可能上百 MB，而 MPEG-TS 分片通常至少几 MB。
     if (extOf(path) != "ts") return true;   // 非 .ts 不经这一关
+    if (path.toLower().endsWith(".d.ts")) return false;   // TS 类型声明
     return sizeBytes >= minVideoBytes();
 }
 

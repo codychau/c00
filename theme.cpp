@@ -278,6 +278,30 @@ QLabel[role="badge"] {
     border: 1px solid @border@; border-radius: 999px;
     padding: 2px 10px; font-size: 12px;
 }
+
+    /* 说明框：给「这件事还没验证 / 还没接」的提示用，刻意区别于错误。
+       用 @warn@ 会像故障，用 @bad@ 更像坏了；@accent2@ 表示补充信息，
+       不占用状态语义。 */
+    QLabel[role="note"] {
+        padding: 8px 10px; border-radius: 5px;
+        background: rgba(167, 139, 250, 20);
+        border: 1px solid rgba(167, 139, 250, 72);
+        color: @accent2@;
+    }
+
+    /* 代码块：比 @surface@ 更深一档的底色，主题里原本没有这一级 */
+    QLabel[role="code"] {
+        padding: 8px 10px; border-radius: 5px;
+        background: @bg@;
+        border: 1px solid @border@;
+        color: @dim@;
+    }
+
+    QLabel[role="pill"] {
+        padding: 2px 8px; border-radius: 4px;
+        background: @surface3@;
+        color: @mute@;
+    }
 QLabel[role="hero"] {
     color: @text@; background: @surface2@;
     border: 1px solid @border@; border-left: 3px solid @accent2@;
