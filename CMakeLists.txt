@@ -105,6 +105,10 @@ if(CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CMAKE_INSTALL_PREFIX "$ENV{HOME}/.local" CACHE PATH "Install prefix" FORCE)
 endif()
 install(TARGETS server-toolbox RUNTIME DESTINATION bin)
+# 引擎跟着程序走: ~/.local/bin 里的 nasrs 会被 PATH 兜底找到
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nasrs/target/release/nasrs)
+    install(PROGRAMS nasrs/target/release/nasrs DESTINATION bin)
+endif()
 
 # ── 界面自检脚手架（可选，默认关闭，不影响正常构建）──────────
 # cmake -S . -B build -DENABLE_THEME_SHOT=ON
@@ -157,6 +161,11 @@ add_custom_target(build-proxy-rs
 add_custom_target(build-nasrs
     COMMAND cargo build --release --manifest-path ${CMAKE_CURRENT_SOURCE_DIR}/nasrs/Cargo.toml
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/nasrs
+    # 程序在「可执行文件同目录」找 nasrs (nascontroller.cpp::nasrsBinaryPath),
+    # cargo 的产物在 target/release 下, 所以链一份过来 —— 不链就会「缺少引擎」。
+    COMMAND ${CMAKE_COMMAND} -E create_symlink
+        ${CMAKE_CURRENT_SOURCE_DIR}/nasrs/target/release/nasrs ${CMAKE_BINARY_DIR}/nasrs
+    DEPENDS nasrs/Cargo.toml nasrs/src/main.rs nasrs/src/raid.rs nasrs/src/nbd.rs nasrs/src/lib.rs
 )
 
 # 条带映射与 NBD 编解码是纯函数，单测不需要 root、不需要设备、
