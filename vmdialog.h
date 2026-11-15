@@ -59,6 +59,39 @@ private:
     // 硬件直通
     QListWidget    *m_pciList;
     QCheckBox      *m_hugepagesCb;
+    QCheckBox      *m_vfioMultiCb;      // multifunction=on (同 slot 多 function)
+    QComboBox      *m_hole64Combo;       // q35-pcihost.pci-hole64-size
+    QWidget        *m_hole64Row;         // 「PCI hole64:」标签 + 下拉整行 (VirtualBox 时整行隐藏)
+
+    // QEMU 固件 (UEFI / pflash)
+    QGroupBox      *m_uefiGroup;
+    QCheckBox      *m_uefiCb;
+    QLineEdit      *m_uefiCodeEdit;
+    QLineEdit      *m_uefiVarsEdit;
+
+    // 显示 (无显示, 与 VNC 互斥)
+    QCheckBox      *m_displayNoneCb;
+    QCheckBox      *m_runRootCb;         // 以 root 运行 QEMU (sudo)
+
+    // 音频 (QEMU audiodev)
+    QGroupBox      *m_audioGroup;
+    QComboBox      *m_audioBackendCombo;
+    QComboBox      *m_audioModelCombo;
+
+    // USB 直通
+    QGroupBox      *m_usbGroup;
+    QCheckBox      *m_usbXhciCb;
+    QCheckBox      *m_usbKbdTabletCb;
+    QListWidget    *m_usbList;           // 项 data: "host|vid:pid" 或 "evdev|/dev/…"
+    QPushButton    *m_usbAddBtn;
+    QPushButton    *m_usbRemoveBtn;
+    QPushButton    *m_usbScanBtn;
+
+    // Root 钩子 (GPU 切换)
+    QGroupBox      *m_rootHookGroup;
+    QPlainTextEdit *m_preRootEdit;
+    QPlainTextEdit *m_postRootEdit;
+    QPushButton    *m_rootLoadBtn;
 
     // 网络设置 (QEMU / VirtualBox 各一页)
     QGroupBox      *m_netGroup;

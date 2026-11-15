@@ -64,6 +64,7 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("iso"))    vm.iso    = QString::fromStdString(v->value_or(""));
             if (auto *v = vmTbl->get("vnc"))    vm.vnc    = v->value_or(-1);
             if (auto *v = vmTbl->get("qemu_binary")) vm.qemuBinary = QString::fromStdString(v->value_or("qemu-system-x86_64"));
+            if (auto *v = vmTbl->get("qemu_run_root")) vm.qemuRunRoot = v->value_or(false);
             if (auto *v = vmTbl->get("ramfb"))  vm.ramfb = v->value_or(false);
             if (auto *v = vmTbl->get("extra"))  vm.extra = QString::fromStdString(v->value_or(""));
 
@@ -110,6 +111,47 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("vbox_nic_type"))   vm.vboxNicType = QString::fromStdString(v->value_or("nat"));
             if (auto *v = vmTbl->get("vbox_nic_model"))  vm.vboxNicModel = QString::fromStdString(v->value_or("82545EM"));
             if (auto *v = vmTbl->get("vbox_bridge_dev")) vm.vboxBridgeDev = QString::fromStdString(v->value_or(""));
+
+            // QEMU 固件 (UEFI / pflash)
+            if (auto *v = vmTbl->get("uefi"))      vm.uefi     = v->value_or(false);
+            if (auto *v = vmTbl->get("uefi_code")) vm.uefiCode = QString::fromStdString(v->value_or(
+                "/usr/share/OVMF/x64/OVMF_CODE.4m.fd"));
+            if (auto *v = vmTbl->get("uefi_vars")) vm.uefiVars = QString::fromStdString(v->value_or(
+                "/usr/share/OVMF/x64/OVMF_VARS.4m.fd"));
+
+            // PCI 直通增强 / 显示 / 音频
+            if (auto *v = vmTbl->get("pci_multifunction")) vm.vfioMultifunction = v->value_or(false);
+            if (auto *v = vmTbl->get("pci_hole64"))        vm.pciHole64 = QString::fromStdString(v->value_or(""));
+            if (auto *v = vmTbl->get("display_none"))      vm.displayNone = v->value_or(false);
+            if (auto *v = vmTbl->get("audio_backend")) {
+                QString ab = QString::fromStdString(v->value_or("none")).toLower();
+                vm.audioBackend = (ab == "pa" || ab == "pipewire" || ab == "alsa"
+                                   || ab == "oss" || ab == "sndio") ? ab : "none";
+            }
+            if (auto *v = vmTbl->get("audio_model")) {
+                QString am = QString::fromStdString(v->value_or("hda-duplex")).toLower();
+                vm.audioModel = (am == "hda-micro") ? "hda-micro" : "hda-duplex";
+            }
+
+            // USB 直通
+            if (auto *v = vmTbl->get("usb_xhci"))      vm.usbXhci      = v->value_or(false);
+            if (auto *v = vmTbl->get("usb_kbd_tablet")) vm.usbKbdTablet = v->value_or(false);
+            if (auto *v = vmTbl->get("usb_host")) {
+                if (auto *arr = v->as_array()) {
+                    for (auto &el : *arr)
+                        vm.usbHostVendors.append(QString::fromStdString(el.value_or("")));
+                }
+            }
+            if (auto *v = vmTbl->get("usb_evdev")) {
+                if (auto *arr = v->as_array()) {
+                    for (auto &el : *arr)
+                        vm.usbEvdevPaths.append(QString::fromStdString(el.value_or("")));
+                }
+            }
+
+            // Root 钩子
+            if (auto *v = vmTbl->get("pre_start_root"))  vm.preStartRoot  = QString::fromStdString(v->value_or(""));
+            if (auto *v = vmTbl->get("post_stop_root"))  vm.postStopRoot  = QString::fromStdString(v->value_or(""));
 
             // 端口转发
             if (auto *v = vmTbl->get("port_forwards")) {
@@ -204,6 +246,7 @@ bool VMConfigManager::save() const
         tbl.emplace("iso",    vm.iso.toStdString());
         tbl.emplace("vnc",    vm.vnc);
         tbl.emplace("qemu_binary", vm.qemuBinary.toStdString());
+        tbl.emplace("qemu_run_root", vm.qemuRunRoot);
         tbl.emplace("ramfb",  vm.ramfb);
 
         // 结构化字段
@@ -228,6 +271,26 @@ bool VMConfigManager::save() const
         tbl.emplace("vbox_nic_type",  vm.vboxNicType.toStdString());
         tbl.emplace("vbox_nic_model", vm.vboxNicModel.toStdString());
         tbl.emplace("vbox_bridge_dev", vm.vboxBridgeDev.toStdString());
+
+        // QEMU 固件 / 直通增强 / 显示 / 音频 / USB / Root 钩子
+        tbl.emplace("uefi",       vm.uefi);
+        tbl.emplace("uefi_code",  vm.uefiCode.toStdString());
+        tbl.emplace("uefi_vars",  vm.uefiVars.toStdString());
+        tbl.emplace("pci_multifunction", vm.vfioMultifunction);
+        tbl.emplace("pci_hole64", vm.pciHole64.toStdString());
+        tbl.emplace("display_none", vm.displayNone);
+        tbl.emplace("audio_backend", vm.audioBackend.toStdString());
+        tbl.emplace("audio_model",   vm.audioModel.toStdString());
+        tbl.emplace("usb_xhci",      vm.usbXhci);
+        tbl.emplace("usb_kbd_tablet", vm.usbKbdTablet);
+        toml::array usbHostArr;
+        for (const auto &vp : vm.usbHostVendors) usbHostArr.push_back(vp.toStdString());
+        tbl.emplace("usb_host", std::move(usbHostArr));
+        toml::array usbEvdevArr;
+        for (const auto &ev : vm.usbEvdevPaths) usbEvdevArr.push_back(ev.toStdString());
+        tbl.emplace("usb_evdev", std::move(usbEvdevArr));
+        tbl.emplace("pre_start_root",  vm.preStartRoot.toStdString());
+        tbl.emplace("post_stop_root",  vm.postStopRoot.toStdString());
 
         // 端口转发
         toml::array pfArr;

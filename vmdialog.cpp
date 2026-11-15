@@ -18,6 +18,10 @@
 #include <QProcess>
 #include <QIntValidator>
 #include <QStandardPaths>
+#include <QDir>
+#include <QRadioButton>
+#include <QRegularExpression>
+#include <QSignalBlocker>
 
 // ═══════════════════════════════════════════════════════════════════
 //  端口转发编辑对话框
@@ -268,16 +272,13 @@ static bool editDiskDialog(QWidget *parent, VMDataDisk &dd, bool isNew, const QS
     ifaceCombo->addItem("IDE", "ide");
     int iIdx = ifaceCombo->findData(dd.iface);
     if (iIdx >= 0) ifaceCombo->setCurrentIndex(iIdx);
-    ifaceCombo->setEnabled(dd.system);
     ifaceCombo->setToolTip(
-        "仅系统盘生效 (数据盘固定 virtio), VirtualBox 忽略此项.\n"
+        "这块盘接在哪个控制器上 (系统盘与数据盘都可选).\n"
         "IDE: 原生 IDE 控制器, Win98/2000/XP/7 免驱动即认盘(推荐旧 OS)\n"
-        "SATA: AHCI 控制器, Win7 SP1+ 原生支持\n"
-        "virtio: 性能最高, 但需装入对应驱动 (Win10/11 自带, 老系统需手动装)");
-    form->addRow("系统盘接口:", ifaceCombo);
-    QObject::connect(sysCb, &QCheckBox::toggled, &dlg, [ifaceCombo](bool on) {
-        ifaceCombo->setEnabled(on);
-    });
+        "SATA: AHCI 控制器 (q35 上自动建 ich9-ahci), Win7 SP1+ 原生支持\n"
+        "virtio: 性能最高, 但需装入对应驱动 (Win10/11 自带, 老系统需手动装)\n"
+        "VirtualBox 忽略此项.");
+    form->addRow(dd.system ? "系统盘接口:" : "接口:", ifaceCombo);
 
     auto *cacheCombo = new QComboBox();
     cacheCombo->addItem("none",       "none");
@@ -322,14 +323,15 @@ static QListWidgetItem *makeDiskItem(const VMDataDisk &dd)
     QString text = dd.system
         ? QString("★ 系统盘  %1  [%2 | if:%3 | cache:%4 | aio:%5]")
               .arg(name, dd.format, dd.iface, dd.cache, dd.aio)
-        : QString("%1  [%2 | cache:%3 | aio:%4]").arg(name, dd.format, dd.cache, dd.aio);
+        : QString("%1  [%2 | if:%3 | cache:%4 | aio:%5]").arg(name, dd.format, dd.iface, dd.cache, dd.aio);
 
     auto *item = new QListWidgetItem(text);
     item->setData(Qt::UserRole,
         QString("%1|%2|%3|%4|%5|%6").arg(dd.path, dd.format, dd.cache, dd.aio, dd.iface)
                                     .arg(dd.system ? "1" : "0"));
-    QString tip = QString("路径:%1\n格式:%2\n缓存:%3\nAIO:%4").arg(dd.path, dd.format, dd.cache, dd.aio);
-    if (dd.system) tip += QString("\n系统盘 (启动盘), 接口:%1").arg(dd.iface);
+    QString tip = QString("路径:%1\n格式:%2\n接口:%3\n缓存:%4\nAIO:%5")
+                      .arg(dd.path, dd.format, dd.iface, dd.cache, dd.aio);
+    if (dd.system) tip += "\n系统盘 (启动盘)";
     item->setToolTip(tip);
     return item;
 }
@@ -345,6 +347,135 @@ static VMDataDisk diskFromItem(QListWidgetItem *item)
     if (parts.size() >= 5) dd.iface  = parts[4];
     if (parts.size() >= 6) dd.system = (parts[5] == "1");
     return dd;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  USB 直通: 宿主机扫描 + 条目编辑
+//  列表项 data: "host|vid:pid|描述" 或 "evdev|/dev/input/by-id/…"
+// ═══════════════════════════════════════════════════════════════════
+
+// 用 lsusb 列出宿主机 USB 设备, 返回 "vid:pid|描述"
+static QStringList scanUsbDevices()
+{
+    QStringList out;
+    QProcess p;
+    p.start("lsusb", {});
+    if (!p.waitForFinished(4000)) { p.kill(); p.waitForFinished(500); return out; }
+    static const QRegularExpression re("ID ([0-9a-f]{4}:[0-9a-f]{4})\\s+(.+)$",
+                                       QRegularExpression::CaseInsensitiveOption);
+    for (const QString &line : QString::fromUtf8(p.readAllStandardOutput()).split('\n')) {
+        const auto m = re.match(line.trimmed());
+        if (!m.hasMatch()) continue;
+        out << QString("%1|%2").arg(m.captured(1), m.captured(2).trimmed());
+    }
+    return out;
+}
+
+// 扫描 /dev/input/by-id 下的 evdev 事件设备
+static QStringList scanEvdevPaths()
+{
+    QStringList out;
+    const QString dir = "/dev/input/by-id";
+    const QStringList entries = QDir(dir).entryList(QDir::Files, QDir::Name);
+    for (const QString &f : entries)
+        if (f.contains("event")) out << dir + "/" + f;
+    return out;
+}
+
+static QString usbItemText(const QString &data)
+{
+    const QStringList parts = data.split('|');
+    if (parts.value(0) == "host")
+        return QString("🖳 USB  %1  %2").arg(parts.value(1), parts.value(2));
+    return QString("⌨ evdev  %1").arg(parts.value(1));
+}
+
+static bool editUsbDeviceDialog(QWidget *parent, QString &outData)
+{
+    QDialog dlg(parent);
+    dlg.setWindowTitle("添加 USB 直通条目");
+    dlg.resize(560, 220);
+
+    auto *layout = new QVBoxLayout(&dlg);
+    auto *hostRadio = new QRadioButton("物理 USB 设备 (按 vid:pid 整体透传)");
+    auto *evRadio   = new QRadioButton("evdev 输入设备 (物理键鼠直接进虚机)");
+    hostRadio->setChecked(true);
+    hostRadio->setToolTip("透传后宿主机失去该设备; 需要上方勾选 xhci 控制器.");
+    evRadio->setToolTip("走 virtio-input-host-pci, 读 /dev/input/*, 需要以 root 运行 QEMU.");
+    layout->addWidget(hostRadio);
+    layout->addWidget(evRadio);
+
+    auto *vidEdit = new QLineEdit();
+    vidEdit->setPlaceholderText("例: 046d:c53f  (lsusb 的 ID 字段)");
+    auto *scanUsbBtn = new QPushButton("🔍 从 lsusb 选择");
+    auto *vidRow = new QHBoxLayout();
+    vidRow->addWidget(new QLabel("VID:PID"));
+    vidRow->addWidget(vidEdit, 1);
+    vidRow->addWidget(scanUsbBtn);
+    layout->addLayout(vidRow);
+
+    auto *evCombo = new QComboBox();
+    evCombo->setEditable(true);
+    const QStringList evs = scanEvdevPaths();
+    for (const QString &e : evs) evCombo->addItem(e);
+    evCombo->setToolTip("扫描自 /dev/input/by-id (只列 event 设备)");
+    layout->addWidget(evCombo);
+
+    QObject::connect(hostRadio, &QRadioButton::toggled, &dlg,
+                     [vidEdit, evCombo, scanUsbBtn](bool on) {
+        vidEdit->setVisible(on);
+        scanUsbBtn->setVisible(on);
+        evCombo->setVisible(!on);
+    });
+
+    QObject::connect(scanUsbBtn, &QPushButton::clicked, &dlg, [vidEdit]() {
+        const QStringList devs = scanUsbDevices();
+        if (devs.isEmpty()) {
+            QMessageBox::warning(vidEdit->parentWidget(), "提示", "lsusb 未取到设备");
+            return;
+        }
+        QStringList items;
+        for (const QString &d : devs) {
+            const QStringList p = d.split('|');
+            items << QString("%1  %2").arg(p.value(0), p.value(1));
+        }
+        bool ok = false;
+        const QString picked = QInputDialog::getItem(vidEdit->parentWidget(),
+            "选择 USB 设备", "设备:", items, 0, false, &ok);
+        if (ok && !picked.isEmpty()) {
+            const QString vid = picked.section(' ', 0, 0);
+            const QString desc = picked.section(' ', 1);
+            vidEdit->setText(vid);
+            vidEdit->setToolTip(desc);
+        }
+    });
+
+    auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+    QObject::connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+    QObject::connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+    layout->addWidget(btns);
+
+    if (dlg.exec() != QDialog::Accepted) return false;
+
+    if (hostRadio->isChecked()) {
+        const QString vp = vidEdit->text().trimmed().toLower();
+        static const QRegularExpression re("^(?:0x)?([0-9a-f]{4}):(?:0x)?([0-9a-f]{4})$");
+        const auto m = re.match(vp);
+        if (!m.hasMatch()) {
+            QMessageBox::warning(&dlg, "提示", "格式应为 vid:pid, 如 046d:c53f");
+            return false;
+        }
+        outData = QString("host|%1:%2|%3").arg(m.captured(1), m.captured(2),
+                                               vidEdit->toolTip());
+        return true;
+    }
+    const QString path = evCombo->currentText().trimmed();
+    if (path.isEmpty()) {
+        QMessageBox::warning(&dlg, "提示", "请选择 evdev 路径");
+        return false;
+    }
+    outData = "evdev|" + path;
+    return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -377,6 +508,16 @@ void VMDialog::updateVmTypeUI()
     // 额外参数组是 QEMU 专属，VirtualBox 时整组隐藏（窗口更短）
     m_extraGroup->setVisible(!vbox);
 
+    // QEMU 专属: UEFI 固件 / 音频 / USB 直通 / Root 钩子 / 无显示 / 直通增强
+    m_uefiGroup->setVisible(!vbox);
+    m_audioGroup->setVisible(!vbox);
+    m_usbGroup->setVisible(!vbox);
+    m_rootHookGroup->setVisible(!vbox);
+    m_displayNoneCb->setVisible(!vbox);
+    m_runRootCb->setVisible(!vbox);
+    m_vfioMultiCb->setVisible(!vbox);
+    m_hole64Row->setVisible(!vbox);
+
     // 端口转发组: VirtualBox 时压缩高度并隐藏「编辑」按钮 (表变矮, 窗口更短)
     m_portGroup->setTitle(vbox ? "端口转发 (NAT)" : "端口转发 (user 模式)");
     m_portTable->setMinimumHeight(vbox ? 50 : 110);
@@ -393,7 +534,7 @@ VMDialog::VMDialog(QWidget *parent)
     : QDialog(parent)
 {
     setWindowTitle("编辑虚机配置");
-    resize(820, 680);
+    resize(880, 820);
 
     auto *outer = new QVBoxLayout(this);
 
@@ -693,7 +834,133 @@ VMDialog::VMDialog(QWidget *parent)
 
     m_hugepagesCb = new QCheckBox("Hugepages (巨页内存)");
     hptLayout->addWidget(m_hugepagesCb);
+
+    // ── 直通增强: 同 slot 多 function + q35 hole64 ──
+    m_vfioMultiCb = new QCheckBox("多函数 multifunction=on");
+    m_vfioMultiCb->setToolTip(
+        "同一物理 slot 的多个 function (如 显卡 + 显卡音频) 必须落在同一个虚拟 slot.\n"
+        "勾选后每个 vfio-pci 设备都带 multifunction=on, 并分配显式 id.\n"
+        "左侧 PCI 列表的顺序 = 命令行顺序 = function 递增顺序\n"
+        "(例: 06:00.0 在前, 06:00.1 在后).");
+    hptLayout->addWidget(m_vfioMultiCb);
+
+    m_hole64Row = new QWidget();
+    auto *hole64RowLay = new QHBoxLayout(m_hole64Row);
+    hole64RowLay->setContentsMargins(0, 0, 0, 0);
+    hole64RowLay->addWidget(new QLabel("PCI hole64:"));
+    m_hole64Combo = new QComboBox();
+    m_hole64Combo->setEditable(true);
+    m_hole64Combo->addItem("留空 (不设)");
+    m_hole64Combo->addItem("32G");
+    m_hole64Combo->addItem("64G");
+    m_hole64Combo->addItem("256G");
+    m_hole64Combo->addItem("512G");
+    m_hole64Combo->addItem("1024G");
+    m_hole64Combo->setToolTip(
+        "q35-pcihost.pci-hole64-size: 给设备内存映射预留的地址空间.\n"
+        "显卡直通需要足够大的 hole64 才能映射显存 BAR (RTX 4060 用 512G 稳).\n"
+        "仅 q35 系机器生效; pc / virt 机器不会输出该参数.");
+    hole64RowLay->addWidget(m_hole64Combo, 1);
+    hptLayout->addWidget(m_hole64Row);
+
     leftCol->addWidget(hptGroup);
+
+    // ── 音频 (QEMU audiodev) ──
+    m_audioGroup = new QGroupBox("音频 (QEMU)");
+    auto *audioForm = new QFormLayout(m_audioGroup);
+
+    m_audioBackendCombo = new QComboBox();
+    m_audioBackendCombo->addItem("不启用 (none)",     "none");
+    m_audioBackendCombo->addItem("PulseAudio (pa)",   "pa");
+    m_audioBackendCombo->addItem("PipeWire (pipewire)", "pipewire");
+    m_audioBackendCombo->addItem("ALSA (alsa)",       "alsa");
+    m_audioBackendCombo->addItem("OSS (oss)",         "oss");
+    m_audioBackendCombo->addItem("Sndio (sndio)",     "sndio");
+    m_audioBackendCombo->setCurrentIndex(m_audioBackendCombo->findData("none"));
+    m_audioBackendCombo->setToolTip(
+        "-audiodev 后端.\n"
+        "pa: 走 PulseAudio / pipewire-pulse. 程序会自动带上 XDG_RUNTIME_DIR\n"
+        "与 PULSE_SERVER, 并在缺少 pulse/pid 时补一次 (root 客户端需要它).\n"
+        "显卡直通的 GPU 音频函数交给虚机后, 主机侧声卡消失, 用 HDA 虚声卡给虚机出声.");
+    audioForm->addRow("后端:", m_audioBackendCombo);
+
+    m_audioModelCombo = new QComboBox();
+    m_audioModelCombo->addItem("HDA duplex (hda-duplex, 全双工)", "hda-duplex");
+    m_audioModelCombo->addItem("HDA micro (hda-micro, 只出声)",   "hda-micro");
+    m_audioModelCombo->setCurrentIndex(m_audioModelCombo->findData("hda-duplex"));
+    m_audioModelCombo->setToolTip(
+        "选后端为 none 时此项不起作用.\n"
+        "勾选后自动输出: -audiodev <后端>,id=au0 -device ich9-intel-hda\n"
+        "                        -device <hda-duplex|hda-micro>,audiodev=au0");
+    audioForm->addRow("虚声卡:", m_audioModelCombo);
+
+    leftCol->addWidget(m_audioGroup);
+
+    // ── USB 直通 ──
+    m_usbGroup = new QGroupBox("USB 直通 (QEMU)");
+    auto *usbLayout = new QVBoxLayout(m_usbGroup);
+
+    m_usbXhciCb = new QCheckBox("启用 xhci 控制器 (qemu-xhci)");
+    m_usbXhciCb->setToolTip("物理 USB 设备与虚拟 usb-kbd/tablet 都要挂在 xhci 总线上.\n"
+                            "勾选列表里的 usb-host 条目时若未勾选此项, 程序会自动补一条 xhci.");
+    usbLayout->addWidget(m_usbXhciCb);
+
+    m_usbKbdTabletCb = new QCheckBox("虚拟 usb-kbd + usb-tablet (远程注入用)");
+    m_usbKbdTabletCb->setToolTip("在主机没有物理键盘透传时, 给虚机一套虚拟键鼠,\n"
+                                 "可用 VNC / 远程工具注入输入.");
+    usbLayout->addWidget(m_usbKbdTabletCb);
+
+    m_usbList = new QListWidget();
+    m_usbList->setAlternatingRowColors(true);
+    m_usbList->setMinimumHeight(70);
+    m_usbList->setToolTip(
+        "🖳 = 按 vid:pid 整体透传物理 USB 设备 (透传后宿主机失去该设备)\n"
+        "⌨ = evdev 输入设备走 virtio-input-host-pci (读 /dev/input/*, 需 root 运行 QEMU)");
+    usbLayout->addWidget(m_usbList);
+
+    auto *usbBtnRow = new QHBoxLayout();
+    m_usbAddBtn    = new QPushButton("➕ 添加");
+    m_usbRemoveBtn = new QPushButton("🗑️ 移除");
+    m_usbScanBtn   = new QPushButton("🔍 扫描宿主机");
+    m_usbScanBtn->setToolTip("用 lsusb 列出可整体透传的 USB 设备, 并扫描 /dev/input/by-id 下的输入设备,\n"
+                             "多选后加入列表.");
+    usbBtnRow->addWidget(m_usbAddBtn);
+    usbBtnRow->addWidget(m_usbRemoveBtn);
+    usbBtnRow->addWidget(m_usbScanBtn);
+    usbBtnRow->addStretch();
+    usbLayout->addLayout(usbBtnRow);
+
+    leftCol->addWidget(m_usbGroup);
+
+    // ── Root 钩子 (GPU 切换脚本) ──
+    m_rootHookGroup = new QGroupBox("Root 钩子 (GPU 切换脚本)");
+    auto *hookLayout = new QVBoxLayout(m_rootHookGroup);
+
+    auto *hookWarn = new QLabel(
+        "⚠️ 启动前脚本会停止 greetd 并释放显卡 → 当前桌面黑屏；\n"
+        "退出后脚本回绑 nvidia 并重启 greetd。经 sudo 执行，会弹密码框。");
+    hookWarn->setStyleSheet("color: #b35421; font-size: 11px;");
+    hookWarn->setWordWrap(true);
+    hookLayout->addWidget(hookWarn);
+
+    hookLayout->addWidget(new QLabel("启动前 (root):"));
+    m_preRootEdit = new QPlainTextEdit();
+    m_preRootEdit->setPlaceholderText("例如: 绑定 vfio-pci + 停合成器");
+    m_preRootEdit->setMaximumHeight(80);
+    hookLayout->addWidget(m_preRootEdit);
+
+    hookLayout->addWidget(new QLabel("退出后 (root):"));
+    m_postRootEdit = new QPlainTextEdit();
+    m_postRootEdit->setPlaceholderText("例如: 回绑 nvidia + 重启 greetd");
+    m_postRootEdit->setMaximumHeight(80);
+    hookLayout->addWidget(m_postRootEdit);
+
+    m_rootLoadBtn = new QPushButton("📄 载入 run-win10-pt.sh 的绑定/归还段");
+    m_rootLoadBtn->setToolTip("把 ~/bin/run-win10-pt.sh 里的 gpu_to_vfio / gpu_to_host 两段填入上方两格。\n"
+                              "BDF 以 06:00.0 / 06:00.1 为默认，需在 PCI 列表里选你自己的设备。");
+    hookLayout->addWidget(m_rootLoadBtn);
+
+    leftCol->addWidget(m_rootHookGroup);
 
     // ── 额外参数 ──
     m_extraGroup = new QGroupBox("额外 QEMU 参数");
@@ -765,6 +1032,22 @@ VMDialog::VMDialog(QWidget *parent)
     m_vncSpin->setToolTip("显示编号 (0~99)，VNC 端口 = 5900 + 编号");
     advForm->addRow("VNC 显示编号 (0~99):", m_vncSpin);
 
+    // 无显示 (纯显卡直通场景)
+    m_displayNoneCb = new QCheckBox("无显示 (-display none)");
+    m_displayNoneCb->setToolTip(
+        "整卡直通的虚机没有虚拟显卡: 需要 VGA 选 none + 勾选本项.\n"
+        "与 VNC 互斥 —— 勾选后 VNC 置为「禁用」; VNC 编号 ≥ 0 时本项不可勾选.\n"
+        "虚机画面改由直通显卡输出到物理显示器 (需要下方 Root 钩子先把显卡交给虚机).");
+    advForm->addRow("", m_displayNoneCb);
+    m_runRootCb = new QCheckBox("以 root 运行 QEMU (sudo)");
+    m_runRootCb->setToolTip(
+        "PCI 直通 (/dev/vfio/*) 与 evdev 透传 (/dev/input/*) 都需要 root.\n"
+        "勾选后程序用 sudo 启动 qemu-system-*:\n"
+        "  - 已有免密 sudo (启动失败时的「QEMU 权限配置」会写入 sudoers) → sudo -n;\n"
+        "  - 否则弹一次密码框, 经 sudo -S 传入.\n"
+        "单显卡直通的机器必须勾选此项, 并配合下方 Root 钩子先把显卡绑到 vfio-pci.");
+    advForm->addRow("", m_runRootCb);
+
     // ramfb
     m_ramfbCb = new QCheckBox("ramfb 显示 (aarch64)");
     m_ramfbCb->setVisible(false);
@@ -788,7 +1071,57 @@ VMDialog::VMDialog(QWidget *parent)
     // 网络设置放到右列 (借用端口转发组缩短后腾出的空间)
     rightCol->addWidget(m_netGroup);
 
+    // ── UEFI 固件 (QEMU, pflash) ──
+    m_uefiGroup = new QGroupBox("UEFI 固件 (QEMU)");
+    auto *uefiLayout = new QVBoxLayout(m_uefiGroup);
+
+    m_uefiCb = new QCheckBox("启用 UEFI (pflash CODE + VARS)");
+    m_uefiCb->setToolTip(
+        "用两条 pflash 盘代替 QEMU 内置 BIOS:\n"
+        "  -drive if=pflash,format=raw,readonly=on,file=<CODE>\n"
+        "  -drive if=pflash,format=raw,file=<VARS>\n"
+        "CODE 只读 (可共用), VARS 必须可写且每台虚机一份 —— 共享 VARS\n"
+        "会互相污染启动项. 已装好的系统换固件通常无法启动, 只在新建/重装时改.");
+    uefiLayout->addWidget(m_uefiCb);
+
+    auto *uefiForm = new QFormLayout();
+    auto *codeRow = new QHBoxLayout();
+    m_uefiCodeEdit = new QLineEdit("/usr/share/OVMF/x64/OVMF_CODE.4m.fd");
+    auto *codeBtn = new QPushButton("浏览…");
+    codeRow->addWidget(m_uefiCodeEdit, 1);
+    codeRow->addWidget(codeBtn);
+    uefiForm->addRow("CODE:", codeRow);
+
+    auto *varsRow = new QHBoxLayout();
+    m_uefiVarsEdit = new QLineEdit("/usr/share/OVMF/x64/OVMF_VARS.4m.fd");
+    auto *varsBtn = new QPushButton("浏览…");
+    varsRow->addWidget(m_uefiVarsEdit, 1);
+    varsRow->addWidget(varsBtn);
+    uefiForm->addRow("VARS:", varsRow);
+    uefiLayout->addLayout(uefiForm);
+
+    m_uefiCodeEdit->setEnabled(false);
+    m_uefiVarsEdit->setEnabled(false);
+    connect(m_uefiCb, &QCheckBox::toggled, this, [this](bool on) {
+        m_uefiCodeEdit->setEnabled(on);
+        m_uefiVarsEdit->setEnabled(on);
+    });
+
+    connect(codeBtn, &QPushButton::clicked, this, [this]() {
+        const QString p = QFileDialog::getOpenFileName(this, "选择 OVMF CODE",
+            m_uefiCodeEdit->text().isEmpty() ? "/usr/share/OVMF" : m_uefiCodeEdit->text(),
+            "固件映像 (*.fd *.rom *.bin);;所有文件 (*)");
+        if (!p.isEmpty()) m_uefiCodeEdit->setText(p);
+    });
+    connect(varsBtn, &QPushButton::clicked, this, [this]() {
+        const QString p = QFileDialog::getOpenFileName(this, "选择 OVMF VARS",
+            m_uefiVarsEdit->text().isEmpty() ? QDir::homePath() : m_uefiVarsEdit->text(),
+            "固件映像 (*.fd *.rom *.bin);;所有文件 (*)");
+        if (!p.isEmpty()) m_uefiVarsEdit->setText(p);
+    });
+
     rightCol->addWidget(m_advGroup);
+    rightCol->addWidget(m_uefiGroup);
 
     // ── 端口转发 ──
     m_portGroup = new QGroupBox("端口转发 (user 模式)");
@@ -825,6 +1158,37 @@ VMDialog::VMDialog(QWidget *parent)
             QMessageBox::warning(this, "提示", "请输入虚机名称");
             return;
         }
+
+        // UEFI 固件路径校验: CODE 只读可共用, VARS 必须可写且每台 VM 独立
+        if (m_uefiCb->isChecked()) {
+            const QString code = m_uefiCodeEdit->text().trimmed();
+            const QString vars = m_uefiVarsEdit->text().trimmed();
+            if (code.isEmpty() || vars.isEmpty()) {
+                QMessageBox::warning(this, "提示",
+                    "启用 UEFI 时 CODE 与 VARS 路径都不能为空。\n"
+                    "CODE 通常用 /usr/share/OVMF/x64/OVMF_CODE.4m.fd, VARS 用每台虚机自己的副本。");
+                return;
+            }
+            if (!QFileInfo(code).exists()) {
+                QMessageBox::warning(this, "提示", QString("CODE 文件不存在:\n%1").arg(code));
+                return;
+            }
+            const QFileInfo vi(vars);
+            if (vi.exists() && !vi.isWritable()) {
+                QMessageBox::warning(this, "提示",
+                    QString("VARS 文件不可写:\n%1\n\nVARS 必须可写 (建议复制一份到 "
+                            "~/.config/ServerToolbox/ovmf/<虚机名>-vars.fd 后指向它)")
+                        .arg(vars));
+                return;
+            }
+            if (vi.absoluteFilePath() == "/usr/share/OVMF/x64/OVMF_VARS.4m.fd") {
+                auto ret = QMessageBox::question(this, "提示",
+                    "VARS 指向系统全局文件, 与其他虚机共享会互相污染启动项。\n仍要保存吗？",
+                    QMessageBox::Yes | QMessageBox::No);
+                if (ret != QMessageBox::Yes) return;
+            }
+        }
+
         // 无磁盘且无 ISO → 无法引导
         if (m_diskList->count() == 0 && m_isoEdit->text().trimmed().isEmpty()) {
             auto ret = QMessageBox::question(this, "提示",
@@ -859,6 +1223,127 @@ VMDialog::VMDialog(QWidget *parent)
     // 网络模式切换 → 桥接网卡输入框显隐
     connect(m_vboxNicTypeCombo, QOverload<int>::of(&QComboBox::currentIndexChanged),
             this, [this](int) { updateVmTypeUI(); });
+
+    // ── 无显示 ↔ VNC 互斥 ──
+    connect(m_displayNoneCb, &QCheckBox::toggled, this, [this](bool on) {
+        if (on) {
+            QSignalBlocker b(m_vncSpin);
+            m_vncSpin->setValue(-1);
+            m_vncSpin->setEnabled(false);
+            // 纯显卡直通场景: 顺带把 VGA 切到 none
+            int noneIdx = m_vgaCombo->findData("none");
+            if (noneIdx >= 0) m_vgaCombo->setCurrentIndex(noneIdx);
+        } else {
+            m_vncSpin->setEnabled(true);
+        }
+    });
+    connect(m_vncSpin, QOverload<int>::of(&QSpinBox::valueChanged), this, [this](int v) {
+        if (v >= 0 && m_displayNoneCb->isChecked()) {
+            QSignalBlocker b(m_displayNoneCb);
+            m_displayNoneCb->setChecked(false);
+            m_vncSpin->setEnabled(true);
+        }
+    });
+
+    // ── USB 直通: 添加 / 移除 / 扫描 ──
+    connect(m_usbAddBtn, &QPushButton::clicked, this, [this]() {
+        QString data;
+        if (editUsbDeviceDialog(this, data)) {
+            auto *item = new QListWidgetItem(usbItemText(data));
+            item->setData(Qt::UserRole, data);
+            item->setToolTip(data);
+            m_usbList->addItem(item);
+        }
+    });
+    connect(m_usbRemoveBtn, &QPushButton::clicked, this, [this]() {
+        int row = m_usbList->currentRow();
+        if (row >= 0) delete m_usbList->takeItem(row);
+    });
+    connect(m_usbScanBtn, &QPushButton::clicked, this, [this]() {
+        // 候选: lsusb 的 vid:pid + /dev/input/by-id 的 evdev 设备
+        QListWidget *pick = new QListWidget();
+        pick->setSelectionMode(QAbstractItemView::ExtendedSelection);
+        for (const QString &d : scanUsbDevices()) {
+            const QStringList p = d.split('|');
+            auto *it = new QListWidgetItem(QString("🖳 %1  %2").arg(p.value(0), p.value(1)));
+            it->setData(Qt::UserRole, QString("host|%1|%2").arg(p.value(0), p.value(1)));
+            pick->addItem(it);
+        }
+        for (const QString &e : scanEvdevPaths()) {
+            auto *it = new QListWidgetItem(QString("⌨ %1").arg(e));
+            it->setData(Qt::UserRole, QString("evdev|%1").arg(e));
+            pick->addItem(it);
+        }
+        if (pick->count() == 0) {
+            delete pick;
+            QMessageBox::information(this, "扫描", "未发现可透传的设备 (lsusb / /dev/input/by-id 为空)");
+            return;
+        }
+        QDialog dlg(this);
+        dlg.setWindowTitle("选择要透传的设备 (可多选)");
+        dlg.resize(560, 340);
+        auto *lay = new QVBoxLayout(&dlg);
+        auto *hint = new QLabel("🖳 = 物理 USB 设备 (整体透传, 宿主机失去该设备)\n"
+                                "⌨ = evdev 输入设备 (需 root 运行 QEMU):");
+        hint->setStyleSheet("color: #888; font-size: 11px;");
+        lay->addWidget(hint);
+        lay->addWidget(pick);
+        auto *btns = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel);
+        connect(btns, &QDialogButtonBox::accepted, &dlg, &QDialog::accept);
+        connect(btns, &QDialogButtonBox::rejected, &dlg, &QDialog::reject);
+        lay->addWidget(btns);
+        if (dlg.exec() == QDialog::Accepted) {
+            for (auto *it : pick->selectedItems()) {
+                const QString data = it->data(Qt::UserRole).toString();
+                auto *newItem = new QListWidgetItem(usbItemText(data));
+                newItem->setData(Qt::UserRole, data);
+                newItem->setToolTip(data);
+                m_usbList->addItem(newItem);
+            }
+            // 扫到物理 USB 设备时顺手勾上 xhci (usb-host 必须挂总线)
+            bool hasHost = false;
+            for (int i = 0; i < m_usbList->count(); ++i)
+                if (m_usbList->item(i)->data(Qt::UserRole).toString().startsWith("host|"))
+                    hasHost = true;
+            if (hasHost) m_usbXhciCb->setChecked(true);
+        }
+        pick->setParent(nullptr);
+        pick->deleteLater();
+    });
+
+    // ── Root 钩子: 载入 run-win10-pt.sh 的绑定 / 归还段 ──
+    connect(m_rootLoadBtn, &QPushButton::clicked, this, [this]() {
+        m_preRootEdit->setPlainText(R"HOOK(# 停合成器 (桌面黑屏) → 绑定 vfio-pci → 关闭该设备 runtime 挂起
+ln -sf /dev/null /run/systemd/system/greetd.service 2>/dev/null
+systemctl stop greetd 2>/dev/null
+sleep 2
+modprobe vfio-pci disable_idle_d3=1 2>/dev/null
+p=/sys/module/vfio_pci/parameters/disable_idle_d3
+[ -w "$p" ] && echo 1 > "$p" 2>/dev/null
+for d in 0000:06:00.0 0000:06:00.1; do
+    cur=$(basename "$(readlink /sys/bus/pci/devices/$d/driver 2>/dev/null)" 2>/dev/null)
+    [ -n "$cur" ] && [ "$cur" != unknown ] && echo $d > /sys/bus/pci/drivers/$cur/unbind 2>/dev/null
+    echo vfio-pci > /sys/bus/pci/devices/$d/driver_override
+    echo $d > /sys/bus/pci/drivers/vfio-pci/bind 2>/dev/null
+    echo on > /sys/bus/pci/devices/$d/power/control 2>/dev/null
+done)HOOK");
+        m_postRootEdit->setPlainText(R"HOOK(# 回绑 nvidia (GBM 后端需要) + 显卡音频回绑, 然后重启 greetd
+for d in 0000:06:00.0 0000:06:00.1; do
+    echo $d > /sys/bus/pci/drivers/vfio-pci/unbind 2>/dev/null
+    echo '' > /sys/bus/pci/devices/$d/driver_override
+done
+modprobe nvidia_drm 2>/dev/null
+echo nvidia > /sys/bus/pci/devices/0000:06:00.0/driver_override
+echo 0000:06:00.0 > /sys/bus/pci/drivers/nvidia/bind 2>/dev/null
+echo '' > /sys/bus/pci/devices/0000:06:00.0/driver_override
+echo 0000:06:00.1 > /sys/bus/pci/drivers/snd_hda_intel/bind 2>/dev/null
+rm -f /run/systemd/system/greetd.service 2>/dev/null
+systemctl daemon-reload 2>/dev/null
+systemctl start greetd 2>/dev/null)HOOK");
+        QMessageBox::information(this, "已载入",
+            "已填入显卡占用/归还脚本 (BDF 为 06:00.0 / 06:00.1)。\n"
+            "换硬件时请自行改 BDF, 并确认 PCI 列表里的设备与之一致。");
+    });
     connect(m_isoBtn, &QPushButton::clicked, this, [this]() {
         QString path = QFileDialog::getOpenFileName(this, "选择 ISO",
             m_isoEdit->text().isEmpty() ? QDir::homePath() : m_isoEdit->text(),
@@ -991,6 +1476,62 @@ void VMDialog::setVMConfig(const VMConfig &vm)
     }
     if (m_vboxBridgeEdit)        m_vboxBridgeEdit->setText(vm.vboxBridgeDev);
 
+    // QEMU 固件 (UEFI)
+    m_uefiCb->setChecked(vm.uefi);
+    m_uefiCodeEdit->setText(vm.uefiCode);
+    m_uefiVarsEdit->setText(vm.uefiVars);
+    m_uefiCodeEdit->setEnabled(vm.uefi);
+    m_uefiVarsEdit->setEnabled(vm.uefi);
+
+    // 直通增强: multifunction + hole64
+    m_vfioMultiCb->setChecked(vm.vfioMultifunction);
+    if (vm.pciHole64.isEmpty()) {
+        m_hole64Combo->setCurrentIndex(0);        // 「留空 (不设)」
+    } else {
+        int hIdx = m_hole64Combo->findText(vm.pciHole64);
+        if (hIdx >= 0) m_hole64Combo->setCurrentIndex(hIdx);
+        else m_hole64Combo->setCurrentText(vm.pciHole64);
+    }
+
+    // 显示: 无显示 + VNC 互斥 (先设 VNC, 再设勾选, 用 blocker 避免联动打架)
+    {
+        QSignalBlocker bv(m_vncSpin);
+        m_vncSpin->setValue(vm.vnc);
+        m_vncSpin->setEnabled(!(vm.displayNone && vm.vnc < 0));
+        QSignalBlocker bd(m_displayNoneCb);
+        m_displayNoneCb->setChecked(vm.displayNone);
+    m_runRootCb->setChecked(vm.qemuRunRoot);
+    }
+
+    // 音频
+    int abIdx = m_audioBackendCombo->findData(vm.audioBackend);
+    if (abIdx >= 0) m_audioBackendCombo->setCurrentIndex(abIdx);
+    int amIdx = m_audioModelCombo->findData(vm.audioModel);
+    if (amIdx >= 0) m_audioModelCombo->setCurrentIndex(amIdx);
+
+    // USB 直通
+    m_usbXhciCb->setChecked(vm.usbXhci);
+    m_usbKbdTabletCb->setChecked(vm.usbKbdTablet);
+    m_usbList->clear();
+    for (const auto &vp : vm.usbHostVendors) {
+        const QString data = QString("host|%1|").arg(vp);
+        auto *it = new QListWidgetItem(usbItemText(data));
+        it->setData(Qt::UserRole, data);
+        it->setToolTip(data);
+        m_usbList->addItem(it);
+    }
+    for (const auto &ev : vm.usbEvdevPaths) {
+        const QString data = QString("evdev|%1").arg(ev);
+        auto *it = new QListWidgetItem(usbItemText(data));
+        it->setData(Qt::UserRole, data);
+        it->setToolTip(data);
+        m_usbList->addItem(it);
+    }
+
+    // Root 钩子
+    m_preRootEdit->setPlainText(vm.preStartRoot);
+    m_postRootEdit->setPlainText(vm.postStopRoot);
+
     // 按当前类型刷新显隐
     updateVmTypeUI();
 
@@ -1078,6 +1619,29 @@ VMConfig VMDialog::vmConfig() const
     vm.vboxNicType  = m_vboxNicTypeCombo ? m_vboxNicTypeCombo->currentData().toString() : "nat";
     vm.vboxNicModel = m_vboxNicModelCombo->currentData().toString();
     vm.vboxBridgeDev = m_vboxBridgeEdit ? m_vboxBridgeEdit->text().trimmed() : "";
+
+    // QEMU 固件 / 直通增强 / 显示 / 音频 / USB / Root 钩子
+    vm.uefi      = m_uefiCb->isChecked();
+    vm.uefiCode  = m_uefiCodeEdit->text().trimmed();
+    vm.uefiVars  = m_uefiVarsEdit->text().trimmed();
+    vm.vfioMultifunction = m_vfioMultiCb->isChecked();
+    const QString h64 = m_hole64Combo->currentText().trimmed();
+    vm.pciHole64 = (h64 == "留空 (不设)") ? QString() : h64;
+    vm.displayNone = m_displayNoneCb->isChecked();
+    vm.qemuRunRoot = m_runRootCb->isChecked();
+    vm.audioBackend = m_audioBackendCombo->currentData().toString();
+    vm.audioModel   = m_audioModelCombo->currentData().toString();
+    vm.usbXhci      = m_usbXhciCb->isChecked();
+    vm.usbKbdTablet = m_usbKbdTabletCb->isChecked();
+    vm.usbHostVendors.clear();
+    vm.usbEvdevPaths.clear();
+    for (int i = 0; i < m_usbList->count(); ++i) {
+        const QStringList p = m_usbList->item(i)->data(Qt::UserRole).toString().split('|');
+        if (p.value(0) == "host" && !p.value(1).isEmpty()) vm.usbHostVendors << p.value(1);
+        else if (p.value(0) == "evdev" && !p.value(1).isEmpty()) vm.usbEvdevPaths << p.value(1);
+    }
+    vm.preStartRoot  = m_preRootEdit->toPlainText().trimmed();
+    vm.postStopRoot  = m_postRootEdit->toPlainText().trimmed();
     vm.autoStart  = m_autoStartCb->isChecked();
     vm.waitMount  = m_waitMountCb->isChecked();
 

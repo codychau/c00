@@ -1,13 +1,17 @@
 #include "vmpage.h"
 #include "vmdialog.h"
 #include "virtualbox.h"
+#include "qemuargs.h"
+#include "adminhelper.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QMessageBox>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QDir>
 #include <QRegularExpression>
 #include <QFileInfo>
@@ -23,6 +27,8 @@
 #include <QTextStream>
 
 #include "logger.h"
+
+#include <unistd.h>
 
 // 列索引
 enum Col { ColName = 0, ColCPU, ColMem, ColDisk, ColNet, ColVNC, ColStatus, ColExtra, ColCount };
@@ -203,6 +209,21 @@ void VMPage::refreshTable()
             extras << QString("💾%1").arg(dataCount);
         if (!vm.pciDevices.isEmpty())
             extras << QString("🖧%1").arg(vm.pciDevices.size());
+        if (vm.vfioMultifunction && !vm.pciDevices.isEmpty())
+            extras << "🖧mf";
+        if (!vm.pciHole64.isEmpty())
+            extras << QString("⬔%1").arg(vm.pciHole64);
+        const int usbCount = vm.usbHostVendors.size() + vm.usbEvdevPaths.size();
+        if (usbCount > 0)
+            extras << QString("🖳%1").arg(usbCount);
+        if (vm.audioBackend != "none")
+            extras << QString("♪%1").arg(vm.audioBackend);
+        if (vm.uefi)
+            extras << "⊙UEFI";
+        if (vm.displayNone)
+            extras << "🖵none";
+        if (vm.qemuRunRoot)
+            extras << "🔒root";
         if (vm.ramfb)
             extras << "🖵ramfb";
         if (vm.hugepages)
@@ -498,76 +519,29 @@ bool VMPage::startVMAt(int row, bool quiet)
         QCoreApplication::processEvents();
     }
 
-    QStringList args;
-    args << "-name" << vm.name;
-    args << "-smp" << QString::number(vm.cpu);
-    args << "-m" << QString::number(vm.memory);
 
-    QString machineStr = vm.machine;
-    if (vm.kvm) machineStr += ",accel=kvm";
-    args << "-machine" << machineStr;
-    args << "-cpu" << vm.cpuType;
+    // ── Root 钩子: 启动前执行 (单显卡直通: 停合成器 + 绑定 vfio-pci) ──
+    // 失败则不启动 QEMU, 避免把没有显卡的桌面直接交给虚机.
+    if (!vm.preStartRoot.trimmed().isEmpty()) {
+        m_status->setText("🔒 正在执行启动前 root 脚本（显卡直通切换）…");
+        QCoreApplication::processEvents();
+        QString hookOut, hookErr;
+        if (!AdminHelper::runAsRootScript(vm.preStartRoot, this, &hookOut, &hookErr)) {
+            Logger::log("VM", QString("❌ 启动前 root 脚本失败: %1").arg(hookErr.left(500)));
+            if (!quiet)
+                QMessageBox::warning(this, "启动前脚本失败",
+                    QString("启动前 root 脚本未成功，虚机「%1」未启动。\n\n%2")
+                        .arg(vm.name, hookErr.left(500)));
+            return false;
+        }
+        Logger::log("VM", QString("✅ 启动前 root 脚本完成: %1").arg(hookOut.left(300)));
+    }
 
     // QMP 管理接口（用于关机/电源管理）
-    QString sockPath = qmpSocketPath(vm.name);
-    args << "-qmp" << QString("unix:%1,server=on,wait=off").arg(sockPath);
+    const QString sockPath = qmpSocketPath(vm.name);
 
-    // 磁盘列表: 系统盘 (index 0, 按条目所选接口) + 数据盘 (其余固定 virtio)
-    int diskIdx = 0;
-    for (const auto &dd : vm.disks) {
-        if (dd.path.isEmpty()) continue;
-        QString if_ = "virtio";
-        if (dd.system && (dd.iface == "sata" || dd.iface == "ide"))
-            if_ = dd.iface;
-        args << "-drive" << QString("id=drive%1,file=%2,format=%3,if=%4,index=%5,cache=%6,aio=%7")
-            .arg(diskIdx).arg(dd.path, dd.format).arg(if_).arg(diskIdx).arg(dd.cache, dd.aio);
-        ++diskIdx;
-    }
-
-    if (!vm.iso.isEmpty())
-        args << "-cdrom" << vm.iso;
-
-    if (vm.net == "user") {
-        QString netdev = "user,id=net0";
-        for (const auto &pf : vm.portForwards)
-            netdev += QString(",hostfwd=%1::%2-:%3").arg(pf.protocol).arg(pf.hostPort).arg(pf.guestPort);
-        args << "-netdev" << netdev;
-        args << "-device" << QString("%1,netdev=net0").arg(vm.nicModel);
-    } else if (vm.net == "bridge") {
-        args << "-netdev" << "bridge,id=net0";
-        args << "-device" << QString("%1,netdev=net0").arg(vm.nicModel);
-    } else if (vm.net == "tap") {
-        args << "-netdev" << "tap,id=net0";
-        args << "-device" << QString("%1,netdev=net0").arg(vm.nicModel);
-    }
-
-    args << "-vga" << vm.vga;
-
-    if (vm.vnc >= 0) {
-        // vnc 存的是显示编号 (0~99)，直接传给 QEMU
-        args << "-vnc" << QString(":%1").arg(vm.vnc);
-    }
-
-    for (const auto &bdf : vm.pciDevices) {
-        QString addr = bdf;
-        if (!addr.contains(':')) continue;
-        if (addr.count(':') == 1 && !addr.startsWith("0000:"))
-            addr = "0000:" + addr;
-        args << "-device" << QString("vfio-pci,host=%1").arg(addr);
-    }
-
-    if (vm.ramfb)
-        args << "-device" << "ramfb";
-
-    if (vm.hugepages) {
-        args << "-object"
-             << QString("memory-backend-file,id=mem,size=%1M,mem-path=/dev/hugepages,share=on")
-                    .arg(vm.memory)
-             << "-numa" << "node,memdev=mem";
-    }
-
-    if (!vm.extra.isEmpty())
-        args << vm.extra.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
+    // 参数生成 —— 纯逻辑, 见 qemuargs.cpp (可用 tools/qemuargs-test 静态核对)
+    const QStringList args = buildQemuArgs(vm, sockPath);
 
     QString cmdLine = vm.qemuBinary + " " + args.join(' ');
     Logger::log("VM", QString("启动虚机: %1").arg(vm.name));
@@ -575,7 +549,57 @@ bool VMPage::startVMAt(int row, bool quiet)
 
     auto *proc = new QProcess(this);
     proc->setProcessChannelMode(QProcess::MergedChannels);
-    proc->start(vm.qemuBinary, args);
+
+    // 音频后端走 PulseAudio/pipewire: 需要用户会话的 runtime dir 与 socket;
+    // root 运行 QEMU 时尤其明显 (pipewire-pulse 不建经典 pidfile, 见下方兜底).
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    const QString rtDir = QString("/run/user/%1").arg(getuid());
+    if (env.value("XDG_RUNTIME_DIR").isEmpty())
+        env.insert("XDG_RUNTIME_DIR", rtDir);
+    if (vm.audioBackend == "pa" || vm.audioBackend == "pipewire") {
+        if (env.value("PULSE_SERVER").isEmpty())
+            env.insert("PULSE_SERVER", QString("unix:%1/pulse/native").arg(rtDir));
+        const QString pidFile = rtDir + "/pulse/pid";
+        if (!QFile::exists(pidFile)) {
+            QProcess pg;
+            pg.start("pgrep", {"-u", QString::number(getuid()), "pipewire-pulse"});
+            pg.waitForFinished(2000);
+            QString pid = QString::fromUtf8(pg.readAllStandardOutput()).trimmed().split('\n').value(0);
+            if (pid.isEmpty()) pid = "1";
+            QFile f(pidFile);
+            if (f.open(QIODevice::WriteOnly)) { f.write(pid.toUtf8()); f.close(); }
+        }
+    }
+    proc->setProcessEnvironment(env);
+
+    // 以 root 运行 QEMU (sudo): PCI 直通需要 /dev/vfio/*, evdev 透传需要 /dev/input/*
+    QString runBin = vm.qemuBinary;
+    QStringList runArgs = args;
+    QString sudoPw;
+    const bool pwless = AdminHelper::passwordlessSudoAvailable();
+    if (vm.qemuRunRoot) {
+        if (pwless) {
+            runArgs = QStringList{"-n"} + QStringList{vm.qemuBinary} + args;
+        } else {
+            bool ok = false;
+            sudoPw = QInputDialog::getText(this, "以 root 运行 QEMU", "请输入管理员密码：",
+                                           QLineEdit::Password, QString(), &ok);
+            if (!ok || sudoPw.isEmpty()) {
+                if (!quiet)
+                    QMessageBox::warning(this, "已取消", "未提供密码，虚机未启动。");
+                delete proc;
+                return false;
+            }
+            runArgs = QStringList{"-S", "-p", ""} + QStringList{vm.qemuBinary} + args;
+        }
+        runBin = "sudo";
+        Logger::log("VM", QString("以 root 运行 QEMU (%1)").arg(pwless ? "免密 sudo" : "sudo -S"));
+    }
+
+    proc->start(runBin, runArgs);
+    if (vm.qemuRunRoot && !pwless) proc->write((sudoPw + "\n").toUtf8());
+
+    Logger::log("VM", QString("实际命令: %1").arg(runBin + " " + runArgs.join(' ')).left(500));
 
     if (!proc->waitForStarted(3000)) {
         QString err = proc->errorString();
@@ -596,7 +620,7 @@ bool VMPage::startVMAt(int row, bool quiet)
     updateStartButton();
 
     connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, proc, name = vm.name, startedAt, quiet](int exitCode, QProcess::ExitStatus status) {
+            this, [this, proc, name = vm.name, startedAt, quiet, postHook = vm.postStopRoot](int exitCode, QProcess::ExitStatus status) {
         auto elapsed = QDateTime::currentSecsSinceEpoch() - startedAt;
         QString stderr = QString::fromUtf8(proc->readAll()).trimmed();
 
@@ -635,6 +659,17 @@ bool VMPage::startVMAt(int row, bool quiet)
                     }
                 });
             }
+        }
+
+        // 退出后 root 钩子 (回绑显卡 + 重启合成器). 延迟执行避免模态框重入.
+        if (!postHook.trimmed().isEmpty()) {
+            QTimer::singleShot(0, this, [this, name, postHook]() {
+                QString hookOut, hookErr;
+                if (AdminHelper::runAsRootScript(postHook, this, &hookOut, &hookErr))
+                    Logger::log("VM", QString("✅ %1 退出后 root 脚本完成: %2").arg(name, hookOut.left(300)));
+                else
+                    Logger::log("VM", QString("⚠️ %1 退出后 root 脚本失败: %2").arg(name, hookErr.left(500)));
+            });
         }
 
         m_runningProcs.remove(name);

@@ -12,7 +12,7 @@ struct VMDataDisk {
     QString format = "qcow2";   // qcow2, raw, vmdk, vdi, vhdx
     QString cache  = "none";    // none, writeback, writethrough, unsafe
     QString aio    = "native";  // native, threads, io_uring
-    QString iface  = "virtio";  // 系统盘接口: virtio, sata, ide (数据盘固定 virtio)
+    QString iface  = "virtio";  // 每块盘各自的接口: virtio, sata, ide (系统盘与数据盘都可选)
     bool    system = false;     // 系统盘 (启动盘)
 };
 
@@ -30,6 +30,9 @@ struct VMConfig {
     int     memory    = 2048;   // MB
     QString iso;
     QString qemuBinary = "qemu-system-x86_64"; // QEMU 二进制
+    // 以 root 运行 QEMU (经 sudo). PCI 直通 (/dev/vfio/*) 与 evdev 透传
+    // (/dev/input/*) 都需要 root; 免密 sudo 由「QEMU 权限配置」写入 sudoers.
+    bool    qemuRunRoot = false;
     int     vnc       = -1;     // -1 = 不启用
 
     // 从 extra 提炼的字段
@@ -71,6 +74,41 @@ struct VMConfig {
     QString vboxNicModel = "82545EM";
     // VirtualBox: bridged 模式下用的宿主机网卡名 (vboxNicType==bridged 时)
     QString vboxBridgeDev = "";
+
+    // ── QEMU 固件 (UEFI / pflash) ──
+    // 勾选后用两条 pflash 盘 (code 只读 + vars 可写) 代替 QEMU 内置 BIOS.
+    // vars 必须每台 VM 独立, 且文件可写 (共享 vars 会互相污染启动项).
+    bool    uefi     = false;
+    QString uefiCode = "/usr/share/OVMF/x64/OVMF_CODE.4m.fd";
+    QString uefiVars = "/usr/share/OVMF/x64/OVMF_VARS.4m.fd";
+
+    // ── PCI 直通增强 (QEMU) ──
+    // multifunction=on: 同一物理 slot 的多个 function (显卡 + 显卡音频) 必须落在
+    // 同一 slot, 且命令行顺序 = function 递增顺序 (pciDevices 列表顺序即命令行顺序).
+    bool    vfioMultifunction = false;
+    // q35-pcihost.pci-hole64-size, 例 "512G"; 空 = 不设置. 仅 q35 系机器生效.
+    // 显卡直通需要足够大的 hole64 供大 BAR 映射.
+    QString pciHole64 = "";
+
+    // ── 显示 (QEMU) ──
+    // 无虚拟显卡的纯直通 VM 需要 -display none; 与 VNC 互斥 (vnc >= 0 时不输出).
+    bool    displayNone = false;
+
+    // ── 音频 (QEMU audiodev) ──
+    QString audioBackend = "none";   // none, pa, pipewire, alsa, oss, sndio
+    QString audioModel   = "hda-duplex"; // hda-duplex, hda-micro
+
+    // ── USB 直通 (QEMU) ──
+    bool        usbXhci       = false;  // qemu-xhci 控制器
+    bool        usbKbdTablet  = false;  // 虚拟 usb-kbd + usb-tablet (远程注入用)
+    QStringList usbHostVendors;         // 每项 "vid:pid", 如 "046d:c53f"
+    QStringList usbEvdevPaths;          // evdev 路径, 走 virtio-input-host-pci
+
+    // ── Root 钩子 (QEMU, 经 sudo 执行) ──
+    // 用于单显卡直通的 GPU 归还/占用编排: 启动前绑 vfio-pci 并释放合成器,
+    // 退出后回绑 nvidia 并重启合成器. 空 = 不执行.
+    QString preStartRoot;
+    QString postStopRoot;
 
     // 端口转发 (user 模式下生效)
     QVector<PortFwd> portForwards;
