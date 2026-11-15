@@ -2,6 +2,11 @@
 
 一个基于 Qt6 的 Linux 桌面工具，用于管理家庭服务器的各种功能。
 
+![主界面：左侧导航 + 系统状态仪表（主板画板实时显示 CPU / 内存 / NVMe / SATA / GPU）](doc/img/screenshot.png)
+
+> 界面为深色机房控制台风格，配色令牌与实现说明见 [doc/THEME.md](doc/THEME.md)；
+> 另有 4 套风格化 HTML 设计稿在 [doc/demos/](doc/demos/)。
+
 ## 功能
 
 - **📊 状态仪表** — 系统资源监控（CPU、内存、磁盘、网络）
@@ -103,6 +108,23 @@ sudo ./build-install.sh
 ```
 
 安装后通过 `~/.local/bin/server-toolbox` 运行。若该路径未在你的 `PATH` 中，可执行 `export PATH="$HOME/.local/bin:$PATH"`。
+
+## 更新顶部截图
+
+顶部那张图是 `app_shot` 在无头环境渲染出来的，改了界面后按下面重新生成：
+
+```bash
+cmake -S . -B build -DENABLE_THEME_SHOT=ON && cmake --build build -j
+QT_QPA_PLATFORM=offscreen ./build/app_shot          # → build/app_main.png
+cp build/app_main.png doc/img/screenshot.png        # 顶部主画面用这张
+```
+
+`app_shot <n>` 渲染第 n 个导航页（如 `./build/app_shot 2` 出存储管理）；
+第三个参数是滚动像素，`./build/app_shot - 230` 用来看顶栏毛玻璃——静态首屏时
+玻璃背后只有页面边距，滚起来才看得出模糊。
+
+注意无头环境默认没有 emoji 字体，导航图标会渲染成 `□` 方块；装一个 emoji
+字体（如 `fonts-noto-color-emoji`）后再截即可。
 
 ## 许可证
 
