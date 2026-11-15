@@ -33,6 +33,10 @@ struct VMConfig {
     // 以 root 运行 QEMU (经 sudo). PCI 直通 (/dev/vfio/*) 与 evdev 透传
     // (/dev/input/*) 都需要 root; 免密 sudo 由「QEMU 权限配置」写入 sudoers.
     bool    qemuRunRoot = false;
+    // 以服务文件执行: 生成 /etc/systemd/system/vm-<名称>.service, 用 systemctl 起。
+    // 好处是虚机不挂在桌面会话下 (程序被杀/登录器停掉都不影响), 且 GPU 归还挂在
+    // ExecStopPost 上, 由 systemd 保证执行。
+    bool    runAsService = false;
     int     vnc       = -1;     // -1 = 不启用
 
     // 从 extra 提炼的字段

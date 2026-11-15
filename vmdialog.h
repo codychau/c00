@@ -17,6 +17,7 @@
 #include "vmconfig.h"
 
 class QVBoxLayout;
+class QLabel;
 
 class VMDialog : public QDialog
 {
@@ -59,6 +60,8 @@ private:
 
     // 等待挂载
     QCheckBox      *m_waitMountCb;
+    QCheckBox      *m_runAsServiceCb;    // 以服务文件执行 (systemd 系统服务)
+    QLabel         *m_serviceUnitLabel;  // 显示生成的单元名与钩子归属
 
     // 硬件直通
     QGroupBox      *m_hptGroup;        // 整组为 QEMU 专属 (VirtualBox 无 PCI 直通)

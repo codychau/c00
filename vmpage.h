@@ -41,10 +41,13 @@ private:
     bool stopVMAt(int row, bool force, bool quiet);
     // VirtualBox 分支
     bool startVBoxVM(const VMConfig &vm, bool quiet);
+    // 服务化执行: 写 /etc/systemd/system/vm-<名称>.service 并 systemctl start
+    bool startVMAsService(const VMConfig &vm, const QStringList &args,
+                          const QString &sockPath, bool quiet);
     bool stopVBoxVM(const VMConfig &vm, bool force, bool quiet);
     void saveConfig();
     void updateStartButton();
-    void sendQemuPowerdown(const QString &vmName);
+    void sendQemuPowerdown(const QString &vmName, const QString &sockPath);
     QString findVNCViewer() const;
     QString findRDPClient() const;
     QString qmpSocketPath(const QString &vmName) const;

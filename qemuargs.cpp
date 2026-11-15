@@ -155,3 +155,88 @@ QStringList buildQemuArgs(const VMConfig &vm, const QString &sockPath)
 
     return args;
 }
+
+// ═══════════════════════════════════════════════════════════════════
+//  systemd 服务化执行
+// ═══════════════════════════════════════════════════════════════════
+
+// shell 单引号安全包裹: 把内容里的 ' 换成 '\'', 整体用 ' 包起来
+static QString shQuote(const QString &s)
+{
+    QString r = s;
+    r.replace("'", "'\\''");
+    return "'" + r + "'";
+}
+
+QString serviceUnitName(const QString &vmName)
+{
+    QString safe = vmName.toLower();
+    safe.replace(QRegularExpression("[^a-z0-9\\-]"), "-");
+    while (safe.startsWith('-')) safe.remove(0, 1);
+    while (safe.endsWith('-')) safe.chop(1);
+    if (safe.isEmpty()) safe = "vm";
+    return "vm-" + safe + ".service";
+}
+
+QString serviceScriptPath(const QString &vmName, bool post)
+{
+    QString safe = vmName;
+    safe.replace(QRegularExpression("[^\\w\\-]"), "_");
+    return QString("/var/lib/ServerToolbox/%1%2.sh")
+        .arg(serviceUnitName(vmName).remove(".service"), post ? "-post" : "-pre");
+}
+
+QString serviceSocketPath(const QString &vmName)
+{
+    QString safe = vmName;
+    safe.replace(QRegularExpression("[^\\w\\-]"), "_");
+    return "/run/ServerToolbox/qmp_" + safe + ".sock";
+}
+
+QString buildSystemdUnit(const VMConfig &vm, const QStringList &args,
+                         const QString &sockPath, int uid)
+{
+    const QString qemuCmd = vm.qemuBinary + " " + args.join(' ');
+    const QString pre  = vm.preStartRoot.trimmed();
+    const QString post = vm.postStopRoot.trimmed();
+
+    QStringList L;
+    L << "[Unit]";
+    L << QString("Description=server-toolbox 虚机 %1 (程序生成, 手改会在下次生成时被覆盖)").arg(vm.name);
+    L << "After=network.target";
+    // DefaultDependencies / Before 是 [Unit] 段的键, 放 [Service] 会被忽略
+    L << "DefaultDependencies=no";      // 关机时不要被依赖抢先拆掉
+    L << "Before=shutdown.target";
+    L << "";
+    L << "[Service]";
+    // Type=exec: exec 失败(二进制不存在等) 能被 systemd 准确报告
+    L << "Type=exec";
+    L << "User=root";
+    // QMP socket 目录: root 建的 socket 要让普通用户程序连得上, 先把目录开放
+    L << QString("ExecStartPre=/bin/sh -c %1")
+             .arg(shQuote("mkdir -p /run/ServerToolbox && chmod 777 /run/ServerToolbox"));
+    if (!pre.isEmpty())
+        L << QString("ExecStartPre=/bin/sh %1").arg(serviceScriptPath(vm.name, false));
+    L << QString("ExecStart=/bin/sh -c %1").arg(shQuote(qemuCmd));
+    // socket 是 QEMU 启动时才建的, 用重试等它出现再放行权限
+    L << QString("ExecStartPost=/bin/sh -c %1")
+             .arg(shQuote(QString("for i in $(seq 1 60); do [ -S %1 ] && chmod 666 %1 && exit 0; "
+                                  "sleep 0.2; done; exit 0").arg(sockPath)));
+    // 钩子写成脚本文件再引用: systemd 单元按行解析, 单引号跨行会报
+    // "Unbalanced quoting" 而整个单元起不来 (systemd-analyze verify 实测)。
+    // 关键: 归还显卡/重启登录器挂在 ExecStopPost, 由 systemd 保证执行 ——
+    // 程序被杀、桌面掉线都不影响它, 这正是服务化要解决的事
+    if (!post.isEmpty())
+        L << QString("ExecStopPost=/bin/sh %1").arg(serviceScriptPath(vm.name, true));
+    L << "TimeoutStopSec=45";
+    L << "KillMode=mixed";
+    L << "Restart=no";
+    if (vm.audioBackend == "pa" || vm.audioBackend == "pipewire") {
+        L << QString("Environment=XDG_RUNTIME_DIR=/run/user/%1").arg(uid);
+        L << QString("Environment=PULSE_SERVER=unix:/run/user/%1/pulse/native").arg(uid);
+    }
+    L << "";
+    L << "[Install]";
+    L << "WantedBy=multi-user.target";
+    return L.join('\n') + "\n";
+}

@@ -1,5 +1,6 @@
 #include "vmdialog.h"
 #include "pcidialog.h"
+#include "qemuargs.h"
 
 #include <QFormLayout>
 #include <QVBoxLayout>
@@ -530,6 +531,8 @@ void VMDialog::updateVmTypeUI()
     syncGroup(m_rootHookGroup, !vbox);
     m_displayNoneCb->setVisible(!vbox);
     m_runRootCb->setVisible(!vbox);
+    m_runAsServiceCb->setVisible(!vbox);
+    m_serviceUnitLabel->setVisible(!vbox);
     m_vfioMultiCb->setVisible(!vbox);
     m_hole64Row->setVisible(!vbox);
 
@@ -1086,6 +1089,24 @@ VMDialog::VMDialog(QWidget *parent)
         "若有则主动尝试挂载。适用于硬盘在开机时无法立即挂载的场景。");
     autoLayout->addWidget(m_waitMountCb);
 
+    m_runAsServiceCb = new QCheckBox("以服务文件执行 (systemd 系统服务)");
+    m_runAsServiceCb->setToolTip(
+        "勾选后启动走 systemctl, 不再由程序 fork QEMU:\n"
+        "  启动前钩子 = ExecStartPre, QEMU = ExecStart, 归还钩子 = ExecStopPost。\n"
+        "为什么需要它: 单显卡直通的启动前钩子会停掉登录器, 桌面会话一没,\n"
+        "挂在会话下的程序就被顺带杀掉 —— 归还脚本再也没机会跑 (显卡留在 vfio-pci,\n"
+        "greetd 被 mask)。服务跑在系统层, ExecStopPost 由 systemd 保证执行。\n"
+        "QMP socket 落在 /run/ServerToolbox/, 用 ExecStartPost 重试 chmod 666,\n"
+        "让以 root 跑的 QEMU 仍能被本程序连上 (关机/截图)。\n"
+        "需要 root: 写单元文件会弹密码; systemctl 启停可配免密 sudoers。");
+    autoLayout->addWidget(m_runAsServiceCb);
+
+    m_serviceUnitLabel = new QLabel("服务名由虚机名生成 (小写, 非字母数字换 -)");
+    m_serviceUnitLabel->setStyleSheet("font-size: 11px;");
+    m_serviceUnitLabel->setProperty("role", "mute");
+    m_serviceUnitLabel->setWordWrap(true);
+    autoLayout->addWidget(m_serviceUnitLabel);
+
     leftCol->addWidget(autoGroup);
 
     // 网络设置放到右列 (借用端口转发组缩短后腾出的空间)
@@ -1265,6 +1286,22 @@ VMDialog::VMDialog(QWidget *parent)
             this, [this](int) { updateVmTypeUI(); });
 
     // ── 无显示 ↔ VNC 互斥 ──
+    // 服务模式: QEMU 由 root 的 systemd 起, 「以 root 运行 (sudo)」此项无意义 → 禁用
+    connect(m_runAsServiceCb, &QCheckBox::toggled, this, [this](bool on) {
+        m_runRootCb->setEnabled(!on);
+        if (on) m_runRootCb->setChecked(true);
+    });
+
+    // 单元名随虚机名变, 提前把要写到哪里显示出来
+    connect(m_nameEdit, &QLineEdit::textChanged, this, [this](const QString &n) {
+        if (n.trimmed().isEmpty())
+            m_serviceUnitLabel->setText("服务名由虚机名生成 (小写, 非字母数字换 -)");
+        else
+            m_serviceUnitLabel->setText(QString("单元: /etc/systemd/system/%1\n"
+                                                "钩子: ExecStartPre (抢卡) / ExecStopPost (归还)\n"
+                                                "QMP: %2").arg(serviceUnitName(n), serviceSocketPath(n)));
+    });
+
     connect(m_displayNoneCb, &QCheckBox::toggled, this, [this](bool on) {
         if (on) {
             QSignalBlocker b(m_vncSpin);
@@ -1541,6 +1578,7 @@ void VMDialog::setVMConfig(const VMConfig &vm)
         QSignalBlocker bd(m_displayNoneCb);
         m_displayNoneCb->setChecked(vm.displayNone);
     m_runRootCb->setChecked(vm.qemuRunRoot);
+    m_runAsServiceCb->setChecked(vm.runAsService);
     }
 
     // 音频
@@ -1669,6 +1707,7 @@ VMConfig VMDialog::vmConfig() const
     vm.pciHole64 = (h64 == "留空 (不设)") ? QString() : h64;
     vm.displayNone = m_displayNoneCb->isChecked();
     vm.qemuRunRoot = m_runRootCb->isChecked();
+    vm.runAsService = m_runAsServiceCb->isChecked();
     vm.audioBackend = m_audioBackendCombo->currentData().toString();
     vm.audioModel   = m_audioModelCombo->currentData().toString();
     vm.usbXhci      = m_usbXhciCb->isChecked();

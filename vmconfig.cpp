@@ -65,6 +65,7 @@ bool VMConfigManager::load()
             if (auto *v = vmTbl->get("vnc"))    vm.vnc    = v->value_or(-1);
             if (auto *v = vmTbl->get("qemu_binary")) vm.qemuBinary = QString::fromStdString(v->value_or("qemu-system-x86_64"));
             if (auto *v = vmTbl->get("qemu_run_root")) vm.qemuRunRoot = v->value_or(false);
+            if (auto *v = vmTbl->get("run_as_service")) vm.runAsService = v->value_or(false);
             if (auto *v = vmTbl->get("ramfb"))  vm.ramfb = v->value_or(false);
             if (auto *v = vmTbl->get("extra"))  vm.extra = QString::fromStdString(v->value_or(""));
 
@@ -247,6 +248,7 @@ bool VMConfigManager::save() const
         tbl.emplace("vnc",    vm.vnc);
         tbl.emplace("qemu_binary", vm.qemuBinary.toStdString());
         tbl.emplace("qemu_run_root", vm.qemuRunRoot);
+        tbl.emplace("run_as_service", vm.runAsService);
         tbl.emplace("ramfb",  vm.ramfb);
 
         // 结构化字段

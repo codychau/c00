@@ -307,7 +307,7 @@ void VMPage::refreshStatus()
         if (!item) continue;
 
         if (running) {
-            item->setText("✅ 运行中");
+            item->setText(vm.runAsService ? "✅ 运行中 (服务)" : "✅ 运行中");
             item->setForeground(QColor("#22c55e"));
         } else {
             item->setText("⏹️ 已停止");
@@ -524,6 +524,15 @@ bool VMPage::startVMAt(int row, bool quiet)
     }
 
 
+    // ── 以服务文件执行: 钩子与 QEMU 都归 systemd 管 ──
+    // 程序不 fork 子进程, 所以「停 greetd 把桌面干掉、顺带把程序也杀了」这条链
+    // 断掉了: 服务跑在系统层, 归还脚本挂在 ExecStopPost 上由 systemd 保证执行。
+    if (vm.runAsService) {
+        const QString sock = serviceSocketPath(vm.name);
+        const QStringList sargs = buildQemuArgs(vm, sock);
+        return startVMAsService(vm, sargs, sock, quiet);
+    }
+
     // ── Root 钩子: 启动前执行 (单显卡直通: 停合成器 + 绑定 vfio-pci) ──
     // 失败则不启动 QEMU, 避免把没有显卡的桌面直接交给虚机.
     if (!vm.preStartRoot.trimmed().isEmpty()) {
@@ -649,7 +658,9 @@ bool VMPage::startVMAt(int row, bool quiet)
                         msgBox.setIcon(QMessageBox::Warning);
                         msgBox.setText(QString("虚机「%1」启动失败，可能是映像文件权限问题。\n\nQEMU 输出:\n%2")
                             .arg(name).arg(errMsg.left(500)));
-                        msgBox.setInformativeText("是否配置 QEMU sudo 免密权限以解决此问题？");
+                        msgBox.setInformativeText("是否配置 QEMU sudo 免密权限以解决此问题？\n\n"
+        "勾选「以服务文件执行」的虚机还需要 systemctl start/stop vm-* 与 daemon-reload 免密, "
+        "本配置一并写入 (写单元文件仍会弹密码, 因为那条要给 bash 配免密 root, 不该做)。");
                         msgBox.setStandardButtons(QMessageBox::Yes | QMessageBox::No | QMessageBox::Cancel);
                         msgBox.setDefaultButton(QMessageBox::Yes);
 
@@ -682,6 +693,66 @@ bool VMPage::startVMAt(int row, bool quiet)
         refreshStatus();
     });
 
+    return true;
+}
+
+// ── 服务化启动: 写单元文件 + systemctl start ──
+
+bool VMPage::startVMAsService(const VMConfig &vm, const QStringList &args,
+                              const QString &sockPath, bool quiet)
+{
+    const QString unit     = serviceUnitName(vm.name);
+    const QString unitPath = "/etc/systemd/system/" + unit;
+    const QString text     = buildSystemdUnit(vm, args, sockPath, getuid());
+
+    // heredoc 定界符不能出现在单元内容里
+    QString delim = "ST_UNIT_EOF";
+    while (text.contains(delim)) delim += "X";
+
+    // 三个文件一次写完: 单元 + 启动前钩子脚本 + 退出后钩子脚本
+    const QString prePath  = serviceScriptPath(vm.name, false);
+    const QString postPath = serviceScriptPath(vm.name, true);
+    const QString script = QString(
+        "mkdir -p /var/lib/ServerToolbox\n"
+        "cat > %1 <<'ST_PRE_EOF'\n%2\nST_PRE_EOF\n"
+        "cat > %3 <<'ST_POST_EOF'\n%4\nST_POST_EOF\n"
+        "chmod 700 %1 %3\n"
+        "cat > %5 <<'%6'\n%7%6\n"
+        "chmod 644 %5\n"
+        "systemctl daemon-reload\n"
+        "systemctl start %8\n"
+        "systemctl is-active %8"
+        + (vm.autoStart ? "\nsystemctl enable %8" : QString()))
+        .arg(prePath, vm.preStartRoot.trimmed() + "\n",
+             postPath, vm.postStopRoot.trimmed() + "\n",
+             unitPath, delim, text, unit);
+
+    m_status->setText("📄 正在写入并启动服务 " + unit);
+    QCoreApplication::processEvents();
+
+    QString out, err;
+    if (!AdminHelper::runAsRootScript(script, this, &out, &err)) {
+        Logger::log("VM", QString("❌ 服务 %1 启动失败: %2").arg(unit, err.left(600)));
+        // 把 journal 尾巴抓出来, 便于定位是参数错还是权限错
+        QProcess j;
+        j.start("journalctl", {"-u", unit, "-n", "40", "--no-pager"});
+        if (j.waitForFinished(5000)) {
+            const QString jout = QString::fromUtf8(j.readAllStandardOutput()).trimmed();
+            if (!jout.isEmpty())
+                Logger::log("VM", QString("journal: %1").arg(jout.right(1200)));
+        }
+        if (!quiet)
+            QMessageBox::warning(this, "服务启动失败",
+                QString("服务 %1 未能启动。\n\n%2\n\n(日志里可看 journalctl -u %1)")
+                    .arg(unit, err.left(600)));
+        return false;
+    }
+
+    Logger::log("VM", QString("✅ 单元文件已写入: %1").arg(unitPath));
+    Logger::log("VM", QString("✅ 服务 %1 已启动, 状态: %2").arg(unit, out.simplified().left(120)));
+    m_status->setText(QString("▶️ %1 由 systemd 服务启动 (%2)").arg(vm.name, unit));
+    refreshStatus();
+    updateStartButton();
     return true;
 }
 
@@ -784,9 +855,45 @@ bool VMPage::stopVMAt(int row, bool force, bool quiet)
     if (vm.vmType == "virtualbox")
         return stopVBoxVM(vm, force, quiet);
 
+    // ── 服务分支 ──
+    // 正常关机走 QMP quit: QEMU 退出后 systemd 触发 ExecStopPost, 归还脚本必然执行。
+    // 极速停止走 systemctl stop (需要 root), 同样触发 ExecStopPost。
+    if (vm.runAsService) {
+        const QString unit = serviceUnitName(vm.name);
+        const QString sock = serviceSocketPath(vm.name);
+
+        if (!force) {
+            Logger::log("VM", QString("服务模式正常关机: %1 (QMP quit → ExecStopPost 执行归还脚本)").arg(vm.name));
+            sendQemuPowerdown(vm.name, sock);
+            // 等服务转为非 active (最多 ~30s), 避免状态列滞后
+            for (int i = 0; i < 15; ++i) {
+                QProcess p;
+                p.start("systemctl", {"is-active", unit});
+                if (!p.waitForFinished(2000)) { p.kill(); break; }
+                if (QString::fromUtf8(p.readAllStandardOutput()).trimmed() != "active") break;
+                QCoreApplication::processEvents();
+            }
+        } else {
+            Logger::log("VM", QString("服务模式极速停止: %1").arg(unit));
+            QString o, e;
+            if (AdminHelper::passwordlessSudoAvailable())
+                QProcess::execute("sudo", {"-n", "systemctl", "stop", unit});
+            else if (!AdminHelper::runAsRootScript("systemctl stop " + unit, this, &o, &e)) {
+                Logger::log("VM", QString("❌ systemctl stop 失败: %1").arg(e.left(400)));
+                if (!quiet)
+                    QMessageBox::warning(this, "停止失败",
+                        QString("停止服务 %1 失败:\n%2").arg(unit, e.left(400)));
+                return false;
+            }
+        }
+        refreshStatus();
+        updateStartButton();
+        return true;
+    }
+
     if (!force) {
         Logger::log("VM", QString("正常关机: %1").arg(vm.name));
-        sendQemuPowerdown(vm.name);
+        sendQemuPowerdown(vm.name, qmpSocketPath(vm.name));
 
         // 如果进程还在跟踪，等待最多 15 秒后强行终止
         if (m_runningProcs.contains(vm.name)) {
@@ -886,9 +993,8 @@ bool VMPage::isVMRunning(const QString &name) const
     return false;
 }
 
-void VMPage::sendQemuPowerdown(const QString &vmName)
+void VMPage::sendQemuPowerdown(const QString &vmName, const QString &sockPath)
 {
-    QString sockPath = qmpSocketPath(vmName);
     auto *socket = new QLocalSocket(this);
     socket->connectToServer(sockPath, QIODevice::ReadWrite);
 
@@ -1075,6 +1181,10 @@ void VMPage::configureQemuSudoers(const QString &vmName)
 
     sudoersContent += "%sudo ALL=(ALL) NOPASSWD: /usr/bin/qemu-system-x86_64*, /usr/bin/qemu-system-aarch64*, /usr/bin/qemu-system-i386*, /usr/bin/qemu-img*\n";
     sudoersContent += "%wheel ALL=(ALL) NOPASSWD: /usr/bin/qemu-system-x86_64*, /usr/bin/qemu-system-aarch64*, /usr/bin/qemu-system-i386*, /usr/bin/qemu-img*\n";
+    // 服务模式: 启停与 daemon-reload 免密 (写单元文件仍走密码框 —— 那条需要 bash -c,
+    // 给 bash 配免密等于给整个系统配免密 root, 不该做)
+    sudoersContent += "%sudo ALL=(ALL) NOPASSWD: /usr/bin/systemctl start vm-*, /usr/bin/systemctl stop vm-*, /usr/bin/systemctl daemon-reload\n";
+    sudoersContent += "%wheel ALL=(ALL) NOPASSWD: /usr/bin/systemctl start vm-*, /usr/bin/systemctl stop vm-*, /usr/bin/systemctl daemon-reload\n";
 
     QString sudoersFile = "/etc/sudoers.d/vm-manager-qemu";
 
