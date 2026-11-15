@@ -164,6 +164,24 @@ void MainWindow::relayoutMainCol()
     m_pages->setGeometry(a);                    // 铺满，玻璃背后才有真实内容
     m_topbar->setGeometry(a.left(), a.top(), a.width(), kTopbarHeight);
     m_topbar->raise();
+
+    // 文字安静区 = 标题+副标题占到的右边界（玻璃本地坐标），再加一点余量。
+    // 辉光与顶部高光不越过这条线，标题背后就永远是干净的"模糊+深色底"。
+    // 按真实标签宽度算，标题变长变短都跟得上，不写死像素。
+    {
+        // 不用 geometry()：relayout 时布局未必已经摆好子控件，坐标可能是旧值。
+        // 用 sizeHint 宽度从左边距起累加，与布局时机无关，确定性强。
+        // 副标题在标题右侧（topLay 依次 addWidget），间距取布局 spacing。
+        const int marginL = 20, spacing = 10, slack = 24;
+        int right = marginL;
+        if (m_title)
+            right += m_title->sizeHint().width();
+        if (m_subtitle) {
+            right += spacing;
+            right += m_subtitle->sizeHint().width();
+        }
+        m_topbar->setTextQuietRight(right + slack);
+    }
     m_topbar->revalidate();                     // 区域变了，模糊缓存作废
 }
 

@@ -167,19 +167,47 @@ void GlassPanel::paintEvent(QPaintEvent *)
     // 3) 再叠提亮色（等效 background: rgba(255,255,255,.05)）
     p.fillRect(r, m_tint);
 
-    // 4) 环境辉光：让玻璃即使背后是空白也带一点色彩层次
+    // 4) 环境辉光：让玻璃即使背后是空白也带一点色彩层次。
+    //    裁剪到文字安静区右侧：标题在左侧，辉光不越过 m_quietRight，就不会
+    //    把颜色糊在文字背后（背后内容一亮，文字就像"加了底色"）。
     if (m_hasGlow) {
         QLinearGradient h2(r.left(), r.top(), r.right(), r.bottom());
         h2.setColorAt(0.0, m_glowL);
         h2.setColorAt(1.0, m_glowR);
-        p.fillRect(r, h2);
+        // 把辉光画进一张独立的透明图层，在图层内用横向 alpha 遮罩做淡出：
+        // 文字安静区内 alpha=0，越过边界后在一段羽化带里升到满值。
+        // 必须在独立图层里做，是因为合成模式没法把已经画到面板上的辉光"减掉"
+        // —— DestinationOut 会连底下的玻璃层一起擦穿。单独一层，最后整层
+        // SourceOver 叠回面板，才只影响辉光本身。渐变端点仍取整条两端，
+        // 右侧配色分布和裁剪前一致。
+        const int q       = qBound(0, m_quietRight, int(r.right()));
+        const int feather = 70;
+        QImage layer(size(), QImage::Format_ARGB32_Premultiplied);
+        layer.fill(Qt::transparent);
+        {
+            QPainter lp(&layer);
+            lp.setRenderHint(QPainter::Antialiasing);
+            lp.fillRect(r, h2);
+            // 安静区（含羽化带左侧）用 DestinationOut 抹掉辉光
+            QLinearGradient mask(q, 0, q + feather, 0);
+            mask.setColorAt(0.0, QColor(0, 0, 0, 255));   // 满 alpha：全抹
+            mask.setColorAt(1.0, QColor(0, 0, 0, 0));     // 零 alpha：不抹
+            lp.setCompositionMode(QPainter::CompositionMode_DestinationOut);
+            lp.fillRect(QRectF(0, r.top(), q + feather, r.height()), QBrush(mask));
+        }
+        p.drawImage(0, 0, layer);
     }
 
-    // 5) 顶部高光渐变，模拟玻璃上缘反光
-    QLinearGradient g(r.topLeft(), r.bottomLeft());
-    g.setColorAt(0.0, QColor(255, 255, 255, 40));
-    g.setColorAt(0.45, QColor(255, 255, 255, 0));
-    p.fillRect(r, g);
+    // 5) 顶部高光渐变，模拟玻璃上缘反光。同样裁剪掉文字安静区：
+    //    这条白高光若盖到文字顶上，深色字/浅色字都会被压出一层亮底。
+    {
+        QLinearGradient g(r.topLeft(), r.bottomLeft());
+        g.setColorAt(0.0, QColor(255, 255, 255, 40));
+        g.setColorAt(0.45, QColor(255, 255, 255, 0));
+        const int q = qBound(0, m_quietRight, int(r.right()));
+        QRectF hlArea(r.left() + q, r.top(), r.width() - q, r.height());
+        p.fillRect(hlArea, g);
+    }
 
     // 6) 下边框（demo 01 顶栏的 border-bottom）
     p.setPen(QColor(255, 255, 255, 28));

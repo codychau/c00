@@ -45,6 +45,12 @@ public:
         m_glowL = left; m_glowR = right; m_hasGlow = true; update();
     }
 
+    // 文字安静区：标题/副标题都在玻璃左侧，辉光与顶部高光是整条 fillRect，
+    // 会连文字背后一起染色 —— 背后内容一亮，文字就像"加了底色"。把这两个
+    // 装饰层裁剪到本线右侧，文字背后就只剩"模糊 + 深色底"的干净玻璃。
+    // 传 0 或不设 = 不裁剪（整条都上色，恢复旧观感）。
+    void setTextQuietRight(int x) { m_quietRight = x; update(); }
+
     // 背景内容发生变化时丢弃缓存（比如页面切换、滚动、窗口尺寸变化）
     void revalidate() { m_dirty = true; update(); }
 
@@ -62,6 +68,7 @@ private:
     QColor   m_tint;             // 玻璃叠加色（含 alpha）
     QColor   m_glowL, m_glowR;   // 环境辉光两端色
     bool     m_hasGlow = false;
+    int      m_quietRight = 0;   // 文字安静区右边界（玻璃本地 x）
     QPixmap  m_blurred;          // 缓存：已模糊的背景
     bool     m_dirty = true;
 };
