@@ -896,6 +896,14 @@ QWidget *NasPage::buildRaidFsBox()
     pillRow->setContentsMargins(0, 0, 0, 0);
     pillRow->addWidget(m_fsPill);
     pillRow->addWidget(m_fsDeps, 1);
+    // 一键安装按钮：默认隐藏。是否显示完全由 refreshRaidFsStatus 按
+    // Env::canInstallFuse() 决定（apt 系 + apt 在 + fusermount3 缺）。
+    // 装的是 fusermount3 这个挂载助手，不碰 /dev/fuse（那是内核模块，apt 帮不上）。
+    m_installFuseBtn = new QPushButton("一键安装 fuse");
+    m_installFuseBtn->setToolTip("用系统包管理器安装 fuse3（提供 fusermount3）。需要管理员授权。");
+    m_installFuseBtn->setVisible(false);
+    connect(m_installFuseBtn, &QPushButton::clicked, this, &NasPage::onInstallFuseClicked);
+    pillRow->addWidget(m_installFuseBtn);
     form->addRow("依赖", pillRow);
     v->addLayout(form);
 
@@ -951,6 +959,11 @@ void NasPage::refreshRaidFsStatus()
     }
     m_fsDeps->setText(html);
 
+    // 安装按钮：三条件全真才露脸（Env::canInstallFuse 已经合并判定）。
+    // 装好之后 probe() 会重跑、fuseMount 变真，这里下次刷新就自动收起 ——
+    // 不需要单独写"用完就消失"的逻辑，可见性永远跟着真实环境走。
+    if (m_installFuseBtn)
+        m_installFuseBtn->setVisible(m_env.canInstallFuse());
     // 徽标只写状态本身，不写颜色以外的信息；未实现这条优先级最高，
     // 而且**不随环境是否齐备改措辞** —— 环境齐备也不代表能用。
     m_fsPill->setText(QString::fromUtf8("引擎未实现"));
@@ -1036,6 +1049,21 @@ void NasPage::onUmountFsClicked()
     const auto toRun = confirmSteps(steps, "卸载挂载目录");
     if (toRun.isEmpty()) return;
     m_ctl.run(toRun);
+}
+
+// 一键装 fuse。这里再判一次 canInstallFuse 不是冗余：按钮虽然只在为真时才
+// 显示，但从显示到点击之间环境可能变（比如用户自己在别处装了）。守卫放这，
+// 保证真正跑 pkexec 的入口永远先过一遍条件。
+void NasPage::onInstallFuseClicked()
+{
+    if (!m_env.canInstallFuse()) {
+        setStatus("当前不适合一键安装（非 apt 系，或缺少 apt，或 fuse 已就绪）", true);
+        return;
+    }
+    const auto steps = m_ctl.planInstallFuse();
+    const auto go = confirmSteps(steps, "安装 fuse3");
+    if (go.isEmpty()) return;
+    m_ctl.run(go);
 }
 
 

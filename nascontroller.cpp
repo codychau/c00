@@ -122,6 +122,15 @@ NasController::Env NasController::probe() const
     //   · fusermount3 是 setuid 的挂载助手，非 root 挂 FUSE 必须经它。
     //     只查 mount.fuse 不够：那是 mount(8) 的 helper，手动 mount -t fuse
     //     才用得到；程序里直接调 fuse 库时真正需要的是 fusermount。
+    // 发行版判定：读 /etc/os-release 交给纯函数解析（可单测）。读不到就当非 apt 系，
+    // 宁可少给一个按钮，也不给一个会失败的安装按钮。
+    {
+        QFile osr("/etc/os-release");
+        e.aptFamily = osr.open(QIODevice::ReadOnly | QIODevice::Text)
+                    ? Nas::aptInstallable(QString::fromUtf8(osr.readAll()))
+                    : false;
+    }
+    e.aptAvailable = !findTool("apt-get").isEmpty();
     e.fuseDevice = QFileInfo::exists("/dev/fuse");
     e.fuseMount  = !findTool("fusermount3").isEmpty() || !findTool("fusermount").isEmpty();
 
@@ -672,5 +681,29 @@ NasController::planRaidfsUnmount(const QString &mountPoint) const
     // 属于会影响别人的操作，走确认。
     um.destructive = true;
     steps.append(um);
+    return steps;
+}
+// 一键装 fuse3。条件已由调用方（Env::canInstallFuse）把过：apt 系 + apt 在
+// + fusermount3 缺。这里只负责生成那条命令，不再重复判定 —— 判定和生成
+// 分开放，按钮该不该出现的逻辑只有一处。
+//
+// 为什么 apt-get 前面用 pkexec 而不是 sudo：本工具其余需要 root 的步骤
+// 都走 pkexec（图形化提权，与本 App 的 GUI 语境一致），这里保持一致，
+// 不混用两套提权。
+//
+// 为什么固定 -y：这是"一键安装"，点了就是决定要装；但包名是写死的常量
+// "fuse3"，不接受任何外部输入 —— 没有可注入的东西，才敢自动确认。
+// 更新索引（apt-get update）不自动做：那会改整个系统的包状态、可能拉很久，
+// 装不上时让用户自己按需跑，而不是替他动全局。
+QVector<NasController::Step> NasController::planInstallFuse() const
+{
+    QVector<Step> steps;
+    Step s;
+    s.program    = "pkexec";
+    s.args       = { "apt-get", "install", "-y", "fuse3" };
+    s.describe   = QString::fromUtf8("安装 fuse3（提供 fusermount3，挂载 FUSE 文件系统需要）");
+    // destructive=true：apt 会改系统包状态，确认框要按"改动系统"的级别提示。
+    s.destructive = true;
+    steps << s;
     return steps;
 }
