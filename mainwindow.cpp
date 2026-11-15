@@ -115,9 +115,9 @@ MainWindow::MainWindow(QWidget *parent)
     m_topbar->setBackdropSource(m_pages);
     m_topbar->setFixedHeight(kTopbarHeight);
     m_topbar->setTint(Theme::alpha(QColor("#ffffff"), 12));
-    // 主色辉光：左浓右淡，呼应 demo 01 顶栏的发光质感
-    m_topbar->setAmbientGlow(Theme::alpha(Theme::accent(), 26),
-                             Theme::alpha(Theme::accent2(), 8));
+    // 不加环境辉光。辉光是整条 fillRect，会连标题文字背后一起上色，
+    // 背后内容一亮（NAS 主板那种）文字就像"加了底色"。玻璃本身已经有
+    // 模糊 + 深色底 + 提亮 + 顶部高光，质感够了，辉光是多余的。
 
     auto *topLay = new QHBoxLayout(m_topbar);
     topLay->setContentsMargins(20, 11, 20, 11);
@@ -126,6 +126,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_title->setObjectName("pageTitle");
     m_subtitle = new QLabel();
     m_subtitle->setObjectName("pageSub");
+    // 玻璃面板设了 WA_NoSystemBackground（背景自己画）。这种父控件里的子 QLabel
+    // 在合成时会先在自身矩形填一层 palette-Base（不透明深色），于是标题背后
+    // 出现一块深色"底色"——正是用户反馈的现象，和辉光无关（辉光已另去）。
+    // 给这两个标签置 WA_TranslucentBackground：跳过那层填充，文字直接坐在玻璃上。
+    m_title->setAttribute(Qt::WA_TranslucentBackground, true);
+    m_subtitle->setAttribute(Qt::WA_TranslucentBackground, true);
     topLay->addWidget(m_title);
     topLay->addWidget(m_subtitle);
     topLay->addStretch();
@@ -164,24 +170,6 @@ void MainWindow::relayoutMainCol()
     m_pages->setGeometry(a);                    // 铺满，玻璃背后才有真实内容
     m_topbar->setGeometry(a.left(), a.top(), a.width(), kTopbarHeight);
     m_topbar->raise();
-
-    // 文字安静区 = 标题+副标题占到的右边界（玻璃本地坐标），再加一点余量。
-    // 辉光与顶部高光不越过这条线，标题背后就永远是干净的"模糊+深色底"。
-    // 按真实标签宽度算，标题变长变短都跟得上，不写死像素。
-    {
-        // 不用 geometry()：relayout 时布局未必已经摆好子控件，坐标可能是旧值。
-        // 用 sizeHint 宽度从左边距起累加，与布局时机无关，确定性强。
-        // 副标题在标题右侧（topLay 依次 addWidget），间距取布局 spacing。
-        const int marginL = 20, spacing = 10, slack = 24;
-        int right = marginL;
-        if (m_title)
-            right += m_title->sizeHint().width();
-        if (m_subtitle) {
-            right += spacing;
-            right += m_subtitle->sizeHint().width();
-        }
-        m_topbar->setTextQuietRight(right + slack);
-    }
     m_topbar->revalidate();                     // 区域变了，模糊缓存作废
 }
 

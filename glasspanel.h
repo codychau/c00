@@ -37,19 +37,7 @@ public:
     void setTint(const QColor &tint) { m_tint = tint; update(); }
     QColor tint() const { return m_tint; }
 
-    // 环境辉光：从左到右的一层低饱和渐变，叠在模糊结果之上。
-    // 用途是"背后没有内容时也能看出这是玻璃"——比如本应用顶栏在
-    // 首屏时背后只有页面空白边距，纯模糊会看起来像普通深色条。
-    void setAmbientGlow(const QColor &left, const QColor &right)
-    {
-        m_glowL = left; m_glowR = right; m_hasGlow = true; update();
-    }
 
-    // 文字安静区：标题/副标题都在玻璃左侧，辉光与顶部高光是整条 fillRect，
-    // 会连文字背后一起染色 —— 背后内容一亮，文字就像"加了底色"。把这两个
-    // 装饰层裁剪到本线右侧，文字背后就只剩"模糊 + 深色底"的干净玻璃。
-    // 传 0 或不设 = 不裁剪（整条都上色，恢复旧观感）。
-    void setTextQuietRight(int x) { m_quietRight = x; update(); }
 
     // 背景内容发生变化时丢弃缓存（比如页面切换、滚动、窗口尺寸变化）
     void revalidate() { m_dirty = true; update(); }
@@ -66,9 +54,7 @@ private:
     int      m_radius = 16;      // 单次盒模糊半径
     int      m_passes = 3;       // 盒模糊叠加次数（3 次 ≈ 高斯）
     QColor   m_tint;             // 玻璃叠加色（含 alpha）
-    QColor   m_glowL, m_glowR;   // 环境辉光两端色
-    bool     m_hasGlow = false;
-    int      m_quietRight = 0;   // 文字安静区右边界（玻璃本地 x）
+
     QPixmap  m_blurred;          // 缓存：已模糊的背景
     bool     m_dirty = true;
 };
