@@ -3,6 +3,7 @@
 
 #include <QWidget>
 #include <QVector>
+#include <QStringList>
 #include <QLabel>
 #include <QPushButton>
 #include <QComboBox>
@@ -15,6 +16,9 @@
 
 class QCheckBox;
 class QLabel;
+class QButtonGroup;
+class QRadioButton;
+class QWidget;
 
 // ─────────────────────────────────────────────────────────────
 //  NAS 页面：挑分区 → 拖线组 RAID → 导出 iSCSI
@@ -35,6 +39,12 @@ class NasPage : public QWidget
 public:
     explicit NasPage(QWidget *parent = nullptr);
 
+public:
+    // 仅供离线行为探针使用：设定成员并走与点击完全相同的同步路径。
+    // 刻意复用 onSlotClicked 之外的同一段逻辑，避免测试走的是另一条代码
+    // 路径（那样测试通过也说明不了线上行为）。
+    void setMemberDevicesForTest(const QVector<QString> &devices);
+
 private slots:
     void refresh();                       // 重新枚举分区与环境
     void onSlotClicked(const QString &device, int slotIndex);
@@ -42,6 +52,10 @@ private slots:
     void onEngineChanged(int index);
     void createArray();
     void exportIscsi();
+    void onExportClicked();            // 按当前模式分派到 iSCSI / SMB
+    void exportSmb();                  // 写 SMB 片段并 reload
+    void removeSmb();
+    void teardownIscsiInternal();                  // 删除片段并 reload
     void teardownIscsi();
     void showStepLog(int index, bool ok, const QString &output);
     void onAllFinished(bool success);
@@ -50,6 +64,9 @@ private:
     // 把画板上的连线收集成可执行的 Plan
     Nas::Plan currentPlan() const;
     void updateSummary();
+    // 按成员数刷新导出区：恰好 1 个才允许 SMB；从 >1 掉到 1 时自动切 SMB
+    void syncExportMode(int memberCount);
+    void refreshSmbWarning();
     // 逐条展示命令并要用户确认；返回要执行的步骤（可能为空 = 用户取消）
     QVector<NasController::Step> confirmSteps(const QVector<NasController::Step> &steps,
                                               const QString &title);
@@ -65,6 +82,22 @@ private:
     QLineEdit *m_portal = nullptr;     // portal 监听地址（**不是**网段白名单）
     QLabel *m_portalNote = nullptr;
     QCheckBox *m_anonAcl = nullptr;    // 允许匿名 initiator（默认关）
+
+    // ── iSCSI 参数（原「参数」组改名而来）──
+    QWidget *m_iscsiBox = nullptr;     // 打包 iSCSI 各行，便于整体显隐
+
+    // ── SMB 参数（仅恰好 1 个分区时可用）──
+    QButtonGroup *m_modeGroup = nullptr;
+    QRadioButton *m_modeIscsi = nullptr;
+    QRadioButton *m_modeSmb = nullptr;
+    QWidget *m_smbBox = nullptr;
+    QLineEdit *m_smbName = nullptr;
+    QLineEdit *m_smbPath = nullptr;
+    QComboBox *m_smbAuth = nullptr;    // 需密码 / 匿名只读 / 匿名可写
+    QLineEdit *m_smbUser = nullptr;
+    QCheckBox *m_smbWrite = nullptr;
+    QLabel *m_smbWarn = nullptr;       // guest 可写 / 命中系统路径的红字
+    QLabel *m_modeHint = nullptr;      // 当前为什么能/不能选 SMB
     QPushButton *m_createBtn = nullptr;
     QPushButton *m_exportBtn = nullptr;
     QPushButton *m_teardownBtn = nullptr;
@@ -73,10 +106,15 @@ private:
     NasController m_ctl;
     NasController::Env m_env;
     QVector<NasBoardWidget::Disk> m_disks;
+    QStringList m_sysMounts;           // 刷新时算好的系统挂载点，SMB 护栏用
     QString m_pendingConfirmName;      // 需要手输核对的卷名
     // 最近一次成功导出的对象，撤销时要用同一组值，不能让用户改完再撤
     QString m_currentIqn;
     QString m_currentBlockDev;
+    QString m_currentSmbShare;         // 最近成功导出的共享名，撤销要用同一个
+    // 上一帧成员数。判断「刚从 >1 掉到 1」这个跳变，不能只看当前值：
+    // 否则改引擎下拉（成员数不变）也会把用户显式选的 iSCSI 翻成 SMB。
+    int m_lastMemberCount = 0;
 };
 
 #endif // NASPAGE_H

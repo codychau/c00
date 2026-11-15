@@ -24,6 +24,9 @@
 #include <QJsonArray>
 #include <QHostAddress>
 #include <QRegularExpression>
+#include <QList>
+#include <QButtonGroup>
+#include <QRadioButton>
 #include <algorithm>
 
 static constexpr int kTopbarInset = 52;   // 与 MainWindow 顶栏一致，正文自行让出
@@ -85,11 +88,33 @@ NasPage::NasPage(QWidget *parent)
     connect(m_board, &NasBoardWidget::slotRejected, this, &NasPage::onSlotRejected);
 
     // ── 参数区 ──
-    auto *cfg = new QGroupBox("参数");
+    auto *cfg = new QGroupBox("导出参数");
     // 参数框按内容高度，不吸收页面多余空间。否则它会吃掉画板下方的
     // 全部富余高度，把画板顶到中间，看起来就是机箱上方一大片空白。
     cfg->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    auto *form = new QFormLayout(cfg);
+    auto *outer = new QVBoxLayout(cfg);
+
+    // ── 导出方式：单分区可在 SMB / iSCSI 间选，多盘只能 iSCSI ──
+    auto *modeRow = new QHBoxLayout();
+    m_modeIscsi = new QRadioButton("iSCSI 块存储");
+    m_modeSmb   = new QRadioButton("SMB 文件共享");
+    m_modeIscsi->setToolTip("导出为 iSCSI LUN，发起端拿到的是裸块设备，自己格式化。");
+    m_modeSmb->setToolTip("用 Samba 把该分区的挂载点作为共享目录导出。只读文件，不碰分区数据。");
+    m_modeIscsi->setChecked(true);       // 默认 iSCSI：与既有行为一致，不擅自改默认
+    m_modeGroup = new QButtonGroup(this);
+    m_modeGroup->addButton(m_modeIscsi);
+    m_modeGroup->addButton(m_modeSmb);
+    modeRow->addWidget(m_modeIscsi);
+    modeRow->addWidget(m_modeSmb);
+    m_modeHint = new QLabel();
+    m_modeHint->setProperty("role", "mute");
+    modeRow->addWidget(m_modeHint, 1);
+    outer->addLayout(modeRow);
+
+    // iSCSI 那套行整体装进一个容器，好和 SMB 那套互斥显隐。
+    m_iscsiBox = new QWidget();
+    auto *form = new QFormLayout(m_iscsiBox);
+    form->setContentsMargins(0, 0, 0, 0);
     m_volName = new QLineEdit();
     m_volName->setPlaceholderText("nas-data（创建时要手输核对）");
     form->addRow("名称", m_volName);
@@ -124,6 +149,45 @@ NasPage::NasPage(QWidget *parent)
     m_anonAcl = new QCheckBox("允许未登记 IQN 的发起端（仅调试，任何能连上端口的主机都能读写）");
     m_anonAcl->setChecked(false);
     form->addRow(QString(), m_anonAcl);
+    outer->addWidget(m_iscsiBox);
+
+    // ── SMB 参数（默认隐藏，恰好 1 个分区时才显示）──
+    m_smbBox = new QWidget();
+    auto *sform = new QFormLayout(m_smbBox);
+    sform->setContentsMargins(0, 0, 0, 0);
+
+    m_smbName = new QLineEdit();
+    m_smbName->setPlaceholderText("nas-share");
+    m_smbName->setToolTip("\\\\主机\<共享名>。不能含 \\ / * ? \" < > | :，不能叫 IPC$ 或 HOMES。");
+    sform->addRow("共享名", m_smbName);
+
+    m_smbPath = new QLineEdit();
+    m_smbPath->setPlaceholderText("选分区后自动填它的挂载点");
+    m_smbPath->setToolTip("被共享的目录。只能绝对路径；命中系统/家目录挂载点会红字警告。");
+    sform->addRow("共享路径", m_smbPath);
+
+    m_smbAuth = new QComboBox();
+    m_smbAuth->addItem("需账号密码（推荐）", int(Nas::SmbAuth::Password));
+    m_smbAuth->addItem("匿名只读", int(Nas::SmbAuth::GuestRO));
+    m_smbAuth->addItem("匿名可写（危险）", int(Nas::SmbAuth::GuestRW));
+    m_smbAuth->setCurrentIndex(0);
+    sform->addRow("访问方式", m_smbAuth);
+
+    m_smbUser = new QLineEdit(Nas::currentUserName());
+    m_smbUser->setToolTip("Samba 以这个 Linux 用户的权限读写文件。");
+    sform->addRow("映射用户", m_smbUser);
+
+    m_smbWrite = new QCheckBox("允许写入（只读共享请取消）");
+    m_smbWrite->setChecked(true);
+    sform->addRow("可写", m_smbWrite);
+    outer->addWidget(m_smbBox);
+
+    m_smbWarn = new QLabel();
+    m_smbWarn->setWordWrap(true);
+    m_smbWarn->setTextFormat(Qt::RichText);
+    outer->addWidget(m_smbWarn);
+
+    m_smbBox->setVisible(false);   // 初始 0 个成员，只显示 iSCSI
     layout->addWidget(cfg);
 
     // ── 按钮行 ──
@@ -134,12 +198,21 @@ NasPage::NasPage(QWidget *parent)
 
     m_createBtn = new QPushButton("① 创建阵列");
     m_createBtn->setToolTip("会格式化成员分区上的数据，需要逐条确认");
+    // 模式互斥切换：只刷新显隐与警告，不重算成员
+    connect(m_modeGroup, &QButtonGroup::idClicked, this, [this](int){
+        syncExportMode(m_board->members().size());
+    });
+    connect(m_smbAuth, &QComboBox::currentIndexChanged, this, &NasPage::refreshSmbWarning);
+    connect(m_smbPath, &QLineEdit::textChanged, this, &NasPage::refreshSmbWarning);
+    connect(m_smbName, &QLineEdit::textChanged, this, &NasPage::refreshSmbWarning);
+    connect(m_smbUser, &QLineEdit::textChanged, this, &NasPage::refreshSmbWarning);
+    connect(m_smbWrite, &QCheckBox::toggled, this, &NasPage::refreshSmbWarning);
     connect(m_createBtn, &QPushButton::clicked, this, &NasPage::createArray);
     btnRow->addWidget(m_createBtn);
 
     m_exportBtn = new QPushButton("② 导出 iSCSI");
     m_exportBtn->setEnabled(false);
-    connect(m_exportBtn, &QPushButton::clicked, this, &NasPage::exportIscsi);
+    connect(m_exportBtn, &QPushButton::clicked, this, &NasPage::onExportClicked);
     btnRow->addWidget(m_exportBtn);
 
     m_teardownBtn = new QPushButton("撤销导出");
@@ -247,8 +320,10 @@ void NasPage::refresh()
         }
         m_disks.append(d);
     }
+    m_sysMounts = Nas::systemMountPoints(all, mounts);
     m_board->setDisks(m_disks);
     updateSummary();
+    syncExportMode(m_board->members().size());
 
     setStatus(QString("已枚举 %1 个设备，其中可选 %2 个")
                   .arg(m_disks.size())
@@ -267,6 +342,7 @@ void NasPage::onSlotClicked(const QString &device, int slotIndex)
         m.removeAt(i);
         m_board->setMembers(m);
         updateSummary();
+        syncExportMode(m.size());
         setStatus(QString("%1 已移出阵列（其余盘条带序号已前移）").arg(device));
         return;
     }
@@ -281,9 +357,16 @@ void NasPage::onSlotClicked(const QString &device, int slotIndex)
     m.append(device);
     m_board->setMembers(m);
     updateSummary();
+    syncExportMode(m.size());
     setStatus(QString("%1 已加入阵列，条带序号 %2").arg(device).arg(m.size() - 1));
 }
 
+void NasPage::setMemberDevicesForTest(const QVector<QString> &devices)
+{
+    m_board->setMembers(devices);
+    updateSummary();
+    syncExportMode(devices.size());
+}
 void NasPage::onSlotRejected(const QString &device, int slotIndex, const QString &why)
 {
     Q_UNUSED(slotIndex)
@@ -320,6 +403,91 @@ Nas::Plan NasPage::currentPlan() const
         plan.members.append(m);
     }
     return plan;
+}
+
+// 按成员数刷新导出区。核心是那条跳变判断：
+// 只有「上一帧 >1 且这一帧 ==1」才自动切到 SMB。
+// 写成「当前 ==1 就切」是错的 —— 那样连改引擎下拉框（成员数不变）
+// 都会把用户显式选好的 iSCSI 翻成 SMB，等于跟用户抢方向盘。
+void NasPage::syncExportMode(int memberCount)
+{
+    const bool droppedToOne = (memberCount == 1 && m_lastMemberCount > 1);
+    const bool smbAllowed = (memberCount == 1);
+
+    m_modeSmb->setEnabled(smbAllowed);
+    if (!smbAllowed && m_modeSmb->isChecked())
+        m_modeIscsi->setChecked(true);      // 成员数变了，SMB 不再合法 -> 回 iSCSI
+
+    if (smbAllowed) {
+        if (droppedToOne && !m_modeSmb->isChecked()) {
+            m_modeSmb->setChecked(true);
+            setStatus("只剩 1 个分区，已切到 SMB 文件共享（可手动切回 iSCSI）");
+        }
+        m_modeHint->setText("单个分区：可走 SMB（文件级，最常用）或 iSCSI（块级）");
+    } else if (memberCount == 0) {
+        m_modeHint->setText("先在上方点选分区。选 1 个可切 SMB，选 ≥2 个做 iSCSI RAID0");
+    } else {
+        m_modeHint->setText(QString("已选 %1 个分区：多盘只能做 iSCSI RAID（SMB 不跨盘条带）")
+                                .arg(memberCount));
+    }
+
+    const bool smb = m_modeSmb->isChecked();
+    m_iscsiBox->setVisible(!smb);
+    m_smbBox->setVisible(smb);
+    m_smbWarn->setVisible(smb);
+    m_exportBtn->setText(smb ? "② 导出 SMB 共享" : "② 导出 iSCSI");
+
+    // SMB 表单预填：只在没被用户改过时填默认值，别覆盖用户输入
+    if (smb) {
+        const QString dev = m_board->members().value(0);
+        for (const NasBoardWidget::Disk &d : m_disks) {
+            if (d.device != dev) continue;
+            if (m_smbPath->text().isEmpty())
+                m_smbPath->setText(d.mountpoint);
+            if (m_smbName->text().isEmpty())
+                m_smbName->setText(Nas::suggestShareName(d.mountpoint, dev));
+            break;
+        }
+    }
+    refreshSmbWarning();
+    m_lastMemberCount = memberCount;
+}
+
+// SMB 的红字警告。刻意「不过度报警」：正常配置只说清授予了什么权限，
+// 不做每敲一个字都变红那种，否则用户会无视所有警告。
+void NasPage::refreshSmbWarning()
+{
+    if (!m_smbBox || !m_smbBox->isVisible()) { m_smbWarn->clear(); return; }
+
+    const int authIdx = m_smbAuth->currentData().toInt();
+    const Nas::SmbAuth auth = Nas::SmbAuth(authIdx);
+    const QString path = m_smbPath->text();
+    // 用 refresh() 时算好的那一份。这里不重算：
+    // 本函数由每次按键触发，重读挂载表既浪费，也可能与
+    // 面板的可用性判定给出不同答案。
+    const QStringList &sysMounts = m_sysMounts;
+
+    QStringList msgs;
+    if (auth == Nas::SmbAuth::GuestRW)
+        msgs << "<b>匿名可写</b>：局域网内任何设备无需密码即可写入、删除这里的文件。";
+    else if (auth == Nas::SmbAuth::GuestRO)
+        msgs << "匿名只读：局域网内任何设备都能浏览并下载，无需密码。";
+    else if (m_smbWrite->isChecked())
+        msgs << QString("可写共享：拿到账号密码的设备能写入。映射用户 <b>%1</b> "
+                        "需已用 smbpasswd -a 设过 Samba 密码。").arg(m_smbUser->text());
+
+    if (Nas::isRiskySharePath(path, sysMounts))
+        msgs << QString("路径 <b>%1</b> 命中系统或家目录挂载点，会暴露不该暴露的内容。")
+                    .arg(path.isEmpty() ? "(空)" : path);
+
+    const QString nameErr = Nas::validateShareName(m_smbName->text());
+    if (!nameErr.isEmpty()) msgs << QString("共享名：%1").arg(nameErr);
+    const QString pathErr = Nas::validateSharePath(path);
+    if (!pathErr.isEmpty()) msgs << QString("路径：%1").arg(pathErr);
+
+    if (msgs.isEmpty()) { m_smbWarn->clear(); return; }
+    m_smbWarn->setText("⚠ " + msgs.join("<br>⚠ "));
+    m_smbWarn->setProperty("role", "bad");
 }
 
 void NasPage::updateSummary()
@@ -397,6 +565,99 @@ void NasPage::createArray()
     m_ctl.run(go);
 }
 
+// 导出按钮一个就够：按当前模式分派，避免并排两个按钮让用户猜哪个有效。
+void NasPage::onExportClicked()
+{
+    if (m_modeSmb->isChecked()) exportSmb();
+    else                        exportIscsi();
+}
+
+// 导出 SMB 共享。这条路径**不会**碰分区上的数据，风险全在"暴露范围"，
+// 所以护栏集中在：环境是否齐备、共享名/路径是否合法、是否命中敏感路径、
+// 是否匿名可写。密码永远不在这条链里改（不含 smbpasswd）。
+void NasPage::exportSmb()
+{
+    if (!m_env.readyForSmb()) {
+        QStringList need;
+        if (!m_env.smbd)       need << "smbd（先装 Samba：apt install samba）";
+        if (!m_env.testparm)   need << "testparm（smbclient 包里，用来校验配置）";
+        if (!m_env.smbService) need << "smbd.service（systemd 服务单元）";
+        setStatus("SMB 环境未就绪，缺少：" + need.join("；"), true);
+        return;
+    }
+
+    const QString name = m_smbName->text().trimmed();
+    const QString path = m_smbPath->text().trimmed();
+
+    const QString nameErr = Nas::validateShareName(name);
+    if (!nameErr.isEmpty()) { setStatus("共享名：" + nameErr, true); return; }
+    const QString pathErr = Nas::validateSharePath(path);
+    if (!pathErr.isEmpty()) { setStatus("路径：" + pathErr, true); return; }
+
+    // 路径必须真的存在且是目录，否则共享出去是个死链接
+    QFileInfo fi(path);
+    if (!fi.exists())          { setStatus(QString("%1 不存在").arg(path), true); return; }
+    if (!fi.isDir())           { setStatus(QString("%1 不是目录").arg(path), true); return; }
+
+    const Nas::SmbAuth auth = Nas::SmbAuth(m_smbAuth->currentData().toInt());
+    const QString user = m_smbUser->text().trimmed();
+    // 需密码模式必须有映射用户：Samba 无法把匿名请求映射到"没有的用户"
+    if (auth == Nas::SmbAuth::Password && user.isEmpty()) {
+        setStatus("需密码模式必须指定映射用户", true);
+        return;
+    }
+    if (user.isEmpty() || user == "root") {
+        setStatus("映射用户不能为空或 root：那会让访客以 root 权限读写文件", true);
+        return;
+    }
+
+    // 敏感路径 / 匿名可写：单独一道强确认，不能只靠那条常驻警告。
+    const bool risky = Nas::isRiskySharePath(path, m_sysMounts);
+    const bool guestRW = (auth == Nas::SmbAuth::GuestRW);
+    if (risky || guestRW) {
+        QString why;
+        if (risky)  why += QString("路径 %1 命中系统或家目录挂载点。\n").arg(path);
+        if (guestRW) why += "共享为匿名可写：局域网内任何设备无需密码即可写入和删除。\n";
+        const auto r = QMessageBox::warning(this, "高风险共享",
+            why + "\n\n确认要把这个目录以这种方式开放到局域网吗？",
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (r != QMessageBox::Yes) { setStatus("已取消导出", true); return; }
+    }
+
+    Nas::SmbShare sh;
+    sh.shareName = name;
+    sh.path      = path;
+    sh.user      = user.isEmpty() ? QStringLiteral("nobody") : user;
+    sh.auth      = auth;
+    sh.browseable = true;
+    sh.writable  = (auth != Nas::SmbAuth::GuestRO) && m_smbWrite->isChecked();
+
+    const QVector<NasController::Step> steps =
+        m_ctl.planSmbExport(name, Nas::makeShareSection(sh));
+    if (steps.isEmpty()) { setStatus("生成导出步骤失败：共享名或路径未通过校验", true); return; }
+
+    const QVector<NasController::Step> go =
+        confirmSteps(steps, QString("导出 SMB 共享 \\主机\%1  →  %2").arg(name, path));
+    if (go.isEmpty()) return;
+    m_currentSmbShare = name;
+    m_ctl.run(go);
+}
+
+void NasPage::removeSmb()
+{
+    if (m_currentSmbShare.isEmpty()) { setStatus("没有记录本次导出的共享名", true); return; }
+    const auto r = QMessageBox::question(this, "撤销 SMB 共享",
+        QString("将删除共享 %1 的配置片段并重载 smbd。\n\n"
+                "只删配置片段，不碰分区上的文件。").arg(m_currentSmbShare),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (r != QMessageBox::Yes) return;
+    const QVector<NasController::Step> go =
+        confirmSteps(m_ctl.planSmbRemove(m_currentSmbShare),
+                     QString("撤销 SMB 共享 %1").arg(m_currentSmbShare));
+    if (go.isEmpty()) return;
+    m_ctl.run(go);
+}
+
 void NasPage::exportIscsi()
 {
     const Nas::Plan plan = currentPlan();
@@ -449,9 +710,21 @@ void NasPage::exportIscsi()
     m_ctl.run(go);
 }
 
+// 撤销按钮的入口：按最近导出的类型分派到 SMB 或 iSCSI。
 void NasPage::teardownIscsi()
 {
-    if (m_currentIqn.isEmpty()) { setStatus("本页没有记录已导出的 IQN", true); return; }
+    if (!m_currentSmbShare.isEmpty()) { removeSmb(); return; }
+    if (!m_currentIqn.isEmpty())      { teardownIscsiInternal(); return; }
+    setStatus("本页没有记录已导出的对象（先导出一次）", true);
+}
+void NasPage::teardownIscsiInternal()
+{
+    // SMB 与 iSCSI 共用这一个撤销按钮：按最近一次导出的类型分派。
+    // 判据用 m_currentSmbShare 是否非空，而不是看单选按钮 ——
+    // 用户可能导出 SMB 后又把单选切回 iSCSI，那时该撤销的仍是 SMB。
+    if (!m_currentSmbShare.isEmpty()) { removeSmb(); return; }
+    if (!m_currentIqn.isEmpty())      { teardownIscsiInternal(); return; }
+    setStatus("本页没有记录已导出的对象（先导出一次）", true);
     const auto steps = m_ctl.planIscsiTeardown(m_currentIqn, m_currentBlockDev);
     if (steps.isEmpty()) { setStatus("IQN 或设备路径异常", true); return; }
     const auto go = confirmSteps(steps, "撤销 iSCSI 导出");
