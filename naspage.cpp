@@ -29,6 +29,8 @@
 #include <QRadioButton>
 #include <QStandardPaths>
 #include <QApplication>
+#include <QScrollArea>
+#include <QFrame>
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QHeaderView>
@@ -94,17 +96,21 @@ NasPage::NasPage(QWidget *parent)
     connect(m_board, &NasBoardWidget::slotClicked, this, &NasPage::onSlotClicked);
     connect(m_board, &NasBoardWidget::slotRejected, this, &NasPage::onSlotRejected);
 
-    // ── 参数区 ──
-    auto *cfg = new QGroupBox("文件共享服务");
-    // 参数框按内容高度，不吸收页面多余空间。否则它会吃掉画板下方的
-    // 全部富余高度，把画板顶到中间，看起来就是机箱上方一大片空白。
-    cfg->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    auto *cfgLay = new QVBoxLayout(cfg);
-
-    // ── 标签页：导出服务 / 扩展服务 ──
+    // ── 参数区：导出服务 / 扩展服务 两个标签页 ──
     // 刻意分成两页而不是堆在一起：扩展服务（影视索引）失败或还没装
     // 依赖时，不该连带让人以为导出也用不了。两页失败域隔离。
+    //
+    // 标签页自己就是分组，不再另套 QGroupBox：外面那层框的标题和第一个
+    // 标签同名，同一个词在相邻两级重复一次是噪声而不是信息。
     m_tabs = new QTabWidget();
+    // 按内容高度，不吸收页面多余空间。否则它会吃掉画板下方的全部富余
+    // 高度，把画板顶到中间，看起来就是机箱上方一大片空白。
+    //
+    // 光设 Fixed 策略不够：maximumHeight 默认是 QWIDGETSIZE_MAX，布局有
+    // 富余时照样把标签页拉高（实测拉到 651，内容只要 253），多出来的高度
+    // 会被摊给页内控件，一行提示文字能被撑到几百像素。画板那边踩过同一个
+    // 坑，结论一样 —— 得同时把 maximumHeight 收到 sizeHint。
+    m_tabs->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     m_svcTab = new QWidget();
     auto *outer = new QVBoxLayout(m_svcTab);
     outer->setContentsMargins(0, 8, 0, 0);
@@ -122,12 +128,19 @@ NasPage::NasPage(QWidget *parent)
     modeRow->addWidget(m_modeIscsi);
     modeRow->addWidget(m_modeSmb);
     m_modeHint = new QLabel();
+    // 这一行只有提示文字，不给约束的话布局会把富余竖直高度摊给它，
+    // 一行 17px 的提示实测被撑到 297px，在带边框的标签页里就是一片空白。
+    m_modeHint->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_modeHint->setMaximumHeight(m_modeHint->sizeHint().height() + 6);
     m_modeHint->setProperty("role", "mute");
     modeRow->addWidget(m_modeHint, 1);
     outer->addLayout(modeRow);
 
     // iSCSI 那套行整体装进一个容器，好和 SMB 那套互斥显隐。
     m_iscsiBox = new QWidget();
+    // 只是给一组控件做显隐的容器，不该吸收页面富余高度；
+    // 不设 Fixed 的话它会被拉到内容高度的两倍以上。
+    m_iscsiBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     auto *form = new QFormLayout(m_iscsiBox);
     form->setContentsMargins(0, 0, 0, 0);
     m_volName = new QLineEdit();
@@ -168,6 +181,9 @@ NasPage::NasPage(QWidget *parent)
 
     // ── SMB 参数（默认隐藏，恰好 1 个分区时才显示）──
     m_smbBox = new QWidget();
+    // 只是给一组控件做显隐的容器，不该吸收页面富余高度；
+    // 不设 Fixed 的话它会被拉到内容高度的两倍以上。
+    m_smbBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     auto *sform = new QFormLayout(m_smbBox);
     sform->setContentsMargins(0, 0, 0, 0);
 
@@ -206,8 +222,12 @@ NasPage::NasPage(QWidget *parent)
 
     m_tabs->addTab(m_svcTab, "文件共享服务");
     m_tabs->addTab(buildExtensionsTab(), "扩展服务");
-    cfgLay->addWidget(m_tabs);
-    layout->addWidget(cfg);
+    // 收口高度：maximumHeight 默认是 QWIDGETSIZE_MAX，光设 Fixed 策略挡不住
+    // 布局拉伸（实测标签页被拉到 651 而内容只要 253，多出来的高度摊给页内
+    // 控件，一行提示文字被撑成几百像素）。画板那边踩过同一个坑。
+    //
+    // 不设高度上限：标签页取最宽那页的高度（扩展服务页比导出页高），
+    layout->addWidget(m_tabs);
 
     // ── 按钮行 ──
     auto *btnRow = new QHBoxLayout();
@@ -470,6 +490,7 @@ void NasPage::syncExportMode(int memberCount)
     }
     refreshSmbWarning();
     m_lastMemberCount = memberCount;
+
 }
 
 // SMB 的红字警告。刻意「不过度报警」：正常配置只说清授予了什么权限，
@@ -836,8 +857,11 @@ QWidget *NasPage::buildExtensionsTab()
     m_tvTable->verticalHeader()->setVisible(false);
     m_tvTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_tvTable->setSelectionBehavior(QAbstractItemView::SelectRows);
-    m_tvTable->setMaximumHeight(190);
-    tvv->addWidget(m_tvTable);
+    // 不设固定高度：给 stretch 让它吸收富余空间，这样扩展页的整体高度
+    // 会随窗口收缩，导出页那边同高的空白也就跟着变小。写死 190 会让
+    // 扩展页始终占 700px，标签页同高后导出页只剩一片空白。
+    m_tvTable->setMinimumHeight(120);
+    tvv->addWidget(m_tvTable, 1);
 
     m_tvNote = new QLabel();
     m_tvNote->setWordWrap(true);
@@ -880,7 +904,18 @@ QWidget *NasPage::buildExtensionsTab()
 
     v->addStretch(1);
     refreshTvDeps();
-    return w;
+    // 滚动包一层。不包的话扩展页内容多高就占多高（实测 700px），而标签页
+    // 必须同高，导出页（258px）下面就只剩一片空白。包了之后窗口给多高用
+    // 多高，超出才出滚动条 —— 标签页高度不再被最高那页顶起来。
+    //
+    // 不给导出页硬塞内容：没有真实信息可放时，留白比编一块面板好。
+    auto *scroll = new QScrollArea();
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    scroll->setWidget(w);
+    scroll->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+    return scroll;
 }
 
 // 依赖自检。写死成实测结论前先探测一遍，避免哪天装了还在喊缺。
