@@ -109,20 +109,30 @@ void GlassPanel::rebuild()
     QWidget *src = m_source;
     if (!src) { m_blurred = QPixmap(); m_dirty = false; return; }
 
-    // 把源控件中落在本面板矩形内的部分渲染成 QImage。
-    // 不用 grab()：grab 会把本面板自己（子控件）也画进去，形成自我递归。
-    const QPoint topLeftInSrc = src->mapFrom(this, QPoint(0, 0));
-    QImage img(sz, QImage::Format_RGB32);
-    img.fill(qRgb(11, 15, 20));   // 兜底色：拿不到内容时用主题底色
+    // 本面板与背景源是兄弟（同为 mainCol 的子控件）。
+    //
+    // 这里不能用 src->mapFrom(this, ...)：Qt6 的 mapFrom 要求参数控件与自己在
+    // 父子链上（互为祖先），兄弟关系不满足，它会打印
+    //     QWidget::mapFrom(): parent must be in parent hierarchy
+    // 并返回错位的坐标 —— 实测两个都摆在 (0,0) 的同父兄弟之间，
+    // mapFrom 给出的是 (-210,-2) 而不是 (0,0)。
+    //
+    // 同父控件共享同一个坐标系统，所以直接对 pos() 相减即可。
+    const QPoint topLeftInSrc = this->pos() - src->pos();
 
-    {
-        QPainter p(&img);
-        p.translate(-topLeftInSrc);
-        src->render(&p, QPoint(), QRegion(QRect(topLeftInSrc, sz)),
-                    QWidget::DrawChildren);
+    // 用 grab() 而不是 render()：grab 走控件自身的绘制路径，不需要父子链；
+    // 本面板是源的兄弟而非子孙，不会被画进去，没有递归问题。
+    const QPixmap shot = src->grab();
+    QImage img = shot.copy(QRect(topLeftInSrc, sz)).toImage()
+                    .convertToFormat(QImage::Format_RGB32);
+    if (img.isNull() || img.size() != sz) {
+        // 源还没显示或区域越界：退回不画，别拿脏数据糊上去
+        m_blurred = QPixmap();
+        m_dirty = false;
+        return;
     }
 
-    // 降采样 + 放大：模糊半径等效变大而开销更小（玻璃不需要保留高频细节）
+    // 降采样 + 放大：等效放大模糊半径而开销更小（玻璃不需要保留高频细节）
     const double scale = 0.5;
     QImage small = img.scaled(int(img.width() * scale), int(img.height() * scale),
                               Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
