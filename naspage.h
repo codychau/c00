@@ -73,7 +73,7 @@ private:
     QWidget *buildExtensionsTab();
     void refreshTvDeps();
     void onTvScanClicked();
-    QWidget *buildRaidFsTab();
+    QWidget *buildRaidFsBox();  // 导出页里「挂载到目录」那个出口框（非独立标签页）
     void refreshRaidFsStatus();
     void onMountFsClicked();
     void onUmountFsClicked();
@@ -100,6 +100,7 @@ private:
     QButtonGroup *m_modeGroup = nullptr;
     QRadioButton *m_modeIscsi = nullptr;
     QRadioButton *m_modeSmb = nullptr;
+    QRadioButton *m_modeMount = nullptr; // 第三个出口：挂成 /mnt 目录
     QWidget *m_smbBox = nullptr;
     QLineEdit *m_smbName = nullptr;
     QLineEdit *m_smbPath = nullptr;
@@ -125,6 +126,7 @@ private:
     // 上一帧成员数。判断「刚从 >1 掉到 1」这个跳变，不能只看当前值：
     // 否则改引擎下拉（成员数不变）也会把用户显式选的 iSCSI 翻成 SMB。
     int m_lastMemberCount = 0;
+    bool m_syncingExportMode = false; // syncExportMode 再入保护
 
     // ── 扩展服务（电视墙）──
     // 标签页把「导出服务」和「扩展服务」分开：扩展关掉不影响导出，
@@ -132,7 +134,7 @@ private:
     QTabWidget *m_tabs = nullptr;
     QWidget    *m_svcTab = nullptr;
     QWidget    *m_extTab = nullptr;
-    QWidget    *m_fsTab = nullptr;       // RAID FS 标签页
+    QWidget    *m_fsBox = nullptr;       // 挂载目录出口框（与 m_iscsiBox/m_smbBox 互斥显隐）
     QLabel     *m_tvRoot = nullptr;      // 当前扫描根（跟随所选分区）
     QLabel     *m_tvCount = nullptr;
     QLabel     *m_tvPill = nullptr;
@@ -149,7 +151,6 @@ private:
     QLabel    *m_fsDeps = nullptr;
     QLabel    *m_fsNote = nullptr;
     QPushButton *m_umountBtn = nullptr;  // 撤销挂载
-    QPushButton *m_mountFsBtn = nullptr; // ② 挂载到目录
 };
 
 #endif // NASPAGE_H
