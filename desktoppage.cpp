@@ -1,4 +1,5 @@
 #include "desktoppage.h"
+#include "theme.h"
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -19,6 +20,10 @@
 #include <QJsonParseError>
 #include <QProcessEnvironment>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 static void setComboByData(QComboBox *combo, const QString &data);
 static QString waybarConfigPath();
 static QStringList parseModules(const QString &text);
@@ -34,10 +39,13 @@ DesktopPage::DesktopPage(QWidget *parent)
     : QWidget(parent)
 {
     auto *outerLayout = new QVBoxLayout(this);
-    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setContentsMargins(0, kTopbarInset, 0, 0);
 
     auto *scrollArea = new QScrollArea();
     scrollArea->setWidgetResizable(true);
+    // 显式开启横向滚动条：widgetResizable(true) 下默认横向策略是 Ignored，
+    // 溢出内容会被静默裁掉而不出现滚动条
+scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scrollArea->setFrameShape(QFrame::NoFrame);
 
     auto *inner = new QWidget();
@@ -57,12 +65,15 @@ DesktopPage::DesktopPage(QWidget *parent)
         "暂不支持 X11 及其他桌面环境（未来考虑支持 KDE）。");
     notice->setWordWrap(true);
     notice->setStyleSheet(
-        "background-color: #fff7ed; border: 1px solid #f59e0b; "
-        "border-radius: 6px; padding: 8px; color: #92400e; font-size: 13px;");
+        QString("background-color: %1; border: 1px solid %2;"
+                " border-radius: 6px; padding: 8px; color: %3; font-size: 13px;")
+            .arg(Theme::alpha(Theme::warn(), 28).name(QColor::HexRgb),
+                 Theme::warn().name(QColor::HexRgb),
+                 Theme::warn().name(QColor::HexRgb)));
     layout->addWidget(notice);
 
     m_status = new QLabel("正在检测…");
-    m_status->setStyleSheet("color: #666;");
+    m_status->setProperty("role", "dim");
     layout->addWidget(m_status);
 
     // ==================================================
@@ -272,7 +283,7 @@ DesktopPage::DesktopPage(QWidget *parent)
     addSectionHeader(layout, "⌨️ 快捷键");
 
     m_bindStatus = new QLabel("检测中…");
-    m_bindStatus->setStyleSheet("color: #666;");
+    m_bindStatus->setProperty("role", "dim");
     layout->addWidget(m_bindStatus);
 
     auto *hb = new QHBoxLayout();
@@ -396,7 +407,7 @@ void DesktopPage::addSectionHeader(QVBoxLayout *target, const QString &text)
     target->addWidget(h);
     auto *line = new QFrame();
     line->setFrameShape(QFrame::HLine);
-    line->setStyleSheet("background-color: #e5e7eb;");
+    line->setStyleSheet(QString("background-color: %1;").arg(Theme::border().name(QColor::HexRgb)));
     target->addWidget(line);
 }
 
