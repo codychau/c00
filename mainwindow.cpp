@@ -20,6 +20,7 @@
 #include "vmpage.h"
 #include "logpage.h"
 #include "mountpage.h"
+#include "naspage.h"
 
 // 侧栏宽度对应 demo 01 的 grid-template-columns: 208px 1fr
 static constexpr int kSidebarWidth = 208;
@@ -141,6 +142,7 @@ MainWindow::MainWindow(QWidget *parent)
     addNav("",     "💾", "存储管理", new StoragePage(this),   "磁盘与挂载点");
     addNav("管理", "🖥️", "虚机管理", vmPage,                  "VirtualBox 与 QEMU/KVM");
     addNav("",     "📂", "文件挂载", new MountPage(this),      "SMB / NFS 挂载管理");
+    addNav("",     "📁", "NAS", new NasPage(this),            "分区组 RAID 并导出 iSCSI");
     addNav("",     "⚙️", "服务控制", new ServicePage(this),    "systemd 服务");
     addNav("",     "📋", "日志管理", new LogPage(this),        "应用与系统日志");
     addNav("系统", "🎮", "娱乐选项", new EntertainmentPage(this), "音频与媒体输出");

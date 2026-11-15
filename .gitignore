@@ -9,4 +9,5 @@ build-release/
 *.user
 moc_*
 proxy-rs/target/
+nasrs/target/
 preview/

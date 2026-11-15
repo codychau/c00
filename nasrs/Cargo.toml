@@ -1,0 +1,17 @@
+[package]
+name = "nasrs"
+version = "0.1.0"
+edition = "2021"
+description = "用户态 RAID0 over 文件，最终导出为 iSCSI 目标"
+license = "MIT"
+
+# 依赖保持为空：这个 crate 的可靠性来自"能审计"，
+# 拉进 tokio/nix 之类会让一次 cargo update 就改变行为。
+# 需要 NBD/io_uring 时再按需引入，并且锁死版本。
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"

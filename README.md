@@ -152,6 +152,28 @@ fm.inFontUcs4(0x1F4CA);           // true = 能画出来
 
 AppImage 已内置该字体，不受本节影响。
 
+### LIO / iSCSI 的几个坑（本机实证）
+
+导出块设备要加载的是 **target_core_iblock**（= IBLOCK = `/backstores/block`），
+不是名字看起来更贴切的 `target_core_file` —— 后者是 FILEIO，对应
+`/backstores/fileio`，加载它之后 `/backstores/` 下压根不会出现 `block`。
+
+| 模块 | modinfo description | 对应 backstore |
+|---|---|---|
+| `target_core_iblock` | TCM IBLOCK subsystem plugin | `block`（块设备） |
+| `target_core_file` | TCM FILEIO subsystem plugin | `fileio`（普通文件） |
+| `target_core_user` | TCM USER subsystem plugin | `user`（用户态，depends uio） |
+
+持久化：`targetcli saveconfig` 在 Ubuntu 上写到
+**`/etc/rtslib-fb-target/saveconfig.json`**，不是老文档里的 `/etc/target/saveconfig.json`。
+开机恢复单元 `target.service`（`targetctl restore`）由 **python3-rtslib-fb** 提供，
+`targetcli-fb` 只装 `targetclid.service/socket` —— 只装 targetcli 不会有自动恢复。
+
+自研引擎 v1 走 `nasrs → loop → LIO block`，**不走 TCMU**：crates.io 上
+`tcmu`/`libtcmu`/`tcmu-rs` 全部不存在，GitHub 上只有两个多年停更的实验仓库，
+自己裸写 uio + netlink 是按周起的工作量。
+
+
 ## 打包 AppImage
 
 字体已随包（约 27 MB）。`EMOJI_FONT=none` 可去掉字体（省 9.5 MB），
