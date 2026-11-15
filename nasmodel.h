@@ -197,6 +197,32 @@ QStringList systemMountPoints(const QVector<Block> &blocks,
 // 当前登录用户名，作为 SMB「映射用户」的默认值。
 QString currentUserName();
 
+// ── RAID FS：挂载点校验 ──────────────────────────────────
+
+// 挂载点必须是 /mnt 直接子目录。理由有三条，缺一不可：
+//   1. 用户要求"挂载到 /mnt 下的某个目录"，范围就该锁死在这里；
+//   2. /mnt 下的路径不会盖到系统运行需要的目录（/、/usr、/var、/home"
+//      都在别处），挂错地方的爆炸半径最小；
+//   3. 挂到一个已有内容的目录会让那些内容"看不见"（被挂载遮住），
+//      锁在 /mnt/<名字> 这种新建目录上就不会遮东西。
+QString validateMountPoint(const QString &path);
+
+// 由 RAID 卷名推一个挂载目录，例如 /mnt/<卷名>。
+// 卷名不合法时返回空串，让调用方去报错而不是拼出一个怪路径。
+QString defaultMountPoint(const QString &volumeName);
+
+// 挂载点是否与系统已有挂载冲突。返回空串表示不冲突。
+// 这里比 SMB 那边严：SMB 只是"把目录共享出去"，挂载是"盖住目录"，
+// 盖错地方比共享错地方难发现得多 —— 用户只会觉得文件"不见了"。
+// 挂载点目录若已存在且非空，挂上去会把里面的内容"看不见"（被挂载遮住）。
+// 这不是猜测：路径是否已存在、是否为空，只有看真实文件系统才知道，
+// 所以这一条单独成函数，由调用方传 entryList 进来（模型层不自己碰磁盘，
+// 保持可单测）。返回空串表示安全。
+QString mountPointBusy(const QString &path, const QStringList &existingEntries);
+
+QString mountPointConflict(const QString &path, const QStringList &systemMounts);
+
+
 // 单分区 SMB 的默认导出路径：就是该分区的挂载点。
 // 返回空串表示未挂载，UI 应提示"先挂载才能共享"。
 QString defaultSharePath(const QString &mountpoint);

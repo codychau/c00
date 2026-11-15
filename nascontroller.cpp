@@ -117,6 +117,14 @@ NasController::Env NasController::probe() const
     e.losetup     = !findTool("losetup").isEmpty();
     e.nasrsBinary = !nasrsBinaryPath().isEmpty();
 
+    // FUSE：raidfs 挂目录靠它，与 iSCSI 的依赖完全是两套。
+    //   · /dev/fuse 是字符设备，不在就一律挂不了；
+    //   · fusermount3 是 setuid 的挂载助手，非 root 挂 FUSE 必须经它。
+    //     只查 mount.fuse 不够：那是 mount(8) 的 helper，手动 mount -t fuse
+    //     才用得到；程序里直接调 fuse 库时真正需要的是 fusermount。
+    e.fuseDevice = QFileInfo::exists("/dev/fuse");
+    e.fuseMount  = !findTool("fusermount3").isEmpty() || !findTool("fusermount").isEmpty();
+
 // SMB：smbd 多在 /usr/sbin，findTool 已覆盖该路径
 e.smbd     = !findTool("smbd").isEmpty();
 e.testparm = !findTool("testparm").isEmpty();
@@ -148,6 +156,10 @@ e.smbService = QFileInfo::exists("/usr/lib/systemd/system/smbd.service")
     if (!e.kernelModules) e.missing << "target_core_mod 内核模块";
     // loop 在本机是 built-in，所以不检查 loop.ko 是否存在，只看 losetup
     if (!e.losetup)       e.missing << "losetup（自研引擎需要）";
+    // 注意：fuseDevice/fuseMount 也**不进** missing，理由与 Samba 相同 ——
+    // raidfs 是可选出口，没 FUSE 的人做 iSCSI / 内核 RAID 不该看到"环境未
+    // 就绪"。raidfs 页自己判断 readyForFuse。
+    //
     // 注意：smbd/testparm/smb.service 缺失**不进** missing。SMB 是可选功能，
     // 没装 Samba 的人用 RAID 不该看到环境未就绪。SMB 页自己判断 readyForSmb。
 
@@ -596,4 +608,69 @@ void NasController::pumpQueue()
         m_process->write(in);
         m_process->closeWriteChannel();
     }
+}
+
+
+QVector<NasController::Step>
+NasController::planRaidfsMount(const Nas::Plan &plan, const QString &mountPoint) const
+{
+    QVector<Step> steps;
+    // 两道模型层校验，缺一不可：
+    //   · 挂载点必须在 /mnt 直下且字符集安全 —— 它会进 argv，也会进
+    //     systemd 单元名，这里放宽一个字符就等于开一个注入口；
+    //   · 卷名与成员要够：RAID0 至少 2 个成员，少于 2 个 nasrs 自己会拒绝。
+    if (!Nas::validateMountPoint(mountPoint).isEmpty()) return steps;
+    if (plan.members.size() < 2) return steps;
+    for (const Nas::Member &m : plan.members)
+        if (m.filePath.isEmpty()) return steps;
+
+    // 1) 建挂载目录。用 install -d 而不是 mkdir：一并把权限定下来，
+    //    且目录已存在时不报错（重复挂载是正常操作）。
+    Step mkd;
+    mkd.program = "pkexec";
+    mkd.args = { "install", "-d", "-m", "0755", mountPoint };
+    mkd.describe = QString("创建挂载目录 %1").arg(mountPoint);
+    mkd.destructive = false;
+    steps.append(mkd);
+
+    // 2) 起 nasrs 导出。这里刻意不写 nasrs 的具体参数：引擎还没有导出
+    //    通路，写一条看起来完整、实际跑不通的命令比不写更糟 —— 用户会
+    //    以为是自己配置错了。等导出实现后在这里补 program/args。
+    Step srv;
+    srv.program = nasrsBinaryPath();
+    srv.args = { "export-fs" };
+    for (const Nas::Member &m : plan.members) {
+        srv.args << "--disk" << m.filePath;
+    }
+    srv.args << "--name" << plan.volumeName << "--mount" << mountPoint;
+    srv.describe = QString("用 nasrs 把卷 %1 导出并挂到 %2")
+                      .arg(plan.volumeName, mountPoint);
+    // 标成 destructive 是保守做法：这一步会在挂载目录上盖一个文件系统。
+    // 挂载本身可撤销（unmount 就恢复原状），但它会让目录里原有的内容
+    // 暂时看不见，用户若误以为文件丢了会很慌，所以要走确认。
+    srv.destructive = true;
+    steps.append(srv);
+
+    return steps;
+}
+
+QVector<NasController::Step>
+NasController::planRaidfsUnmount(const QString &mountPoint) const
+{
+    QVector<Step> steps;
+    if (!Nas::validateMountPoint(mountPoint).isEmpty()) return steps;
+
+    // 先确认它真的是我们的挂载点，再动手卸：
+    // 对没挂载的目录跑 umount 只是报错，但对挂着的别的文件系统跑
+    // umount 会把别人正在用的东西卸掉。umount 对未挂载目标会失败，
+    // 所以这一步本身就是那道检查，失败即停。
+    Step um;
+    um.program = "pkexec";
+    um.args = { "umount", mountPoint };
+    um.describe = QString("卸载 %1").arg(mountPoint);
+    // 卸载会把卷上未落盘的写丢掉，且若有进程正在读这里的文件会失败，
+    // 属于会影响别人的操作，走确认。
+    um.destructive = true;
+    steps.append(um);
+    return steps;
 }

@@ -189,7 +189,7 @@ NasPage::NasPage(QWidget *parent)
 
     m_smbName = new QLineEdit();
     m_smbName->setPlaceholderText("nas-share");
-    m_smbName->setToolTip("\\\\主机\<共享名>。不能含 \\ / * ? \" < > | :，不能叫 IPC$ 或 HOMES。");
+    m_smbName->setToolTip("\\\\主机\\<共享名>。不能含 \\ / * ? \" < > | :，不能叫 IPC$ 或 HOMES。");
     sform->addRow("共享名", m_smbName);
 
     m_smbPath = new QLineEdit();
@@ -221,6 +221,10 @@ NasPage::NasPage(QWidget *parent)
     m_smbBox->setVisible(false);   // 初始 0 个成员，只显示 iSCSI
 
     m_tabs->addTab(m_svcTab, "文件共享服务");
+    // raidfs 放在导出与扩展之间：它是导出的另一种出口（同样是把卷交出去），
+    // 不是可选扩展。放错位置会让人以为它是电视墙那类可选能力。
+    m_fsTab = buildRaidFsTab();
+    m_tabs->addTab(m_fsTab, "RAID 挂载目录");
     m_tabs->addTab(buildExtensionsTab(), "扩展服务");
     // 收口高度：maximumHeight 默认是 QWIDGETSIZE_MAX，光设 Fixed 策略挡不住
     // 布局拉伸（实测标签页被拉到 651 而内容只要 253，多出来的高度摊给页内
@@ -253,6 +257,13 @@ NasPage::NasPage(QWidget *parent)
     m_exportBtn->setEnabled(false);
     connect(m_exportBtn, &QPushButton::clicked, this, &NasPage::onExportClicked);
     btnRow->addWidget(m_exportBtn);
+    // 与「② 导出 iSCSI」并列：同一个卷的两种出口，不是先后步骤，所以两个都叫 ②
+    // 且必须挨着放 —— 中间插进"撤销导出"会把这组并列关系切断。
+    m_mountFsBtn = new QPushButton("② 挂载到目录");
+    m_mountFsBtn->setToolTip("用 nasrs 做 RAID0 后挂成 /mnt 下的目录，供影视服务扫描。");
+    m_mountFsBtn->setEnabled(false);
+    connect(m_mountFsBtn, &QPushButton::clicked, this, &NasPage::onMountFsClicked);
+    btnRow->addWidget(m_mountFsBtn);
 
     m_teardownBtn = new QPushButton("撤销导出");
     m_teardownBtn->setEnabled(false);
@@ -488,7 +499,15 @@ void NasPage::syncExportMode(int memberCount)
             break;
         }
     }
+    // 挂载目录预填：按卷名推一个 /mnt/<卷名>。只在空的时候填，不覆盖用户输入。
+    // 用 defaultMountPoint 而不是自己拼串：它保证返回值为空或必然合法，
+    // 预填一个非法路径等于在用户没动手之前就埋雷。
+    if (m_mountPoint && m_mountPoint->text().isEmpty()) {
+        const QString suggest = Nas::defaultMountPoint(m_volName->text().trimmed());
+        if (!suggest.isEmpty()) m_mountPoint->setText(suggest);
+    }
     refreshSmbWarning();
+    refreshRaidFsStatus();
     m_lastMemberCount = memberCount;
 
 }
@@ -785,6 +804,10 @@ void NasPage::onAllFinished(bool success)
     // 创建成功后才允许导出
     if (m_createBtn && !m_currentIqn.isEmpty())
         m_exportBtn->setEnabled(true);
+    // 挂目录走的是同一个卷，门槛一致；不给它单独放宽，
+    // 否则会出现"阵列还没建成就挂目录"这种半截状态。
+    if (m_createBtn && !m_currentIqn.isEmpty())
+        m_mountFsBtn->setEnabled(true);
     setStatus(success ? "完成" : "中途失败，后面的步骤已跳过", !success);
     refresh();
 }
@@ -794,6 +817,195 @@ void NasPage::setStatus(const QString &text, bool bad)
     m_status->setText(text);
     m_status->setStyleSheet(bad ? ("color:" + Theme::bad().name()) : QString());
 }
+
+// ── RAID 挂载目录 ──────────────────────────────────────────
+//
+// 用户要的出口：同一个 nasrs 引擎做 RAID0，但不导成 iSCSI，而是挂成一个
+// /mnt 下的目录，让影视服务直接扫。iSCSI 那条走到块设备就结束了，
+// Jellyfin 这类服务拿不到文件，所以才需要这一页。
+//
+// 这一页最要紧的是别让人以为能直接用。nasrs 现在只算布局就退出（退出码
+// 3），没有任何导出通路。所以状态徽标写的不是"环境未就绪"，而是"引擎未
+// 实现"—— 两者的处置动作完全不同，写成前者会把人引去装软件，白费功夫。
+QWidget *NasPage::buildRaidFsTab()
+{
+    auto *w = new QWidget();
+    auto *v = new QVBoxLayout(w);
+    v->setContentsMargins(0, 8, 0, 0);
+
+    auto *intro = new QLabel("同样是 nasrs 做 RAID0，差别只在出口：不导成 iSCSI，而是挂成一个目录，影视服务能直接扫。");
+    // 上面那句只说差别，不承诺能用；下一行的徽标才说现在到底能不能。
+    intro->setWordWrap(true);
+    intro->setProperty("role", "mute");
+    v->addWidget(intro);
+
+    auto *card = new QGroupBox("挂载目录");
+    auto *form = new QFormLayout(card);
+
+    m_mountPoint = new QLineEdit();
+    m_mountPoint->setPlaceholderText("/mnt/raid");
+    m_mountPoint->setToolTip("只接受 /mnt 的直接子目录。挂到会遮内容：原目录里的东西在挂载期间看不见，卸载后回来。");
+    form->addRow("挂载到", m_mountPoint);
+
+    auto *scope = new QLabel("限定在 /mnt 的直接子目录：这一层不会盖住系统运行需要的目录，也不会挂到已有分区的挂载点里面去（那样分区一旦没挂，数据会写进根盘的同名目录，极难发现）。");
+    scope->setWordWrap(true);
+    scope->setProperty("role", "mute");
+    form->addRow("", scope);
+
+    m_fsPill = new QLabel("检查中…");
+    m_fsPill->setProperty("role", "pill-warn");
+    // 刻意不设 role="pill"：QSS 里那条规则会和稍后的行内 setStyleSheet 打架，
+    // 实测文字整块消失只剩色块。电视墙那三个徽标同样是"不设 role、样式走行内"。
+    m_fsDeps = new QLabel();
+    m_fsDeps->setWordWrap(true);
+    m_fsDeps->setTextFormat(Qt::RichText);
+    m_fsDeps->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    auto *pillRow = new QHBoxLayout();
+    pillRow->addWidget(m_fsPill);
+    pillRow->addWidget(m_fsDeps, 1);
+    form->addRow("依赖", pillRow);
+
+    m_fsNote = new QLabel();
+    m_fsNote->setWordWrap(true);
+    m_fsNote->setTextFormat(Qt::RichText);
+    m_fsNote->setProperty("role", "note");
+    v->addWidget(card);
+    v->addWidget(m_fsNote);
+
+    auto *row = new QHBoxLayout();
+    row->addStretch(1);
+    m_umountBtn = new QPushButton("卸载该目录");
+    m_umountBtn->setToolTip("umount 挂载点。目录里原有的内容会重新显现。");
+    // 一开始没有可撤的东西，先禁用；导出成功后才放开（见 onMountFsClicked）
+    m_umountBtn->setEnabled(false);
+    connect(m_umountBtn, &QPushButton::clicked, this, &NasPage::onUmountFsClicked);
+    row->addWidget(m_umountBtn);
+    v->addLayout(row);
+
+    v->addStretch(1);
+    refreshRaidFsStatus();
+    return w;
+}
+
+
+// 把"能不能挂"讲清楚。刻意分成两层说，合成一句就会误导人：
+//   环境层：/dev/fuse、fusermount3、nasrs 二进制在不在 —— 这些缺了能装；
+//   实现层：nasrs 目前根本没有导出通路，只算布局就退出（退出码 3）。
+// 只报环境层会让人去装软件，装完照样不能用。所以未实现时徽标就写未实现。
+void NasPage::refreshRaidFsStatus()
+{
+    if (!m_fsPill) return;
+
+    struct Row { const char *name; bool has; const char *why; };
+    const QList<Row> rows = {
+        { "/dev/fuse",    m_env.fuseDevice,  "内核 FUSE 支持" },
+        { "fusermount3",  m_env.fuseMount,   "非 root 挂载助手（apt install fuse3）" },
+        { "nasrs",        m_env.nasrsBinary, "RAID 引擎" },
+    };
+    // 与电视墙那页同一套画法：逐项 ✓/✗ 上色，缺什么一目了然。
+    // 不用 <ul>/<li> —— QLabel 的富文本支持很窄，列表标签不会生效，
+    // 只会把项目符号原样显示出来（这里踩过：整页出现一堆 •）。
+    QString html;
+    for (const Row &r : rows) {
+        const QString col = r.has ? Theme::ok().name() : Theme::bad().name();
+        html += "<span style=\"color:" + col + "\"> " +
+                (r.has ? QString("✓ ") : QString("✗ ")) +
+                QString::fromLatin1(r.name) +
+                " <span style=\"color:" + Theme::textMute().name() + "\">· " +
+                QString::fromUtf8(r.why) + "</span></span>";
+    }
+    m_fsDeps->setText(html);
+
+    // 徽标只写状态本身，不写颜色以外的信息；未实现这条优先级最高，
+    // 而且**不随环境是否齐备改措辞** —— 环境齐备也不代表能用。
+    m_fsPill->setText(QString::fromUtf8("引擎未实现"));
+    // 徽标走主题 role，不写行内 setStyleSheet：颜色只在一个地方定义。
+    // 之前写的是 alpha(warn,36) 底 + warn 字，实测文字整块看不见 ——
+    // 同色系半透明底被压成实心后与文字同色。用 role 就没这个坑。
+    m_fsPill->setProperty("role", "pill-warn");
+    QStringList notes;
+    notes << QString::fromUtf8(
+        "<b>nasrs 还没有导出能力</b>：当前版本只计算条带布局、打印容量就退出"
+        "（退出码 3）。本页生成的命令要等引擎补上导出之后才跑得通。");
+    if (!m_env.fuseDevice || !m_env.fuseMount || !m_env.nasrsBinary)
+        notes << QString::fromUtf8("另外本机还缺上面打 ✗ 的环境依赖，装上也不代表能用。");
+    notes << QString::fromUtf8(
+        "挂载目录现在就能填：路径是否合法、会不会遮住现有内容，这些与引擎无关，"
+        "现在就校验并报错。");
+    m_fsNote->setText(notes.join("<br>"));
+}
+void NasPage::onMountFsClicked()
+{
+    const QString mp = m_mountPoint->text().trimmed();
+
+    // 1) 路径合法性（纯字符串，不碰磁盘）
+    const QString mpErr = Nas::validateMountPoint(mp);
+    if (!mpErr.isEmpty()) { setStatus("挂载目录：" + mpErr, true); return; }
+
+    // 2) 与现有挂载的关系。这一步必须在生成命令之前：挂到已挂载的目录上
+    //    会直接失败，而挂到"位于某个分区挂载点之内"的目录则会把数据写到
+    //    意料之外的盘上 —— 后者不报错，属于最难发现的那类问题。
+    const QString conflict = Nas::mountPointConflict(mp, m_sysMounts);
+    if (!conflict.isEmpty()) { setStatus("挂载目录：" + conflict, true); return; }
+
+    // 3) 目录若非空，挂载会把它遮住。这里读一次真实目录：遮内容不是损坏，
+    //    卸载就恢复，所以是"要让人知道"而不是"拒绝"。
+    QDir probe(mp);
+    if (probe.exists()) {
+        const QStringList entries =
+            probe.entryList(QDir::AllEntries | QDir::Hidden | QDir::System);
+        const QString busy = Nas::mountPointBusy(mp, entries);
+        if (!busy.isEmpty() &&
+            QMessageBox::warning(this, "目录已有内容",
+                QString("%1\n\n确定要挂上去吗？（卸载后这些会重新显现）").arg(busy),
+                QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel)
+                != QMessageBox::Ok) {
+            setStatus("已取消：不挂到非空目录", true);
+            return;
+        }
+    }
+
+    // 4) 成员要够。RAID0 少于 2 个成员 nasrs 自己会拒，这里先挡下来并说清原因，
+    //    免得用户看到一句英文报错。
+    const Nas::Plan plan = currentPlan();
+    if (plan.members.size() < 2) {
+        setStatus("先在上方点选至少 2 个分区，RAID0 需要 2 个以上成员", true);
+        return;
+    }
+
+    const auto steps = m_ctl.planRaidfsMount(plan, mp);
+    if (steps.isEmpty()) { setStatus("命令生成失败：参数不合法", true); return; }
+
+    // 引擎没实现，所以这里不走 confirmSteps 真的执行 —— 那是骗人。
+    // 把命令逐条列出来给人看，并明说现在跑不通：既让流程可审，也不假装能用。
+    // 引擎没实现，所以这里不走 confirmSteps 真的执行 —— 那是骗人。
+    // 改成把命令逐条列出来给人看并明说跑不通：流程可审，但不假装能用。
+    QStringList lines;
+    for (const NasController::Step &s : steps)
+        lines << QString("# %1\n    %2 %3").arg(s.describe, s.program, s.args.join(" "));
+    setStatus(QString::fromUtf8("命令已生成（%1 步），但 nasrs 尚未实现导出，不会执行。")
+                  .arg(steps.size()), true);
+    QMessageBox::information(this, QString::fromUtf8("RAID 挂载目录"),
+        QString::fromUtf8("引擎还未实现，以下命令不会执行，仅供核对：") + "\n\n"
+        + lines.join("\n"));
+}
+
+// 卸载。只撤我们自己挂的那个目录，且必须由用户点：
+// umount 一个正在被影视服务读取的目录会让对方的 IO 报错。
+void NasPage::onUmountFsClicked()
+{
+    const QString mp = m_mountPoint->text().trimmed();
+    const QString mpErr = Nas::validateMountPoint(mp);
+    if (!mpErr.isEmpty()) { setStatus("挂载目录：" + mpErr, true); return; }
+
+    const auto steps = m_ctl.planRaidfsUnmount(mp);
+    if (steps.isEmpty()) { setStatus("卸载目标不合法", true); return; }
+    const auto toRun = confirmSteps(steps, "卸载挂载目录");
+    if (toRun.isEmpty()) return;
+    m_ctl.run(toRun);
+}
+
+
 
 // ── 扩展服务页 ────────────────────────────────────────────
 //
@@ -965,8 +1177,7 @@ void NasPage::onTvScanClicked()
     }
     m_tvRoot->setText(roots.join("、"));
     m_tvPill->setText("扫描中…");
-    m_tvPill->setStyleSheet("padding:2px 8px; border-radius:4px;background:" +
-                            Theme::surface3().name() + ";color:" + Theme::warn().name() + ";");
+    m_tvPill->setProperty("role", "pill-warn");
     QApplication::processEvents();
 
     struct Row { QString title, se, src, file, size; };
@@ -1035,9 +1246,7 @@ void NasPage::onTvScanClicked()
     m_tvCount->setText(QString("已索引 %1 项").arg(rows.size()));
     m_tvScanned = true;
     m_tvPill->setText(rows.isEmpty() ? "无影视文件" : "已索引");
-    m_tvPill->setStyleSheet("padding:2px 8px; border-radius:4px;background:" +
-        (rows.isEmpty() ? Theme::surface3().name() : Theme::alpha(Theme::ok(), 36).name()) + ";color:" +
-        (rows.isEmpty() ? Theme::textMute().name() : Theme::ok().name()) + ";");
+    m_tvPill->setProperty("role", rows.isEmpty() ? "pill" : "pill-ok");
 
     // 未验证的部分写明白。这条说明的价值在于防止"看起来像刮削好了"。
     m_tvNote->setText(
@@ -1058,9 +1267,7 @@ void NasPage::onTvScanClicked()
             ? QString("已遍历 %1 个条目后停止（上限 %2），结果不完整").arg(visited).arg(kMaxVisit)
             : QString("结果已达 %1 条上限，可能还有更多未列出").arg(rows.size());
         m_tvPill->setText("结果不完整");
-        m_tvPill->setStyleSheet("padding:2px 8px; border-radius:4px;background:" +
-                                Theme::alpha(Theme::warn(), 36).name() + ";color:" +
-                                Theme::warn().name() + ";");
+        m_tvPill->setProperty("role", "pill-warn");
         m_tvNote->setText(m_tvNote->text() + "<br><b>" + why + "</b>");
         setStatus("电视墙扫描被上限打断：" + why);
     } else {
