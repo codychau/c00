@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo 01 · 深色机房控制台 — 状态仪表</title>
+<link rel="stylesheet" href="demo.css">
+<style>
+  .hero { display: grid; grid-template-columns: 1.15fr .85fr; gap: var(--sp-4); }
+  @media (max-width: 1020px) { .hero { grid-template-columns: 1fr; } }
+  .board { grid-column: 1; }
+  .ovl { display: grid; grid-template-columns: 1fr 1fr; gap: 0 var(--sp-4); align-content: start; }
+  .ovl .row { display: flex; justify-content: space-between; align-items: baseline; gap: var(--sp-3);
+              padding: 9px 0; border-bottom: 1px dashed color-mix(in srgb, var(--border) 70%, transparent); }
+  .ovl .row:nth-last-child(-n+2) { border-bottom: 0; }
+  .ovl .k { font-size: var(--fs-sm); color: var(--text-mute); white-space: nowrap; }
+  .ovl .v { font-family: var(--font-mono); font-size: var(--fs-sm); text-align: right; }
+  .stat-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-4); }
+  @media (max-width: 1020px) { .stat-row { grid-template-columns: repeat(2, 1fr); } }
+  .legend { display: flex; flex-wrap: wrap; gap: var(--sp-3); font-size: var(--fs-xs); color: var(--text-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 5px; }
+  .legend i { width: 9px; height: 9px; border-radius: 3px; }
+  .tip { min-height: 34px; font-size: var(--fs-sm); color: var(--text-dim); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
+</style>
+</head>
+<body>
+<div class="app"><div class="window">
+
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">🛠</div>
+      <div>
+        <div class="brand-name">家用服务器工具箱</div>
+        <div class="brand-sub">Home Server Toolbox</div>
+      </div>
+    </div>
+    <div class="nav-sep">监控</div>
+    <button class="nav-item active"><span class="nav-ico">📊</span>状态仪表<span class="nav-badge live">1</span></button><button class="nav-item "><span class="nav-ico">🎬</span>场景设定</button><button class="nav-item "><span class="nav-ico">💾</span>存储管理<span class="nav-badge ok">3</span></button>
+    <div class="nav-sep">管理</div>
+    <button class="nav-item "><span class="nav-ico">🖥️</span>虚机管理<span class="nav-badge ok">2</span></button><button class="nav-item "><span class="nav-ico">⚙️</span>服务控制</button><button class="nav-item "><span class="nav-ico">📋</span>日志管理</button><button class="nav-item "><span class="nav-ico">📂</span>文件挂载</button>
+    <div class="nav-sep">系统</div>
+    <button class="nav-item "><span class="nav-ico">🎮</span>娱乐选项</button><button class="nav-item "><span class="nav-ico">🎨</span>个性化桌面</button><button class="nav-item "><span class="nav-ico">🤖</span>AI 选项</button><button class="nav-item "><span class="nav-ico">ℹ️</span>关于</button>
+    <div style="flex:1"></div>
+    <div class="nav-item"><span class="nav-ico">🛡</span>看门狗<span class="nav-badge" style="color:var(--ok)">运行中</span></div>
+  </aside>
+<div class="main">
+  <header class="topbar">
+    <div><h1>📊 系统状态仪表</h1><div class="sub">每 8 秒自动刷新 · 上次更新 3 秒前</div></div>
+    <div class="spacer"></div>
+    <span class="pill live ok"><span class="dot"></span>监控中</span>
+    <button class="btn sm">⏱ 8s</button>
+  </header>
+
+  <div style="padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-4)">
+
+    <!-- 指标卡：一眼看关键数字 -->
+    <section class="stat-row">
+      <div class="card stat">
+        <div class="stat-top"><span class="stat-label">CPU 使用率</span><span class="spacer"></span><span class="pill warn"><span class="dot"></span>偏高</span></div>
+        <div class="stat-val num">68<small>%</small></div>
+        <div class="bar warn"><i style="width:68%"></i></div>
+        <div class="spark"><i style="height:22%;animation-delay:0.01s"></i><i style="height:30%;animation-delay:0.01s"></i><i style="height:26%;animation-delay:0.17s"></i><i style="height:44%;animation-delay:0.02s"></i><i style="height:38%;animation-delay:0.00s"></i><i style="height:52%;animation-delay:0.48s"></i><i style="height:48%;animation-delay:0.45s"></i><i style="height:61%;animation-delay:0.29s"></i><i style="height:55%;animation-delay:0.42s"></i><i style="height:68%;animation-delay:0.18s"></i><i style="height:64%;animation-delay:0.30s"></i><i style="height:72%;animation-delay:0.01s"></i><i style="height:68%;animation-delay:0.24s"></i></div>
+        <div class="stat-foot">16 线程 · Ryzen 9 · 44.0°C</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-top"><span class="stat-label">内存</span><span class="spacer"></span><span class="pill ok"><span class="dot"></span>正常</span></div>
+        <div class="stat-val num">38<small>Gi / 44Gi</small></div>
+        <div class="bar ok"><i style="width:86%"></i></div>
+        <div class="spark"><i style="height:70%;animation-delay:0.13s"></i><i style="height:72%;animation-delay:0.26s"></i><i style="height:71%;animation-delay:0.24s"></i><i style="height:75%;animation-delay:0.43s"></i><i style="height:78%;animation-delay:0.03s"></i><i style="height:80%;animation-delay:0.08s"></i><i style="height:79%;animation-delay:0.41s"></i><i style="height:83%;animation-delay:0.09s"></i><i style="height:84%;animation-delay:0.30s"></i><i style="height:86%;animation-delay:0.06s"></i><i style="height:85%;animation-delay:0.14s"></i><i style="height:86%;animation-delay:0.16s"></i><i style="height:86%;animation-delay:0.07s"></i></div>
+        <div class="stat-foot">86% · 缓存 6.2Gi · 缓冲 2.1Gi</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-top"><span class="stat-label">交换分区</span><span class="spacer"></span><span class="pill mute">低</span></div>
+        <div class="stat-val num">1.9<small>Gi / 8.0Gi</small></div>
+        <div class="bar"><i style="width:24%"></i></div>
+        <div class="spark"><i style="height:10%;animation-delay:0.26s"></i><i style="height:12%;animation-delay:0.00s"></i><i style="height:11%;animation-delay:0.05s"></i><i style="height:14%;animation-delay:0.38s"></i><i style="height:18%;animation-delay:0.35s"></i><i style="height:20%;animation-delay:0.22s"></i><i style="height:19%;animation-delay:0.10s"></i><i style="height:22%;animation-delay:0.32s"></i><i style="height:24%;animation-delay:0.25s"></i><i style="height:23%;animation-delay:0.19s"></i><i style="height:24%;animation-delay:0.12s"></i><i style="height:24%;animation-delay:0.19s"></i><i style="height:24%;animation-delay:0.44s"></i></div>
+        <div class="stat-foot">24% · 无明显换页压力</div>
+      </div>
+      <div class="card stat">
+        <div class="stat-top"><span class="stat-label">根分区</span><span class="spacer"></span><span class="pill warn"><span class="dot"></span>60%</span></div>
+        <div class="stat-val num">198<small>G / 233G</small></div>
+        <div class="bar warn"><i style="width:60%"></i></div>
+        <div class="spark"><i style="height:52%;animation-delay:0.22s"></i><i style="height:53%;animation-delay:0.05s"></i><i style="height:54%;animation-delay:0.23s"></i><i style="height:55%;animation-delay:0.30s"></i><i style="height:56%;animation-delay:0.47s"></i><i style="height:57%;animation-delay:0.35s"></i><i style="height:58%;animation-delay:0.24s"></i><i style="height:58%;animation-delay:0.03s"></i><i style="height:59%;animation-delay:0.03s"></i><i style="height:60%;animation-delay:0.38s"></i><i style="height:60%;animation-delay:0.17s"></i><i style="height:60%;animation-delay:0.24s"></i><i style="height:60%;animation-delay:0.42s"></i></div>
+        <div class="stat-foot">ext4 · /dev/nvme0n1p3</div>
+      </div>
+    </section>
+
+    <!-- 主板画板 + 系统概览 -->
+    <section class="hero">
+      <div class="board" id="board">
+        <!-- 芯片位置对应真实插槽布局 -->
+        <div class="chip cpu"      style="left:22px;  top:22px;  width:118px" data-tip="CPU · 采样中 · 温度 44.0°C">
+          <b>CPU</b>占用 68%<br>温度 44.0°C<div class="mini"><i style="width:68%"></i></div></div>
+        <div class="chip chipset"  style="left:168px; top:22px;  width:104px" data-tip="芯片组 · 7.0.0-42-generic">
+          <b>芯片组</b>7.0.0-42-…</div>
+        <div class="chip ram"      style="left:298px; top:22px;  width:64px; height:150px" data-tip="内存 38Gi / 44Gi (86%)">
+          <b>内存</b>38Gi<br>/ 44Gi<br>86%<div class="mini"><i style="width:86%"></i></div></div>
+        <div class="chip ram"      style="left:372px; top:22px;  width:56px; height:150px" data-tip="交换分区 1.9Gi / 8.0Gi (24%)">
+          <b>交换</b>1.9Gi<br>/ 8.0Gi<br>24%<div class="mini"><i style="width:24%"></i></div></div>
+
+        <div class="chip nic"      style="left:22px;  top:130px; width:118px" data-tip="网口 · 无连接">
+          <b>网口</b>无连接</div>
+        <div class="chip nvme"     style="left:22px;  top:186px; width:250px" data-tip="M.2 nvme0n1 · 41°C · 6.4M/1.1G">
+          <b>M.2 · nvme0n1</b>温度 41°C · 6.4M/1.1G<div class="mini"><i style="width:1%"></i></div></div>
+        <div class="chip gpu"      style="left:22px;  top:244px; width:250px" data-tip="GPU0 Radeon AI PRO R9700 · 47°C · 31.35/31.86 GiB">
+          <b>GPU0 · Radeon AI PRO R9700</b>温度 47°C · 31.35/31.86 GiB<div class="mini"><i style="width:98%"></i></div></div>
+        <div class="chip gpu"      style="left:22px;  top:302px; width:250px" data-tip="GPU1 Raphael · 51°C · 0.05/0.50 GiB">
+          <b>GPU1 · Raphael</b>温度 51°C · 0.05/0.50 GiB<div class="mini"><i style="width:10%"></i></div></div>
+        <div class="chip sata"     style="left:298px; top:186px; width:130px" data-tip="SATA sda · 41°C · 683G/3.6T">
+          <b>SATA · sda</b>41°C · 683G/3.6T<div class="mini"><i style="width:19%"></i></div></div>
+        <div class="chip sata"     style="left:298px; top:244px; width:130px" data-tip="SATA sdb · 41°C · 4.8T/5.5T">
+          <b>SATA · sdb</b>41°C · 4.8T/5.5T<div class="mini"><i style="width:87%"></i></div></div>
+
+        <div class="board-tag">SERVER TOOLBOX · MB</div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span class="card-title">系统概览</span><span class="spacer"></span><span class="pill mute">Ubuntu 26.04</span></div>
+        <div class="card-body">
+          <div class="ovl">
+            <div class="row"><span class="k">系统</span><span class="v">Ubuntu 26.04.1 LTS</span></div>
+            <div class="row"><span class="k">内核</span><span class="v">7.0.0-42-generic</span></div>
+            <div class="row"><span class="k">运行时间</span><span class="v">1 小时 56 分</span></div>
+            <div class="row"><span class="k">CPU 使用率</span><span class="v">68%</span></div>
+            <div class="row"><span class="k">内存</span><span class="v">38Gi / 44Gi</span></div>
+            <div class="row"><span class="k">交换分区</span><span class="v">1.9Gi / 8.0Gi</span></div>
+            <div class="row"><span class="k">根分区</span><span class="v">198G / 233G</span></div>
+            <div class="row"><span class="k">Home 分区</span><span class="v">198G / 233G</span></div>
+            <div class="row"><span class="k">网络</span><span class="v">无连接</span></div>
+            <div class="row"><span class="k">CPU 温度</span><span class="v">44.0°C</span></div>
+            <div class="row"><span class="k">NVMe 温度</span><span class="v">43.9°C</span></div>
+            <div class="row"><span class="k">GPU 温度</span><span class="v">47°C</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="card" style="padding: var(--sp-3) var(--sp-4)">
+      <div class="tip" id="tip">把鼠标移到主板部件上 — 这里显示它的信息；点击部件可展开对应分组。</div>
+      <hr class="sep" style="margin: var(--sp-2) 0">
+      <div class="legend">
+        <span><i style="background:#f59e0b"></i>CPU</span><span><i style="background:#3b82f6"></i>内存</span>
+        <span><i style="background:#10b981"></i>NVMe</span><span><i style="background:#a855f7"></i>SATA</span>
+        <span><i style="background:#ef4444"></i>GPU</span><span><i style="background:#06b6d4"></i>网口</span>
+        <span><i style="background:#64748b"></i>芯片组</span>
+      </div>
+    </div>
+
+    <!-- 折叠分组：收起时标题带摘要 -->
+    <details class="grp" open>
+      <summary>磁盘状态 · 共 3 块 · 最高 41°C · 已用 60.2%
+        <span class="spacer"></span><span class="pill warn"><span class="dot"></span>sdb 接近满</span></summary>
+      <div class="grp-body">
+        <table>
+          <thead><tr><th>设备</th><th>型号</th><th>容量</th><th>已用</th><th>温度</th><th>使用率</th><th>挂载点</th><th>就绪</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">nvme0n1</td><td>WD Black SN850X</td><td class="mono">2.0T</td><td class="mono">683G</td><td class="mono">41°C</td>
+                <td style="min-width:120px"><div class="bar warn"><i style="width:34%"></i></div></td><td class="mono">/data</td><td><span class="pill ok"><span class="dot"></span>就绪</span></td></tr>
+            <tr><td class="mono">sda</td><td>Seagate IronWolf 4T</td><td class="mono">3.6T</td><td class="mono">683G</td><td class="mono">41°C</td>
+                <td style="min-width:120px"><div class="bar ok"><i style="width:19%"></i></div></td><td class="mono">/mnt/iron</td><td><span class="pill ok"><span class="dot"></span>就绪</span></td></tr>
+            <tr class="sel"><td class="mono">sdb</td><td>WD Red Plus 6T</td><td class="mono">5.5T</td><td class="mono">4.8T</td><td class="mono">41°C</td>
+                <td style="min-width:120px"><div class="bar bad"><i style="width:87%"></i></div></td><td class="mono">/mnt/red</td><td><span class="pill warn"><span class="dot"></span>未就绪</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <details class="grp">
+      <summary>显卡温度 · 共 2 块 · Radeon AI PRO R9700 · 47°C
+        <span class="spacer"></span><span class="pill bad"><span class="dot"></span>GPU0 显存 98%</span></summary>
+      <div class="grp-body">
+        <table>
+          <thead><tr><th>卡</th><th>型号</th><th>PCI 槽位</th><th>核心频率</th><th>显存</th><th>风扇</th><th>温度</th><th>限频</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">GPU0</td><td>Radeon AI PRO R9700</td><td class="mono">03:00.0</td><td class="mono">1850 MHz</td>
+                <td class="mono">31.35/31.86 GiB</td><td class="mono">32%</td><td class="mono">47°C</td><td><button class="btn sm">限制频率</button></td></tr>
+            <tr><td class="mono">GPU1</td><td>Raphael</td><td class="mono">00:02.0</td><td class="mono">600 MHz</td>
+                <td class="mono">0.05/0.50 GiB</td><td class="mono">—</td><td class="mono">51°C</td><td><button class="btn sm" disabled>不支持</button></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <!-- 底栏动作 -->
+    <div class="toolbar">
+      <button class="btn">🌡 读取温度</button>
+      <button class="btn">⏻ 关机</button>
+      <button class="btn">⟳ 重启</button>
+      <button class="btn primary">🛡 安装看门狗</button>
+      <button class="btn">♻ 关闭内核检测</button>
+      <div class="spacer"></div>
+      <button class="btn danger">✕ 退出程序</button>
+    </div>
+  </div>
+</div>
+</div></div>
+
+<script>
+  // 主板部件 hover → 提示条 + 高亮；click → 展开对应分组
+  const tip = document.getElementById("tip")
+  const tipDefault = tip.textContent
+  const groups = [...document.querySelectorAll("details.grp")]
+  document.querySelectorAll(".chip").forEach(c => {
+    c.tabIndex = 0
+    c.addEventListener("mouseenter", () => { tip.textContent = c.dataset.tip; c.classList.add("on") })
+    c.addEventListener("mouseleave", () => { tip.textContent = tipDefault; c.classList.remove("on") })
+    c.addEventListener("focus",      () => { tip.textContent = c.dataset.tip })
+    c.addEventListener("click", () => {
+      const g = c.dataset.tip.includes("GPU") ? groups[1] : groups[0]
+      g.open = true
+      g.scrollIntoView({ behavior: "smooth", block: "center" })
+    })
+  })
+  // 折叠摘要点击 chevron 也可用原生 details
+</script>
+</body>
+</html>

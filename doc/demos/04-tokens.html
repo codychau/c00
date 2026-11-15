@@ -1,0 +1,534 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo 04 · 设计令牌与组件库（可直接导出 QSS）</title>
+<link rel="stylesheet" href="demo.css">
+<style>
+  .wrap { max-width: 1200px; margin: 0 auto; padding: var(--sp-5) var(--sp-5) var(--sp-7); }
+  .head { display: flex; align-items: center; gap: var(--sp-4); flex-wrap: wrap; margin-bottom: var(--sp-5); }
+  .sec { margin-bottom: var(--sp-6); }
+  .sec h2 { font-size: var(--fs-xl); margin-bottom: var(--sp-1); }
+  .sec .note { font-size: var(--fs-sm); color: var(--text-mute); margin-bottom: var(--sp-4); }
+  .demo-row { display: flex; flex-wrap: wrap; gap: var(--sp-3); align-items: center; }
+  .demo-col { display: flex; flex-direction: column; gap: var(--sp-3); }
+
+  .theme-sw { display: inline-flex; gap: var(--sp-2); }
+  .sw { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid var(--border);
+        transition: transform var(--dur) var(--ease), border-color var(--dur) var(--ease); }
+  .sw:hover { transform: scale(1.12); }
+  .sw.on { border-color: var(--text); transform: scale(1.12); }
+  .sw[data-set="dark"]  { background: linear-gradient(135deg,#38bdf8,#a78bfa); }
+  .sw[data-set="light"] { background: linear-gradient(135deg,#4f46e5,#0ea5e9); }
+  .sw[data-set="glass"] { background: linear-gradient(135deg,#f0abfc,#7dd3fc); }
+
+  .swatches { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: var(--sp-3); }
+  .swatch { border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden;
+            background: var(--surface); cursor: pointer; transition: border-color var(--dur) var(--ease); }
+  .swatch:hover { border-color: var(--border-hi); }
+  .swatch .c { height: 52px; }
+  .swatch .m { padding: 8px 10px; }
+  .swatch .n { font-size: var(--fs-sm); font-weight: 600; }
+  .swatch .h { font-family: var(--font-mono); font-size: 10px; color: var(--text-mute); text-transform: uppercase; }
+
+  .tokens { display: grid; grid-template-columns: repeat(auto-fill, minmax(206px, 1fr)); gap: var(--sp-3); }
+  .tok { padding: var(--sp-3); border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface); }
+  .tok .tk { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--accent); }
+  .tok .tv { font-family: var(--font-mono); font-size: var(--fs-sm); margin-top: 4px; }
+  .tok .vis { margin-top: var(--sp-2); }
+
+  pre.qss { font-family: var(--font-mono); font-size: var(--fs-sm); line-height: 1.6; margin: 0;
+            background: color-mix(in srgb, var(--bg) 72%, #000); border: 1px solid var(--border);
+            border-radius: var(--r-sm); padding: var(--sp-4); overflow: auto; max-height: 460px; }
+  pre.qss .k { color: #7dd3fc; } pre.qss .v { color: #fbbf24; }
+  pre.qss .c { color: var(--text-mute); }
+
+  .board-sm { transform: scale(.82); transform-origin: top left; }
+  .dialog { max-width: 740px; border-radius: var(--r-md); overflow: hidden; }
+  .dlg-head { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-3) var(--sp-4);
+              border-bottom: 1px solid var(--border); background: var(--surface-2); }
+  .dlg-body { padding: var(--sp-4); display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
+  @media (max-width: 760px) { .dlg-body { grid-template-columns: 1fr; } }
+  .fieldset { border: 1px solid var(--border); border-radius: var(--r-sm); padding: var(--sp-3); }
+  .fieldset .lg { font-size: var(--fs-xs); color: var(--text-mute); padding-bottom: var(--sp-2);
+              text-transform: uppercase; letter-spacing: .06em; }
+  .form { display: grid; grid-template-columns: 104px 1fr; gap: var(--sp-2) var(--sp-3); align-items: center; }
+  .form label { font-size: var(--fs-sm); color: var(--text-dim); text-align: right; }
+  .dlg-foot { display: flex; gap: var(--sp-2); padding: var(--sp-3) var(--sp-4);
+              border-top: 1px solid var(--border); background: var(--surface-2); }
+  .seg { display: inline-flex; border: 1px solid var(--border); border-radius: var(--r-sm); overflow: hidden; }
+  .seg button { border: 0; background: var(--surface-2); font: inherit; font-size: var(--fs-sm);
+                padding: 6px 12px; cursor: pointer; color: var(--text-dim); }
+  .seg button + button { border-left: 1px solid var(--border); }
+  .seg button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--text); font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="app"><div class="wrap">
+
+  <div class="head">
+    <div style="flex:1;min-width:240px">
+      <h1 style="font-size:var(--fs-2xl)">🎨 设计令牌与组件库</h1>
+      <div class="mute" style="font-size:var(--fs-sm);margin-top:4px">
+        改一处 token，全站换肤 · 底部可一键导出等效 Qt QSS（贴进 main.cpp 的 setStyleSheet 即可）</div>
+    </div>
+    <div class="theme-sw" id="sw">
+      <div class="sw on" data-set="dark"  title="深色机房控制台"></div>
+      <div class="sw" data-set="light" title="浅色柔和卡片"></div>
+      <div class="sw" data-set="glass" title="玻璃拟态"></div>
+    </div>
+  </div>
+
+  <section class="sec">
+    <h2>1 · 颜色令牌</h2>
+    <div class="note">点击色卡复制变量名与当前十六进制值。语义色（ok / warn / bad / info）跨主题保持一致，保证状态含义稳定。</div>
+    <div class="swatches" id="swatches"></div>
+  </section>
+
+  <section class="sec">
+    <h2>2 · 间距 · 圆角 · 字号</h2>
+    <div class="note">4px 基准阶梯。Qt 里对应 layout 的 setSpacing / setContentsMargins 与 border-radius。</div>
+    <div class="tokens" id="tokens"></div>
+  </section>
+
+  <section class="sec">
+    <h2>3 · 按钮</h2>
+    <div class="note">min-height 25px 沿用现有全局 QSS，不撑破既有布局；hover 只做 1px 上浮，桌面端足够克制。</div>
+    <div class="demo-row">
+      <button class="btn primary">➕ 新建虚机</button>
+      <button class="btn">🔄 刷新</button>
+      <button class="btn danger">🗑 删除</button>
+      <button class="btn" disabled>▶️ 启动</button>
+      <button class="btn sm">📝 配置</button>
+      <button class="btn sm primary">💾 保存</button>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>4 · 状态药丸</h2>
+    <div class="note">取代纯文字状态（运行中 / 已停止、就绪 / 未就绪）。带 .live 的圆点有呼吸动画。</div>
+    <div class="demo-row">
+      <span class="pill live ok"><span class="dot"></span>运行中</span>
+      <span class="pill ok"><span class="dot"></span>就绪</span>
+      <span class="pill warn"><span class="dot"></span>未就绪</span>
+      <span class="pill bad"><span class="dot"></span>启动失败</span>
+      <span class="pill mute">已停止</span>
+      <span class="pill live ok"><span class="dot"></span>看门狗 active</span>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>5 · 进度条 · 环形仪表 · 走势图</h2>
+    <div class="note">阈值配色：小于 60% 用 ok，60 到 80% 用 warn，大于 80% 用 bad，与状态页告警逻辑一致。</div>
+    <div class="demo-row" style="align-items:flex-end;gap:var(--sp-5)">
+      <div style="flex:1;min-width:260px;display:flex;flex-direction:column;gap:var(--sp-3)">
+        <div class="bar ok"><i style="width:34%"></i></div>
+        <div class="bar"><i style="width:60%"></i></div>
+        <div class="bar warn"><i style="width:71%"></i></div>
+        <div class="bar bad"><i style="width:98%"></i></div>
+      </div>
+      <div class="ring" style="--p:86"><b>86%</b></div>
+      <div class="ring" style="--p:24"><b>24%</b></div>
+      <div style="width:180px"><div class="spark" id="spark"></div></div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>6 · 表格</h2>
+    <div class="note">列名与 vmpage.cpp 的 8 列完全一致；行态在 QSS 里对应 QTableWidget::item:hover 与 ::item:selected。</div>
+    <div class="card" style="overflow:hidden">
+      <table>
+        <thead><tr><th>名称</th><th>CPU</th><th>内存</th><th>磁盘</th><th>网络</th><th>远程</th><th>状态</th><th>额外参数</th></tr></thead>
+        <tbody>
+          <tr class="sel"><td>ubuntu-jump</td><td class="mono">4</td><td class="mono">8G</td><td class="mono">64G</td><td class="mono">user/vnc</td><td class="mono">:5901</td><td><span class="pill live ok"><span class="dot"></span>运行中</span></td><td class="mono mute">-cpu host</td></tr>
+          <tr><td>win11-lab</td><td class="mono">6</td><td class="mono">12G</td><td class="mono">120G</td><td class="mono">NAT</td><td class="mono">RDP :3389</td><td><span class="pill live ok"><span class="dot"></span>运行中</span></td><td class="mono mute">-vga virtio</td></tr>
+          <tr><td>nas-freenas</td><td class="mono">2</td><td class="mono">4G</td><td class="mono">2T</td><td class="mono">bridge br0</td><td class="mono">:5902</td><td><span class="pill mute">已停止</span></td><td class="mono mute">-boot order=c</td></tr>
+          <tr><td>arch-sandbox</td><td class="mono">8</td><td class="mono">16G</td><td class="mono">80G</td><td class="mono">user</td><td class="mono mute">—</td><td><span class="pill warn"><span class="dot"></span>等待挂载</span></td><td class="mono mute">-object memory-backend</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>7 · 表单控件 · 折叠分组</h2>
+    <div class="note">折叠摘要带摘要文字，收起时也能看到关键数据（对应 statuspage.cpp 的 updateGroupHeaders）。</div>
+    <div class="demo-row" style="align-items:flex-start;gap:var(--sp-5)">
+      <div class="demo-col" style="min-width:230px">
+        <div class="field"><label>名称</label><input class="input" value="ubuntu-jump"></div>
+        <div class="field"><label>CPU 核心</label><input class="input" value="4"></div>
+        <div class="field"><label>网络模式</label><select class="input"><option>user (NAT)</option><option>bridge</option><option>tap</option></select></div>
+        <div class="demo-row">
+          <div class="switch on" role="switch"></div><span class="dim" style="font-size:var(--fs-sm)">自动启动</span>
+          <div class="switch" role="switch"></div><span class="dim" style="font-size:var(--fs-sm)">等待挂载点</span>
+        </div>
+        <div class="seg"><button class="on">QEMU</button><button>VirtualBox</button></div>
+      </div>
+      <div style="flex:1;min-width:300px">
+        <details class="grp" open><summary>磁盘状态 · 共 3 块 · 最高 41°C · 已用 60.2%</summary>
+          <div class="grp-body"><div class="mute" style="font-size:var(--fs-sm)">nvme0n1 34% · sda 19% · <b style="color:var(--bad)">sdb 87%</b></div></div></details>
+        <details class="grp"><summary>显卡温度 · 共 2 块 · Radeon AI PRO R9700 · 47°C</summary>
+          <div class="grp-body"><div class="mute" style="font-size:var(--fs-sm)">GPU0 显存 98% · GPU1 10%</div></div></details>
+        <details class="grp"><summary>硬件直通 · 1 个 PCI 设备 · Hugepages 开</summary>
+          <div class="grp-body"><div class="mono mute" style="font-size:var(--fs-sm)">0000:03:00.0 Radeon AI PRO R9700</div></div></details>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>8 · 对话框骨架 · 主板画板</h2>
+    <div class="note">分组名照搬 vmdialog.cpp：基本参数 / 网络设置 / 显卡设置 / 磁盘 / 端口转发 (user 模式) / 硬件直通。</div>
+    <div class="demo-row" style="align-items:flex-start;gap:var(--sp-5)">
+      <div class="card dialog" style="flex:1;min-width:340px">
+        <div class="dlg-head"><b style="font-size:var(--fs-md)">编辑虚机 — ubuntu-jump</b>
+          <div class="spacer"></div><span class="pill mute">QEMU/KVM</span><span class="mute" style="cursor:pointer">✕</span></div>
+        <div class="dlg-body">
+          <div class="fieldset"><div class="lg">基本参数</div>
+            <div class="form">
+              <label>名称:</label><input class="input" value="ubuntu-jump">
+              <label>CPU 核心:</label><input class="input" value="4">
+              <label>内存:</label><input class="input" value="8192">
+              <label>虚拟机类型:</label><select class="input"><option>q35</option><option>pc</option></select>
+              <label>架构 / 机器:</label><input class="input" value="x86_64 / q35">
+            </div></div>
+          <div class="fieldset"><div class="lg">网络设置</div>
+            <div class="form">
+              <label>网络模式:</label><select class="input"><option>user</option><option>bridge</option><option>tap</option></select>
+              <label>网卡型号:</label><select class="input"><option>virtio-net-pci</option><option>e1000</option></select>
+              <label>桥接网卡:</label><input class="input" value="br0" disabled>
+              <label>VNC 编号:</label><input class="input" value="1">
+            </div>
+            <hr class="sep">
+            <div class="lg">端口转发 (user 模式)</div>
+            <div class="form">
+              <label>主机端口:</label><input class="input" value="2222">
+              <label>虚机端口:</label><input class="input" value="22">
+              <label>协议:</label><select class="input"><option>tcp</option><option>udp</option></select>
+            </div></div>
+          <div class="fieldset"><div class="lg">显卡设置</div>
+            <div class="form">
+              <label>显卡控制器:</label><select class="input"><option>virtio-vga</option><option>qxl</option></select>
+              <label>显存:</label><input class="input" value="16">
+            </div></div>
+          <div class="fieldset"><div class="lg">磁盘</div>
+            <div class="form">
+              <label>系统盘接口:</label><select class="input"><option>virtio</option><option>SATA</option><option>IDE</option></select>
+              <label>缓存 / AIO:</label><input class="input" value="writeback / native">
+              <label>格式:</label><input class="input" value="qcow2">
+            </div></div>
+        </div>
+        <div class="dlg-foot"><button class="btn primary">💾 保存</button><button class="btn">取消</button>
+          <div class="spacer"></div><span class="mute" style="font-size:var(--fs-xs);align-self:center">vms.toml</span></div>
+      </div>
+
+      <div style="flex:1;min-width:320px">
+        <div class="board board-sm" style="min-height:360px">
+          <div class="chip cpu" style="left:16px;top:16px;width:96px"><b>CPU</b>68% · 44°C<div class="mini"><i style="width:68%"></i></div></div>
+          <div class="chip chipset" style="left:126px;top:16px;width:86px"><b>芯片组</b>7.0.0-42</div>
+          <div class="chip ram" style="left:226px;top:16px;width:52px;height:118px"><b>内存</b>86%<div class="mini"><i style="width:86%"></i></div></div>
+          <div class="chip ram" style="left:286px;top:16px;width:46px;height:118px"><b>交换</b>24%<div class="mini"><i style="width:24%"></i></div></div>
+          <div class="chip nic" style="left:16px;top:100px;width:96px"><b>网口</b>无连接</div>
+          <div class="chip nvme" style="left:16px;top:146px;width:200px"><b>M.2 · nvme0n1</b>41°C<div class="mini"><i style="width:1%"></i></div></div>
+          <div class="chip gpu" style="left:16px;top:192px;width:200px"><b>GPU0 · R9700</b>47°C<div class="mini"><i style="width:98%"></i></div></div>
+          <div class="chip sata" style="left:226px;top:146px;width:106px"><b>SATA · sda</b>19%</div>
+          <div class="chip sata" style="left:226px;top:192px;width:106px"><b>SATA · sdb</b>87%</div>
+          <div class="board-tag">SERVER TOOLBOX · MB</div>
+        </div>
+        <div class="callout info" style="margin-top:var(--sp-3)"><span>💡</span>
+          <div>主板画板继续用 QPainter 手绘；把芯片填充换成 QLinearGradient + drawRoundedRect，
+             再对 hover 槽位加一圈描边高亮，就能得到同款观感。</div></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec">
+    <h2>9 · 导出为 Qt QSS</h2>
+    <div class="note">
+      下面这份跟着上面的主题切换实时变化。整段贴进 <span class="mono">main.cpp</span>，替换现有的
+      <span class="mono">app.setStyleSheet(...)</span> 即可全局生效。
+    </div>
+    <div class="demo-row" style="margin-bottom:var(--sp-3)">
+      <button class="btn primary sm" id="copy">📋 复制 QSS</button>
+      <button class="btn sm" id="dl">⬇ 下载 theme.qss</button>
+      <span class="mute" id="stat" style="font-size:var(--fs-sm)"></span>
+    </div>
+    <pre class="qss" id="qss"></pre>
+    <div class="callout warn" style="margin-top:var(--sp-4)"><span>⚠️</span>
+      <div>QSS 的能力比 CSS 少，落地时注意：<b>不支持</b> conic-gradient、backdrop-filter、box-shadow、CSS 变量
+           （阴影请改用 QGraphicsDropShadowEffect）。环形仪表与玻璃模糊需在 paintEvent 自绘；
+           颜色请硬编码成十六进制；中文建议 font-family 指定 Noto Sans CJK SC。</div></div>
+  </section>
+
+</div></div>
+
+<script>
+var TOKEN_VARS = ["--bg","--surface","--surface-2","--surface-3","--border","--border-hi",
+                  "--text","--text-dim","--text-mute","--accent","--accent-2","--ok","--warn","--bad","--info","--track"];
+var NAMES = { "--bg":"背景 base","--surface":"卡片 surface","--surface-2":"次级 surface2","--surface-3":"三级 surface3",
+  "--border":"描边 border","--border-hi":"描边 hover","--text":"正文 text","--text-dim":"次要文字","--text-mute":"弱化文字",
+  "--accent":"主色 accent","--accent-2":"辅色 accent2","--ok":"正常 ok","--warn":"警告 warn","--bad":"危险 bad",
+  "--info":"信息 info","--track":"进度槽 track" };
+
+function currentTheme() { return document.documentElement.dataset.theme; }
+
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  document.querySelectorAll("#sw .sw").forEach(function (s) {
+    s.classList.toggle("on", s.dataset.set === t);
+  });
+  renderSwatches(); renderTokens(); renderQSS();
+}
+document.querySelectorAll("#sw .sw").forEach(function (s) {
+  s.addEventListener("click", function () { setTheme(s.dataset.set); });
+});
+
+/* 把任意 CSS 颜色（含 color-mix）解析成十六进制，便于生成 QSS */
+/* 解析任意 token：直接取自定义属性值，再用 computed style 归一化。
+   这样即使某个 token 从未在 CSS 里作为属性值出现（如 --accent-2 / --info），
+   也走 color-mix(...) 包裹后由浏览器解析，同样能拿到真实 RGB。 */
+function resolve(v) {
+  var raw = getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+  var probe = document.createElement("div");
+  document.body.appendChild(probe);
+  // 统一包成 color-mix 的第二个参数，浏览器会连带解析内部 var() 与百分比
+  probe.style.color = "color-mix(in srgb, " + raw + " 100%, transparent)";
+  var c = getComputedStyle(probe).color;
+  probe.remove();
+  var m = c.match(/[0-9.]+/g);
+  if (!m) return { raw: raw, hex: raw || "#000000" };
+  var hex = "#" + m.slice(0, 3).map(function (n) {
+    return (+n).toString(16).padStart(2, "0");
+  }).join("").toUpperCase();
+  return { raw: raw, hex: hex };
+}
+
+function renderSwatches() {
+  document.getElementById("swatches").innerHTML = TOKEN_VARS.map(function (v) {
+    var hex = resolve(v).hex;
+    return '<div class="swatch" data-var="' + v + '" title="点击复制 ' + v + '">'
+         + '<div class="c" style="background:var(' + v + ')"></div>'
+         + '<div class="m"><div class="n">' + NAMES[v] + '</div>'
+         + '<div class="h">' + v + ' · ' + hex + '</div></div></div>';
+  }).join("");
+  document.querySelectorAll(".swatch").forEach(function (s) {
+    s.addEventListener("click", function () {
+      copyText(s.dataset.var + ": " + resolve(s.dataset.var).hex + ";");
+      flash("已复制 " + s.dataset.var);
+    });
+  });
+}
+
+function renderTokens() {
+  var sp = ["--sp-1","--sp-2","--sp-3","--sp-4","--sp-5","--sp-6","--sp-7"];
+  var rd = ["--r-sm","--r-md","--r-lg","--r-pill"];
+  var fs = ["--fs-xs","--fs-sm","--fs-md","--fs-lg","--fs-xl","--fs-2xl"];
+  var items = [];
+  sp.forEach(function (v) {
+    items.push({ v: v, label: "间距", vis: '<div class="vis"><div style="height:8px;border-radius:3px;'
+      + 'background:var(--accent);opacity:.7;width:var(' + v + ');min-width:4px"></div></div>' });
+  });
+  rd.forEach(function (v) {
+    items.push({ v: v, label: "圆角", vis: '<div class="vis"><div style="height:26px;background:var(--surface-3);'
+      + 'border:1px solid var(--border-hi);border-radius:var(' + v + ')"></div></div>' });
+  });
+  fs.forEach(function (v) {
+    items.push({ v: v, label: "字号", vis: '<div class="vis" style="font-size:var(' + v + ')">家用服务器 Aa</div>' });
+  });
+  document.getElementById("tokens").innerHTML = items.map(function (it) {
+    var val = getComputedStyle(document.documentElement).getPropertyValue(it.v).trim();
+    return '<div class="tok"><div class="tk">' + it.v + '</div>'
+         + '<div class="tv">' + (val || "(见 CSS)") + ' · ' + it.label + '</div>' + it.vis + '</div>';
+  }).join("");
+}
+
+function renderQSS() {
+  var c = {};
+  TOKEN_VARS.forEach(function (v) { c[v] = resolve(v).hex; });
+  var qss = [
+"/* 家用服务器工具箱 · 主题 " + currentTheme().toUpperCase() + " · 由 doc/demos/04-tokens.html 生成 */",
+"/* 贴到 main.cpp：app.setStyleSheet(QString::fromUtf8(R\"QSS( ... )QSS\")); */",
+"",
+"QWidget {",
+"    color: " + c["--text"] + ";",
+"    background: " + c["--bg"] + ";",
+"    font-family: \"Noto Sans CJK SC\", \"PingFang SC\", \"Microsoft YaHei\", sans-serif;",
+"    font-size: 13px;",
+"}",
+"QMainWindow, QDialog, QScrollArea, QTabWidget > QWidget {",
+"    background: " + c["--bg"] + ";",
+"}",
+"",
+"/* 页签：顶部 QTabWidget 观感 */",
+"QTabWidget::pane { border: 1px solid " + c["--border"] + "; border-radius: 12px;",
+"                   background: " + c["--surface"] + "; top: -1px; }",
+"QTabBar::tab {",
+"    background: transparent; color: " + c["--text-dim"] + ";",
+"    padding: 8px 16px; margin-right: 2px;",
+"    border: 1px solid transparent; border-bottom: 0;",
+"    border-top-left-radius: 10px; border-top-right-radius: 10px;",
+"}",
+"QTabBar::tab:hover    { background: " + c["--surface-2"] + "; color: " + c["--text"] + "; }",
+"QTabBar::tab:selected { background: " + c["--surface"] + "; color: " + c["--text"] + ";",
+"                        font-weight: 600; border-color: " + c["--border"] + "; }",
+"",
+"/* 分组框：卡片化 */",
+"QGroupBox {",
+"    background: " + c["--surface"] + "; border: 1px solid " + c["--border"] + ";",
+"    border-radius: 12px; margin-top: 10px; padding: 14px 12px 12px 12px; font-weight: 600;",
+"}",
+"QGroupBox::title { subcontrol-origin: margin; left: 12px; padding: 0 6px;",
+"                   color: " + c["--text-dim"] + "; }",
+"",
+"/* 按钮：沿用 min/max-height 25px，避免撑破既有布局 */",
+"QPushButton {",
+"    min-height: 25px; max-height: 25px; padding: 2px 12px;",
+"    background: " + c["--surface-2"] + "; color: " + c["--text"] + ";",
+"    border: 1px solid " + c["--border"] + "; border-radius: 8px;",
+"}",
+"QPushButton:hover    { background: " + c["--surface-3"] + "; border-color: " + c["--border-hi"] + "; }",
+"QPushButton:pressed  { background: " + c["--surface"] + "; }",
+"QPushButton:disabled { color: " + c["--text-mute"] + "; background: " + c["--surface-2"] + ";",
+"                       border-color: " + c["--border"] + "; }",
+"QPushButton:checked  { background: " + c["--accent"] + "; color: #FFFFFF; border-color: " + c["--accent"] + "; }",
+"/* 主操作按钮：setObjectName(\"primary\") */",
+"QPushButton#primary { background: " + c["--accent"] + "; color: #FFFFFF; border: none; font-weight: 600; }",
+"QPushButton#primary:hover { background: " + c["--accent-2"] + "; }",
+"",
+"/* 表格 */",
+"QTableWidget, QTreeView, QListWidget {",
+"    background: " + c["--surface"] + "; alternate-background-color: " + c["--surface-2"] + ";",
+"    border: 1px solid " + c["--border"] + "; border-radius: 10px;",
+"    gridline-color: " + c["--border"] + ";",
+"    selection-background-color: " + c["--accent"] + "; selection-color: #FFFFFF; outline: 0;",
+"}",
+"QHeaderView::section {",
+"    background: " + c["--surface-2"] + "; color: " + c["--text-mute"] + ";",
+"    padding: 6px 8px; border: none; border-bottom: 1px solid " + c["--border"] + "; font-weight: 600;",
+"}",
+"QTableWidget::item          { padding: 4px 6px; border: none; }",
+"QTableWidget::item:hover    { background: " + c["--surface-2"] + "; }",
+"QTableWidget::item:selected { background: " + c["--accent"] + "; color: #FFFFFF; }",
+"",
+"/* 进度条：圆角 + 细身；阈值配色在 C++ 里按值覆盖 chunk */",
+"QProgressBar {",
+"    background: " + c["--track"] + "; border: none; border-radius: 4px;",
+"    min-height: 8px; max-height: 8px; text-align: center; color: transparent;",
+"}",
+"QProgressBar::chunk { border-radius: 4px; background: " + c["--accent"] + "; }",
+"",
+"/* 输入控件 */",
+"QLineEdit, QComboBox, QSpinBox, QPlainTextEdit, QTextEdit {",
+"    background: " + c["--surface-2"] + "; color: " + c["--text"] + ";",
+"    border: 1px solid " + c["--border"] + "; border-radius: 8px; padding: 5px 8px;",
+"    selection-background-color: " + c["--accent"] + "; selection-color: #FFFFFF;",
+"}",
+"QLineEdit:focus, QComboBox:focus, QSpinBox:focus, QTextEdit:focus {",
+"    border-color: " + c["--accent"] + ";",
+"}",
+"QComboBox::drop-down { border: none; width: 20px; }",
+"QComboBox QAbstractItemView {",
+"    background: " + c["--surface"] + "; border: 1px solid " + c["--border"] + "; border-radius: 8px;",
+"    selection-background-color: " + c["--accent"] + "; selection-color: #FFFFFF;",
+"}",
+"QCheckBox, QRadioButton { spacing: 8px; background: transparent; }",
+"",
+"/* 标签层级：用动态属性选择器取代散落的 setStyleSheet */",
+"QLabel { background: transparent; }",
+"QLabel[role=\"dim\"]   { color: " + c["--text-dim"] + "; }",
+"QLabel[role=\"mute\"]  { color: " + c["--text-mute"] + "; font-size: 11px; }",
+"QLabel[role=\"title\"] { font-size: 15px; font-weight: 700; }",
+"QLabel[role=\"ok\"]    { color: " + c["--ok"] + "; }",
+"QLabel[role=\"warn\"]  { color: " + c["--warn"] + "; }",
+"QLabel[role=\"bad\"]   { color: " + c["--bad"] + "; }",
+"",
+"/* 滚动条：细身 + 圆角 */",
+"QScrollBar:vertical   { background: transparent; width: 10px; margin: 2px; }",
+"QScrollBar::handle:vertical   { background: " + c["--border-hi"] + "; border-radius: 4px; min-height: 30px; }",
+"QScrollBar::handle:vertical:hover { background: " + c["--accent"] + "; }",
+"QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }",
+"QScrollBar::handle:horizontal   { background: " + c["--border-hi"] + "; border-radius: 4px; min-width: 30px; }",
+"QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }",
+"QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }",
+"",
+"/* 提示 / 状态栏 / 菜单 */",
+"QToolTip { background: " + c["--surface"] + "; color: " + c["--text"] + ";",
+"           border: 1px solid " + c["--border-hi"] + "; border-radius: 8px; padding: 6px 8px; }",
+"QStatusBar { background: " + c["--surface"] + "; color: " + c["--text-dim"] + ";",
+"             border-top: 1px solid " + c["--border"] + "; }",
+"QMenu { background: " + c["--surface"] + "; border: 1px solid " + c["--border"] + ";",
+"        border-radius: 10px; padding: 6px; }",
+"QMenu::item { padding: 6px 22px 6px 14px; border-radius: 6px; }",
+"QMenu::item:selected { background: " + c["--accent"] + "; color: #FFFFFF; }",
+"QMenu::separator { height: 1px; background: " + c["--border"] + "; margin: 6px 4px; }",
+"",
+"/* 需要自绘（QSS 做不到，走 paintEvent）",
+"   环形仪表  -> QPainter drawArc + Antialiasing（CSS 用 conic-gradient）",
+"   玻璃模糊  -> QGraphicsBlurEffect / QGraphicsDropShadowEffect",
+"   主板画板  -> QLinearGradient 填充 + drawRoundedRect + hover 描边高亮",
+"   呼吸圆点  -> QVariantAnimation 驱动 opacity                */"].join("\n");
+
+  var safe = qss.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+  safe = safe.replace(/(#[0-9A-F]{6})/g, '<span class="v">$1</span>');
+  safe = safe.replace(/(\/\*[\s\S]*?\*\/)/g, '<span class="c">$1</span>');
+  safe = safe.replace(/^([A-Za-z#][^\n{}]*)(\{)/gm, '<span class="k">$1</span>$2');
+  document.getElementById("qss").innerHTML = safe;
+  window.__qss = qss;
+}
+
+function copyText(t) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(t).catch(function () { fallback(t); });
+  }
+  return Promise.resolve(fallback(t));
+}
+function fallback(t) {
+  var ta = document.createElement("textarea");
+  ta.value = t;
+  ta.style.cssText = "position:fixed;opacity:0";
+  document.body.appendChild(ta);
+  ta.select();
+  try { document.execCommand("copy"); } catch (e) {}
+  ta.remove();
+}
+var statTimer;
+function flash(msg) {
+  var s = document.getElementById("stat");
+  s.textContent = msg;
+  clearTimeout(statTimer);
+  statTimer = setTimeout(function () { s.textContent = ""; }, 2200);
+}
+document.getElementById("copy").addEventListener("click", function () {
+  copyText(window.__qss);
+  flash("✅ QSS 已复制到剪贴板，粘进 main.cpp 即可");
+});
+document.getElementById("dl").addEventListener("click", function () {
+  var blob = new Blob([window.__qss], { type: "text/plain;charset=utf-8" });
+  var a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "theme-" + currentTheme() + ".qss";
+  a.click();
+  URL.revokeObjectURL(a.href);
+  flash("⬇ 已下载 " + a.download);
+});
+
+document.querySelectorAll(".switch").forEach(function (s) {
+  s.addEventListener("click", function () { s.classList.toggle("on"); });
+});
+document.querySelectorAll(".seg").forEach(function (g) {
+  g.querySelectorAll("button").forEach(function (b) {
+    b.addEventListener("click", function () {
+      g.querySelectorAll("button").forEach(function (x) { x.classList.remove("on"); });
+      b.classList.add("on");
+    });
+  });
+});
+document.getElementById("spark").innerHTML = Array.apply(null, Array(14)).map(function (_, i) {
+  return '<i style="height:' + (20 + ((i * 37) % 70)) + '%"></i>';
+}).join("");
+
+renderSwatches();
+renderTokens();
+renderQSS();
+</script>
+</body>
+</html>

@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="glass">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Demo 03 · 玻璃拟态 Bento — 一览总览</title>
+<link rel="stylesheet" href="demo.css">
+<style>
+  .wrap { max-width: 1240px; margin: 0 auto; padding: var(--sp-6) var(--sp-5) var(--sp-7); }
+  .head { display: flex; align-items: flex-end; gap: var(--sp-4); margin-bottom: var(--sp-5); flex-wrap: wrap; }
+  .head h1 { font-size: var(--fs-2xl); }
+  .head p { margin: 4px 0 0; color: var(--text-dim); font-size: var(--fs-md); }
+
+  /* Bento：12 栅格，卡片跨列不同 → 有节奏的不对称布局 */
+  .bento { display: grid; grid-template-columns: repeat(12, 1fr); gap: var(--sp-4); }
+  .bento > * { min-width: 0; }
+  .c-8 { grid-column: span 8; } .c-7 { grid-column: span 7; } .c-6 { grid-column: span 6; }
+  .c-5 { grid-column: span 5; } .c-4 { grid-column: span 4; } .c-3 { grid-column: span 3; }
+  .c-12 { grid-column: span 12; }
+  .r-tall { grid-row: span 2; }
+  @media (max-width: 1040px) {
+    .c-8,.c-7,.c-6,.c-5 { grid-column: span 12; } .c-4,.c-3 { grid-column: span 6; }
+  }
+  @media (max-width: 640px) { .c-4,.c-3 { grid-column: span 12; } }
+
+  .b { padding: var(--sp-4); display: flex; flex-direction: column; gap: var(--sp-3); }
+  .b-head { display: flex; align-items: center; gap: var(--sp-2); }
+  .b-head .ico { width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center;
+                 font-size: 14px; background: var(--surface-2); border: 1px solid var(--border); }
+  .b-title { font-size: var(--fs-md); font-weight: 650; }
+  .b-num { font-size: var(--fs-2xl); font-weight: 700; line-height: 1; }
+  .b-num small { font-size: var(--fs-md); font-weight: 500; color: var(--text-mute); }
+
+  /* 面积图（SVG） */
+  .area { width: 100%; height: 108px; display: block; }
+  .area .line { fill: none; stroke: url(#g1); stroke-width: 2.5; stroke-linecap: round;
+                stroke-dasharray: 1000; stroke-dashoffset: 1000; animation: draw 1.6s var(--ease) forwards .1s; }
+  @keyframes draw { to { stroke-dashoffset: 0; } }
+  .area .fillarea { fill: url(#g2); opacity: 0; animation: fade .9s var(--ease) forwards .7s; }
+  @keyframes fade { to { opacity: 1; } }
+
+  /* 网络速率双向条 */
+  .net-row { display: grid; grid-template-columns: 62px 1fr 84px; align-items: center;
+             gap: var(--sp-3); font-size: var(--fs-sm); }
+  .net-bar { height: 8px; border-radius: var(--r-pill); background: var(--track); overflow: hidden; }
+  .net-bar > i { display: block; height: 100%; border-radius: inherit; transition: width .8s var(--ease); }
+  .rx > i { background: linear-gradient(90deg,#22d3ee,#0ea5e9); }
+  .tx > i { background: linear-gradient(90deg,#f0abfc,#a855f7); }
+
+  /* 服务列表 */
+  .svc { display: flex; align-items: center; gap: var(--sp-3); padding: 9px 0;
+         border-bottom: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+  .svc:last-child { border-bottom: 0; }
+  .svc-name { font-family: var(--font-mono); font-size: var(--fs-sm); }
+  .svc-sub { font-size: 10px; color: var(--text-mute); }
+
+  /* 磁盘用量环阵列 */
+  .rings { display: flex; gap: var(--sp-4); justify-content: space-around; flex-wrap: wrap; }
+  .ringcol { display: grid; justify-items: center; gap: 6px; }
+  .ringcol span { font-size: var(--fs-xs); color: var(--text-dim); }
+
+  /* 温度热力条 */
+  .heat { display: flex; flex-direction: column; gap: var(--sp-2); }
+  .heat-row { display: grid; grid-template-columns: 74px 1fr 46px; gap: var(--sp-3); align-items: center; font-size: var(--fs-sm); }
+  .heat-bar { height: 22px; border-radius: 7px; position: relative; overflow: hidden;
+              background: var(--track); }
+  .heat-bar > i { position: absolute; inset: 0 auto 0 0; border-radius: inherit; transition: width 1s var(--ease); }
+  .h-cool > i { background: linear-gradient(90deg,#22d3ee,#0ea5e9); }
+  .h-warm > i { background: linear-gradient(90deg,#fbbf24,#f59e0b); }
+  .h-hot  > i { background: linear-gradient(90deg,#fb7185,#ef4444); }
+
+  .quick { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); }
+  .q { display: grid; place-items: center; gap: 5px; padding: var(--sp-3) var(--sp-2); cursor: pointer;
+       border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--surface-2);
+       font-size: var(--fs-xs); color: var(--text-dim); text-align: center;
+       transition: all var(--dur) var(--ease); }
+  .q:hover { transform: translateY(-2px); border-color: var(--border-hi); color: var(--text); background: var(--surface-3); }
+  .q .qi { font-size: 20px; }
+
+  .ticker { display: flex; align-items: center; gap: var(--sp-3); font-family: var(--font-mono);
+            font-size: var(--fs-xs); color: var(--text-dim); }
+  .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+               box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent);
+               animation: ring 2s var(--ease) infinite; }
+  @keyframes ring { 70% { box-shadow: 0 0 0 10px transparent; } }
+</style>
+</head>
+<body>
+<div class="app"><div class="wrap">
+
+  <div class="head">
+    <div style="flex:1;min-width:220px">
+      <h1>🛠 家用服务器工具箱</h1>
+      <p>Ubuntu 26.04.1 LTS · 内核 7.0.0-42-generic · 运行 1 小时 56 分</p>
+    </div>
+    <div class="ticker"><span class="pulse-dot"></span>监控中 · 每 8 秒刷新 · 上次 3 秒前</div>
+    <span class="pill live ok"><span class="dot"></span>看门狗运行中</span>
+  </div>
+
+  <div class="bento">
+
+    <!-- CPU 大图 -->
+    <div class="card b c-8">
+      <div class="b-head"><div class="ico">🧠</div><div class="b-title">CPU 使用率</div>
+        <div class="spacer"></div><span class="pill warn"><span class="dot"></span>偏高</span></div>
+      <div style="display:flex;align-items:flex-end;gap:var(--sp-5);flex-wrap:wrap">
+        <div class="b-num num">68<small>%</small></div>
+        <div style="flex:1;min-width:240px">
+          <svg class="area" viewBox="0 0 600 108" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="g1" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#7dd3fc"/><stop offset="1" stop-color="#f0abfc"/></linearGradient>
+              <linearGradient id="g2" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#7dd3fc" stop-opacity=".38"/>
+                <stop offset="1" stop-color="#7dd3fc" stop-opacity="0"/></linearGradient>
+            </defs>
+            <path class="fillarea" d="M0,86 L40,78 80,82 120,60 160,66 200,48 240,54 280,36 320,44 360,28 400,34 440,22 480,30 520,18 560,26 600,20 L600,108 L0,108 Z"/>
+            <path class="line" d="M0,86 L40,78 80,82 120,60 160,66 200,48 240,54 280,36 320,44 360,28 400,34 440,22 480,30 520,18 560,26 600,20"/>
+          </svg>
+        </div>
+      </div>
+      <div class="ticker"><span>16 线程</span><span>·</span><span>Ryzen 9</span><span>·</span><span>44.0°C</span><span>·</span><span>负载 6.42 / 5.10 / 4.03</span></div>
+    </div>
+
+    <!-- 内存环 -->
+    <div class="card b c-4">
+      <div class="b-head"><div class="ico">💚</div><div class="b-title">内存</div>
+        <div class="spacer"></div><span class="pill ok"><span class="dot"></span>正常</span></div>
+      <div style="display:flex;align-items:center;gap:var(--sp-4)">
+        <div class="ring" style="--p:86"><b>86%</b></div>
+        <div style="flex:1">
+          <dl class="kv" style="grid-template-columns:auto 1fr">
+            <dt>已用</dt><dd>38 Gi</dd><dt>总量</dt><dd>44 Gi</dd>
+            <dt>缓存</dt><dd>6.2 Gi</dd><dt>缓冲</dt><dd>2.1 Gi</dd>
+          </dl>
+        </div>
+      </div>
+      <div class="bar ok"><i style="width:86%"></i></div>
+      <div class="b-head" style="margin-top:var(--sp-2)"><div class="ico">🔄</div><div class="b-title">交换分区 1.9 / 8.0 Gi</div></div>
+      <div class="bar"><i style="width:24%"></i></div>
+    </div>
+
+    <!-- 网络 -->
+    <div class="card b c-4">
+      <div class="b-head"><div class="ico">🌐</div><div class="b-title">网络吞吐</div>
+        <div class="spacer"></div><span class="pill mute">无连接</span></div>
+      <div class="net-row"><span class="dim">RX</span><div class="net-bar rx"><i style="width:34%"></i></div><span class="num">6.4 MB/s</span></div>
+      <div class="net-row"><span class="dim">TX</span><div class="net-bar tx"><i style="width:6%"></i></div><span class="num">1.1 MB/s</span></div>
+      <hr class="sep" style="margin:var(--sp-1) 0">
+      <dl class="kv" style="grid-template-columns:auto 1fr">
+        <dt>网口</dt><dd>enp5s0 · 无连接</dd>
+        <dt>桥接</dt><dd>br0 · up</dd>
+        <dt>nginx</dt><dd>:80 监听中</dd>
+        <dt>sshd</dt><dd>:22 握手正常</dd>
+      </dl>
+    </div>
+
+    <!-- 磁盘健康环 -->
+    <div class="card b c-4">
+      <div class="b-head"><div class="ico">💾</div><div class="b-title">磁盘状态</div>
+        <div class="spacer"></div><span class="pill mute">共 3 块</span></div>
+      <div class="rings">
+        <div class="ringcol"><div class="ring" style="--p:34;--sz:74px"><b style="font-size:14px">34%</b></div><span class="mono">nvme0n1</span></div>
+        <div class="ringcol"><div class="ring" style="--p:19;--sz:74px"><b style="font-size:14px">19%</b></div><span class="mono">sda</span></div>
+        <div class="ringcol"><div class="ring" style="--p:87;--sz:74px"><b style="font-size:14px">87%</b></div><span class="mono">sdb</span></div>
+      </div>
+      <div class="callout warn" style="font-size:var(--fs-xs)"><span>⚠️</span>
+        <div><b>sdb</b> 已用 4.8T / 5.5T，且 <b>fstab 未就绪</b> — 虚机启动前需先挂载。</div></div>
+    </div>
+
+    <!-- 温度热力 -->
+    <div class="card b c-4">
+      <div class="b-head"><div class="ico">🌡</div><div class="b-title">温度</div>
+        <div class="spacer"></div><span class="pill bad"><span class="dot"></span>最高 51°C</span></div>
+      <div class="heat">
+        <div class="heat-row"><span class="dim">CPU</span><div class="heat-bar h-cool"><i style="width:55%"></i></div><span class="num">44°</span></div>
+        <div class="heat-row"><span class="dim">NVMe</span><div class="heat-bar h-cool"><i style="width:54%"></i></div><span class="num">43.9°</span></div>
+        <div class="heat-row"><span class="dim">GPU0</span><div class="heat-bar h-warm"><i style="width:59%"></i></div><span class="num">47°</span></div>
+        <div class="heat-row"><span class="dim">GPU1</span><div class="heat-bar h-warm"><i style="width:63%"></i></div><span class="num">51°</span></div>
+        <div class="heat-row"><span class="dim">sda/sdb</span><div class="heat-bar h-cool"><i style="width:51%"></i></div><span class="num">41°</span></div>
+      </div>
+      <div class="ticker" style="margin-top:auto"><span>阈值 85°C 触发告警</span></div>
+    </div>
+
+    <!-- 虚机 -->
+    <div class="card b c-4">
+      <div class="b-head"><div class="ico">🖥️</div><div class="b-title">虚机管理</div>
+        <div class="spacer"></div><span class="pill live ok"><span class="dot"></span>2 / 4 运行</span></div>
+      <div class="svc">
+          <span class="pill ok live"><span class="dot"></span>运行</span>
+          <div style="min-width:0"><div class="svc-name">ubuntu-jump</div><div class="svc-sub">QEMU/KVM · :5901</div></div>
+          <div class="spacer"></div><span class="mono" style="font-size:11px;color:var(--text-mute)">32% 内存 65%</span></div><div class="svc">
+          <span class="pill ok live"><span class="dot"></span>运行</span>
+          <div style="min-width:0"><div class="svc-name">win11-lab</div><div class="svc-sub">VirtualBox · RDP :3389</div></div>
+          <div class="spacer"></div><span class="mono" style="font-size:11px;color:var(--text-mute)">71% 显存 50%</span></div><div class="svc">
+          <span class="pill mute live"><span class="dot"></span>停止</span>
+          <div style="min-width:0"><div class="svc-name">nas-freenas</div><div class="svc-sub">QEMU/KVM · 桥接 br0</div></div>
+          <div class="spacer"></div><span class="mono" style="font-size:11px;color:var(--text-mute)">等待挂载点</span></div><div class="svc">
+          <span class="pill mute live"><span class="dot"></span>停止</span>
+          <div style="min-width:0"><div class="svc-name">arch-sandbox</div><div class="svc-sub">PCI 直通 · Hugepages</div></div>
+          <div class="spacer"></div><span class="mono" style="font-size:11px;color:var(--text-mute)">已停止</span></div>
+    </div>
+
+    <!-- 服务 -->
+    <div class="card b c-4">
+      <div class="b-head"><div class="ico">⚙️</div><div class="b-title">服务控制</div>
+        <div class="spacer"></div><span class="pill ok"><span class="dot"></span>5 active</span></div>
+      <div class="svc">
+          <span class="pill ok"><span class="dot"></span>active</span>
+          <span class="svc-name">nginx</span><div class="spacer"></div>
+          <span style="font-size:11px;color:var(--text-mute)">active · :80</span></div><div class="svc">
+          <span class="pill ok"><span class="dot"></span>active</span>
+          <span class="svc-name">postgresql</span><div class="spacer"></div>
+          <span style="font-size:11px;color:var(--text-mute)">active</span></div><div class="svc">
+          <span class="pill ok"><span class="dot"></span>active</span>
+          <span class="svc-name">jellyfin</span><div class="spacer"></div>
+          <span style="font-size:11px;color:var(--text-mute)">active · 场景控制</span></div><div class="svc">
+          <span class="pill ok"><span class="dot"></span>active</span>
+          <span class="svc-name">ssh</span><div class="spacer"></div>
+          <span style="font-size:11px;color:var(--text-mute)">active · :22</span></div><div class="svc">
+          <span class="pill ok"><span class="dot"></span>active</span>
+          <span class="svc-name">docker</span><div class="spacer"></div>
+          <span style="font-size:11px;color:var(--text-mute)">active</span></div><div class="svc">
+          <span class="pill mute"><span class="dot"></span>inactive</span>
+          <span class="svc-name">smb</span><div class="spacer"></div>
+          <span style="font-size:11px;color:var(--text-mute)">inactive · 场景停止</span></div>
+    </div>
+
+    <!-- 场景时间轴 -->
+    <div class="card b c-5">
+      <div class="b-head"><div class="ico">🎬</div><div class="b-title">场景设定</div>
+        <div class="spacer"></div><span class="pill ok"><span class="dot"></span>24h 内将触发</span></div>
+      <div style="position:relative;height:74px">
+        <div style="position:absolute;left:0;right:0;top:30px;height:10px;border-radius:99px;background:var(--track)"></div>
+        <div style="position:absolute;left:0;width:33%;top:30px;height:10px;border-radius:99px;background:linear-gradient(90deg,#7dd3fc,#a855f7)"></div>
+        <div style="position:absolute;left:91.6%;width:8.4%;top:30px;height:10px;border-radius:99px;background:linear-gradient(90deg,#7dd3fc,#a855f7)"></div>
+        <div style="position:absolute;left:35%;width:44%;top:30px;height:10px;border-radius:99px;background:linear-gradient(90deg,#f0abfc,#fb7185);opacity:.9"></div>
+        <div style="position:absolute;top:4px;left:16%;font-size:var(--fs-xs);color:var(--text-dim);transform:translateX(-50%)">🌙 夜间影音 22:00→08:00</div>
+        <div style="position:absolute;top:4px;left:57%;font-size:var(--fs-xs);color:var(--text-dim);transform:translateX(-50%)">☀️ 白天工作 08:30→19:00</div>
+        <div style="position:absolute;top:48px;left:0%;transform:translateX(-50%);font-size:10px;font-family:var(--font-mono);color:var(--text-mute)">00:00</div><div style="position:absolute;top:48px;left:25%;transform:translateX(-50%);font-size:10px;font-family:var(--font-mono);color:var(--text-mute)">06:00</div><div style="position:absolute;top:48px;left:50%;transform:translateX(-50%);font-size:10px;font-family:var(--font-mono);color:var(--text-mute)">12:00</div><div style="position:absolute;top:48px;left:75%;transform:translateX(-50%);font-size:10px;font-family:var(--font-mono);color:var(--text-mute)">18:00</div><div style="position:absolute;top:48px;left:100%;transform:translateX(-50%);font-size:10px;font-family:var(--font-mono);color:var(--text-mute)">00:00</div>
+      </div>
+      <div class="chips" style="display:flex;gap:5px;flex-wrap:wrap">
+        <span class="chip-tag" style="font-size:11px;padding:3px 9px;border-radius:99px;background:var(--surface-2);border:1px solid var(--border)">nginx</span>
+        <span class="chip-tag" style="font-size:11px;padding:3px 9px;border-radius:99px;background:var(--surface-2);border:1px solid var(--border)">jellyfin</span>
+        <span class="chip-tag" style="font-size:11px;padding:3px 9px;border-radius:99px;background:var(--surface-2);border:1px solid var(--border)">postgresql</span>
+        <span class="chip-tag" style="font-size:11px;padding:3px 9px;border-radius:99px;background:var(--surface-2);border:1px solid var(--border)">nas-freenas</span>
+        <span class="chip-tag" style="font-size:11px;padding:3px 9px;border-radius:99px;background:var(--surface-2);border:1px solid var(--border)">ubuntu-jump</span>
+      </div>
+    </div>
+
+    <!-- 显卡 -->
+    <div class="card b c-3">
+      <div class="b-head"><div class="ico">🎮</div><div class="b-title">显卡</div>
+        <div class="spacer"></div><span class="pill mute">2 块</span></div>
+      <div>
+        <div class="ticker"><span style="color:var(--text-dim)">Radeon AI PRO R9700</span></div>
+        <div class="bar bad" style="margin:6px 0 4px"><i style="width:98%"></i></div>
+        <div class="ticker"><span class="mono">31.35/31.86 GiB · 1850MHz · 47°C</span></div>
+      </div>
+      <hr class="sep" style="margin:var(--sp-1) 0">
+      <div>
+        <div class="ticker"><span style="color:var(--text-dim)">Raphael</span></div>
+        <div class="bar" style="margin:6px 0 4px"><i style="width:10%"></i></div>
+        <div class="ticker"><span class="mono">0.05/0.50 GiB · 600MHz · 51°C</span></div>
+      </div>
+      <button class="btn sm" style="margin-top:auto">⛓ 限制 GPU0 频率</button>
+    </div>
+
+    <!-- 看门狗 -->
+    <div class="card b c-3">
+      <div class="b-head"><div class="ico">🛡</div><div class="b-title">看门狗</div>
+        <div class="spacer"></div><span class="pill live ok"><span class="dot"></span>active</span></div>
+      <dl class="kv" style="grid-template-columns:auto 1fr">
+        <dt>nginx</dt><dd>:80 探测中</dd>
+        <dt>SSH</dt><dd>握手 ✓</dd>
+        <dt>冷却期</dt><dd>600 s</dd>
+        <dt>内核检测</dt><dd>已开启</dd>
+        <dt>中途休息</dt><dd>周日 04:00–05:00</dd>
+      </dl>
+      <div class="callout ok" style="font-size:var(--fs-xs)"><span>✓</span>
+        <div>分层降级：<b>systemctl reboot</b> → 15s 无响应则 <b>Magic SysRq</b> 硬重启。</div></div>
+    </div>
+
+    <!-- 日志 -->
+    <div class="card b c-7">
+      <div class="b-head"><div class="ico">📋</div><div class="b-title">日志管理</div>
+        <div class="spacer"></div><button class="btn sm">🔄 刷新</button><button class="btn sm">🗑️ 清空</button></div>
+      <div class="term" style="max-height:170px">
+        <div class="ln"><span class="t">22:00:02</span><span class="lv S">SCENE</span><span>「夜间影音」进入窗口 → 启动 jellyfin</span></div>
+        <div class="ln"><span class="t">22:00:04</span><span class="lv I">INFO</span><span>启动虚机: nas-freenas（等待挂载点：/mnt/red）</span></div>
+        <div class="ln"><span class="t">22:00:07</span><span class="lv I">INFO</span><span>✅ nas-freenas 已启动 (PID: 41822)</span></div>
+        <div class="ln"><span class="t">22:00:09</span><span class="lv W">WARN</span><span>sdb 未在 fstab 就绪，已执行 mount -a 补挂</span></div>
+        <div class="ln"><span class="t">22:01:11</span><span class="lv E">ERROR</span><span>GPU0 显存 98%，arch-sandbox 启动已推迟</span></div>
+        <div class="ln"><span class="t">22:01:40</span><span class="lv I">INFO</span><span>健康探测：nginx OK / sshd 握手 OK</span></div>
+      </div>
+    </div>
+
+    <!-- 快捷动作 -->
+    <div class="card b c-5">
+      <div class="b-head"><div class="ico">⚡</div><div class="b-title">快捷动作</div></div>
+      <div class="quick">
+        <div class="q"><span class="qi">🌡</span>读取温度</div>
+        <div class="q"><span class="qi">🛡</span>安装看门狗</div>
+        <div class="q"><span class="qi">♻️</span>关闭内核检测</div>
+        <div class="q"><span class="qi">💾</span>保存配置</div>
+        <div class="q"><span class="qi">▶️</span>启动全部虚机</div>
+        <div class="q"><span class="qi">📂</span>恢复挂载</div>
+        <div class="q"><span class="qi">🤖</span>AI 对话</div>
+        <div class="q"><span class="qi">🎨</span>个性化桌面</div>
+      </div>
+      <div class="callout info" style="font-size:var(--fs-xs)"><span>ℹ️</span>
+        <div>危险动作（关机 / 重启 / 强制重启）在 Qt 里建议保留 <b>二次确认</b>，并显示冷却期剩余时间。</div></div>
+    </div>
+
+  </div>
+</div></div>
+<script>
+  // 模拟实时刷新：轻微抖动数值，演示动效
+  const jitter = (v, a) => Math.max(2, Math.min(99, v + (Math.random() * 2 - 1) * a))
+  const bars = [...document.querySelectorAll(".net-bar > i, .heat-bar > i")]
+  const base = bars.map(b => parseFloat(b.style.width))
+  setInterval(() => bars.forEach((b, i) => { b.style.width = jitter(base[i], 4).toFixed(0) + "%" }), 2200)
+  document.querySelectorAll(".q").forEach(q => q.addEventListener("click", () => {
+    q.animate([{ transform: "scale(.94)" }, { transform: "scale(1)" }], { duration: 200, easing: "cubic-bezier(.2,.7,.2,1)" })
+  }))
+</script>
+</body>
+</html>

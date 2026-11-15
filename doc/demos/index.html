@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>家用服务器工具箱 · 界面风格 Demo</title>
+<link rel="stylesheet" href="demo.css">
+<style>
+  body { background: #0b0f14; }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 64px 28px 96px; color: #e6edf3; }
+  h1 { font-size: 40px; margin: 0 0 10px; letter-spacing: -.02em; }
+  .lede { color: #8b9bab; font-size: 15px; line-height: 1.8; max-width: 720px; }
+  .lede b { color: #e6edf3; }
+  .row { display: flex; flex-wrap: wrap; gap: 12px; margin: 28px 0 56px; }
+  .tag { font-size: 12px; padding: 5px 12px; border-radius: 999px; border: 1px solid #26333f;
+         background: #131a23; color: #8b9bab; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }
+  a.card { display: block; text-decoration: none; color: inherit; background: #131a23;
+           border: 1px solid #26333f; border-radius: 16px; overflow: hidden;
+           transition: transform .18s cubic-bezier(.2,.7,.2,1), border-color .18s, box-shadow .18s; }
+  a.card:hover { transform: translateY(-4px); border-color: #33475b;
+                 box-shadow: 0 20px 44px -20px rgba(0,0,0,.8); }
+  .shot { height: 172px; position: relative; overflow: hidden; border-bottom: 1px solid #26333f; }
+  .shot .lbl { position: absolute; left: 14px; bottom: 12px; font-size: 11px; letter-spacing: .1em;
+               text-transform: uppercase; color: rgba(255,255,255,.62); font-family: var(--font-mono); }
+  .pad { padding: 18px 20px 20px; }
+  .pad h3 { font-size: 17px; margin: 0 0 6px; }
+  .pad p { margin: 0; font-size: 13px; line-height: 1.7; color: #8b9bab; }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+  .chip { font-size: 11px; padding: 2px 9px; border-radius: 999px; background: #1a2430;
+          border: 1px solid #26333f; color: #8b9bab; }
+
+  /* 三块缩略图：纯 CSS 抽象示意，不依赖截图 */
+  .s-dark  { background: radial-gradient(600px 300px at 20% -20%, #16202c, #0b0f14); }
+  .s-light { background: linear-gradient(160deg, #f6f9fd, #dfe7f1); }
+  .s-glass { background:
+      radial-gradient(180px 180px at 18% 25%, #6366f1, transparent 60%),
+      radial-gradient(220px 220px at 82% 15%, #db2777, transparent 62%),
+      radial-gradient(240px 240px at 66% 92%, #0ea5e9, transparent 60%), #0d1117; }
+  .s-tok   { background: linear-gradient(135deg, #0b0f14, #1a1040); }
+  .blocks { position: absolute; inset: 16px; display: grid; gap: 8px; }
+  .b1 { grid-template-columns: 1.4fr 1fr; grid-template-rows: 1fr 1fr; }
+  .blk { border-radius: 8px; }
+  .s-dark  .blk { background: #1a2430; border: 1px solid #26333f; }
+  .s-dark  .blk.a { background: linear-gradient(135deg, rgba(56,189,248,.22), rgba(167,139,250,.14)); }
+  .s-light .blk { background: #fff; border: 1px solid #e2e8f0; }
+  .s-light .blk.a { background: linear-gradient(135deg, rgba(79,70,229,.16), rgba(14,165,233,.1)); }
+  .s-glass .blk { background: rgba(255,255,255,.09); border: 1px solid rgba(255,255,255,.18);
+                  backdrop-filter: blur(8px); }
+  .b2 { grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr 1fr; }
+  .b3 { grid-template-columns: repeat(4, 1fr); grid-template-rows: 1fr 1fr 1fr; }
+  .bars { position: absolute; left: 16px; right: 16px; bottom: 34px; display: flex; gap: 6px; align-items: flex-end; height: 42px; }
+  .bars i { flex: 1; border-radius: 3px 3px 0 0; background: rgba(125,211,252,.75); }
+  .swgrid { position: absolute; inset: 18px; display: grid; grid-template-columns: repeat(4,1fr); gap: 7px; }
+  .swgrid i { border-radius: 7px; }
+
+  h2 { font-size: 20px; margin: 56px 0 14px; }
+  ol { color: #8b9bab; font-size: 14px; line-height: 2; padding-left: 22px; }
+  ol b { color: #e6edf3; }
+  code { font-family: var(--font-mono); font-size: 12.5px; background: #131a23;
+         border: 1px solid #26333f; border-radius: 5px; padding: 1px 6px; color: #7dd3fc; }
+  .foot { margin-top: 60px; padding-top: 24px; border-top: 1px solid #26333f;
+          font-size: 12.5px; color: #5b6b7b; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>🛠 家用服务器工具箱 · 界面风格 Demo</h1>
+  <p class="lede">
+    四个可直接在浏览器里打开的 <b>纯 HTML 风格样机</b>，用「状态仪表 / 虚机管理 / 场景设定」的真实数据
+    （Ubuntu 26.04.1、Radeon AI PRO R9700、nvme0n1 / sda / sdb、4 台虚机、夜间影音场景）
+    演示换肤后的观感。四个 demo 共用 <code>demo.css</code>，只是 <b>design token 不同</b>，
+    所以结构完全一致、只换观感 —— 这正是接下来在 Qt 里落地时想要的形状。
+  </p>
+
+  <div class="row">
+    <span class="tag">纯静态 · 双击即可打开</span>
+    <span class="tag">零依赖 · 无构建</span>
+    <span class="tag">真实数据 · 取自 README 与页面源码</span>
+    <span class="tag">04 可一键导出 QSS</span>
+  </div>
+
+  <div class="cards">
+
+    <a class="card" href="01-dark-console.html">
+      <div class="shot s-dark">
+        <div class="blocks b1">
+          <div class="blk a"></div><div class="blk"></div><div class="blk"></div><div class="blk"></div>
+        </div>
+        <div class="bars"><i style="height:40%"></i><i style="height:62%"></i><i style="height:48%"></i>
+          <i style="height:78%"></i><i style="height:56%"></i><i style="height:90%"></i><i style="height:70%"></i></div>
+        <span class="lbl">data-theme="dark"</span>
+      </div>
+      <div class="pad">
+        <h3>01 · 深色机房控制台</h3>
+        <p>最贴近「服务器」气质的一版。顶部四张指标卡先给结论，主板画板保留但改成霓虹描边 + hover 高亮，
+           磁盘 / 显卡折叠组沿用现在的摘要标题。</p>
+        <div class="chips"><span class="chip">状态仪表</span><span class="chip">主板画板</span>
+          <span class="chip">折叠分组</span><span class="chip">走势图</span></div>
+      </div>
+    </a>
+
+    <a class="card" href="02-light-cards.html">
+      <div class="shot s-light">
+        <div class="blocks b2">
+          <div class="blk a"></div><div class="blk"></div><div class="blk"></div>
+          <div class="blk"></div><div class="blk a"></div><div class="blk"></div>
+        </div>
+        <span class="lbl" style="color:rgba(30,41,59,.5)">data-theme="light"</span>
+      </div>
+      <div class="pad">
+        <h3>02 · 浅色柔和卡片</h3>
+        <p>把虚机从「表格行」升级成<b>卡片</b>：状态药丸、vCPU / 内存 / 磁盘 / VNC 四格规格、
+           启动前的挂载点提示。下半部分是场景设定的时间轴视图。</p>
+        <div class="chips"><span class="chip">虚机卡片</span><span class="chip">场景时间轴</span>
+          <span class="chip">状态药丸</span><span class="chip">表单</span></div>
+      </div>
+    </a>
+
+    <a class="card" href="03-glass-bento.html">
+      <div class="shot s-glass">
+        <div class="blocks b2">
+          <div class="blk"></div><div class="blk"></div><div class="blk"></div>
+          <div class="blk"></div><div class="blk"></div><div class="blk"></div>
+        </div>
+        <span class="lbl">data-theme="glass"</span>
+      </div>
+      <div class="pad">
+        <h3>03 · 玻璃拟态 Bento</h3>
+        <p>一屏总览：12 栅格的 Bento 排布，卡片跨列不同形成节奏。带实时数值抖动的动效演示，
+           适合当「仪表盘首页」。注意玻璃模糊在 Qt 里要自绘。</p>
+        <div class="chips"><span class="chip">Bento 栅格</span><span class="chip">面积图</span>
+          <span class="chip">温度热力条</span><span class="chip">实时动效</span></div>
+      </div>
+    </a>
+
+    <a class="card" href="04-tokens.html">
+      <div class="shot s-tok">
+        <div class="swgrid">
+          <i style="background:#38bdf8"></i><i style="background:#a78bfa"></i><i style="background:#16a34a"></i><i style="background:#f59e0b"></i>
+          <i style="background:#ef4444"></i><i style="background:#3b82f6"></i><i style="background:#131a23;border:1px solid #26333f"></i><i style="background:#26333f"></i>
+        </div>
+        <span class="lbl">tokens → QSS</span>
+      </div>
+      <div class="pad">
+        <h3>04 · 设计令牌与组件库 ⭐</h3>
+        <p><b>最实用的一页。</b>三种主题实时切换，色卡点击即复制十六进制；底部把当前主题
+           <b>实时生成一份可用的 Qt QSS</b>，复制粘贴进 <code>main.cpp</code> 就能换肤。</p>
+        <div class="chips"><span class="chip">主题切换</span><span class="chip">导出 QSS</span>
+          <span class="chip">按钮 / 表格 / 表单</span><span class="chip">Qt 落地注意事项</span></div>
+      </div>
+    </a>
+
+  </div>
+
+  <h2>从 demo 到真实的 Qt 界面，建议这样推进</h2>
+  <ol>
+    <li>先只改<b>一处</b>：<code>main.cpp</code> 里的 <code>app.setStyleSheet(...)</code> 现在只有按钮高度，
+        把 04 导出的那份 QSS 贴进去，全站 10 个页面会立刻统一，风险最低、收益最大。</li>
+    <li>把散落在 <code>aboutpage.cpp</code>、<code>logpage.cpp</code>、<code>aipage.cpp</code> 等处的
+        <code>setStyleSheet("color: #888")</code> 换成 <code>label-&gt;setProperty("role", "mute")</code>，
+        由全局 QSS 统一驱动，颜色从此只有一个来源。</li>
+    <li>主操作按钮 <code>setObjectName("primary")</code>，危险操作 <code>("danger")</code>，
+        让视觉层级替你表达「哪个按钮该按」。</li>
+    <li>纯 CSS 能力（进度条圆角、表格 hover、滚动条、菜单圆角）QSS 都能一比一做到 —— 先吃完这些免费的。</li>
+    <li>QSS 做不到的（环形仪表 <code>conic-gradient</code>、玻璃 <code>backdrop-filter</code>、<code>box-shadow</code>）
+        再考虑 <code>paintEvent</code> 自绘与 <code>QGraphicsDropShadowEffect</code>。主板画板本来就是自绘的，
+        只需把填充换成 <code>QLinearGradient</code> 并加上 hover 描边。</li>
+    <li>顶部 <code>QTabWidget</code> 的 10 个页签已经开始挤了，demo 里都改成了<b>侧边导航</b>；
+        Qt 侧可用 <code>QListWidget</code> + <code>QStackedWidget</code> 复刻，不必换框架。</li>
+  </ol>
+
+  <div class="foot">
+    全部文件位于 <code>doc/demos/</code>。共享样式在 <code>demo.css</code>（约 18 KB，四个主题靠
+    <code>data-theme</code> 切换），改一个变量即可全站换色。
+    Demo 仅为设计参考，不参与 CMake 构建，可随时整目录删除。
+  </div>
+
+</div>
+</body>
+</html>
