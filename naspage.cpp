@@ -27,6 +27,7 @@
 #include <QList>
 #include <QButtonGroup>
 #include <QRadioButton>
+#include <QAbstractButton>
 #include <QStandardPaths>
 #include <QApplication>
 #include <QScrollArea>
@@ -121,12 +122,16 @@ NasPage::NasPage(QWidget *parent)
     m_modeSmb   = new QRadioButton("SMB 文件共享");
     m_modeIscsi->setToolTip("导出为 iSCSI LUN，发起端拿到的是裸块设备，自己格式化。");
     m_modeSmb->setToolTip("用 Samba 把该分区的挂载点作为共享目录导出。只读文件，不碰分区数据。");
+    m_modeMount = new QRadioButton("RAID 挂载目录");
+    m_modeMount->setToolTip("nasrs 做 RAID0 后挂成 /mnt 下的目录，影视服务能直接扫。不导 iSCSI。");
     m_modeIscsi->setChecked(true);       // 默认 iSCSI：与既有行为一致，不擅自改默认
     m_modeGroup = new QButtonGroup(this);
     m_modeGroup->addButton(m_modeIscsi);
     m_modeGroup->addButton(m_modeSmb);
+    m_modeGroup->addButton(m_modeMount);
     modeRow->addWidget(m_modeIscsi);
     modeRow->addWidget(m_modeSmb);
+    modeRow->addWidget(m_modeMount);
     m_modeHint = new QLabel();
     // 这一行只有提示文字，不给约束的话布局会把富余竖直高度摊给它，
     // 一行 17px 的提示实测被撑到 297px，在带边框的标签页里就是一片空白。
@@ -213,6 +218,13 @@ NasPage::NasPage(QWidget *parent)
     sform->addRow("可写", m_smbWrite);
     outer->addWidget(m_smbBox);
 
+    // 挂载目录出口：与 iSCSI / SMB 框互斥显隐，由 buildRaidFsBox 造内容。
+    // 只给一组控件做显隐的容器，策略要 Fixed，否则吸收页面富余高度。
+    m_fsBox = buildRaidFsBox();
+    m_fsBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    outer->addWidget(m_fsBox);
+    m_fsBox->setVisible(false);   // 默认 iSCSI，挂载框先藏起来
+
     m_smbWarn = new QLabel();
     m_smbWarn->setWordWrap(true);
     m_smbWarn->setTextFormat(Qt::RichText);
@@ -220,11 +232,9 @@ NasPage::NasPage(QWidget *parent)
 
     m_smbBox->setVisible(false);   // 初始 0 个成员，只显示 iSCSI
 
+    // 挂载目录不再是独立标签：它和 SMB 一样是"把卷交出去"的一种出口，
+    // 归到导出页里当第三个单选。这里只剩「导出」与「扩展」两页。
     m_tabs->addTab(m_svcTab, "文件共享服务");
-    // raidfs 放在导出与扩展之间：它是导出的另一种出口（同样是把卷交出去），
-    // 不是可选扩展。放错位置会让人以为它是电视墙那类可选能力。
-    m_fsTab = buildRaidFsTab();
-    m_tabs->addTab(m_fsTab, "RAID 挂载目录");
     m_tabs->addTab(buildExtensionsTab(), "扩展服务");
     // 收口高度：maximumHeight 默认是 QWIDGETSIZE_MAX，光设 Fixed 策略挡不住
     // 布局拉伸（实测标签页被拉到 651 而内容只要 253，多出来的高度摊给页内
@@ -241,9 +251,16 @@ NasPage::NasPage(QWidget *parent)
 
     m_createBtn = new QPushButton("① 创建阵列");
     m_createBtn->setToolTip("会格式化成员分区上的数据，需要逐条确认");
-    // 模式互斥切换：只刷新显隐与警告，不重算成员
-    connect(m_modeGroup, &QButtonGroup::idClicked, this, [this](int){
-        syncExportMode(m_board->members().size());
+    // 模式互斥切换：只刷新显隐与警告，不重算成员。
+    // 用 buttonToggled 而不是 idClicked —— 实测程序化 setChecked 时
+    // idClicked 一次都不发（toggled=1、buttonToggled=2 才有）。之前自动切
+    // SMB / 挂载失效回落都靠别处顺带调 syncExportMode 兜住，一旦没有就
+    // 漏刷新：出口框残留、② 按钮文案停在旧出口。buttonToggled 两种来源都覆盖。
+    // syncExportMode 内部还会 setChecked，会再触发本槽 —— 但那只会重算成
+    // 同一状态，收敛不循环；为稳妥加一层再入保护。
+    connect(m_modeGroup, &QButtonGroup::buttonToggled, this, [this](QAbstractButton *, bool on){
+        if (on && !m_syncingExportMode)
+            syncExportMode(m_board->members().size());
     });
     connect(m_smbAuth, &QComboBox::currentIndexChanged, this, &NasPage::refreshSmbWarning);
     connect(m_smbPath, &QLineEdit::textChanged, this, &NasPage::refreshSmbWarning);
@@ -257,13 +274,7 @@ NasPage::NasPage(QWidget *parent)
     m_exportBtn->setEnabled(false);
     connect(m_exportBtn, &QPushButton::clicked, this, &NasPage::onExportClicked);
     btnRow->addWidget(m_exportBtn);
-    // 与「② 导出 iSCSI」并列：同一个卷的两种出口，不是先后步骤，所以两个都叫 ②
-    // 且必须挨着放 —— 中间插进"撤销导出"会把这组并列关系切断。
-    m_mountFsBtn = new QPushButton("② 挂载到目录");
-    m_mountFsBtn->setToolTip("用 nasrs 做 RAID0 后挂成 /mnt 下的目录，供影视服务扫描。");
-    m_mountFsBtn->setEnabled(false);
-    connect(m_mountFsBtn, &QPushButton::clicked, this, &NasPage::onMountFsClicked);
-    btnRow->addWidget(m_mountFsBtn);
+    // 出口三选一都走同一个「②」按钮（文案随选中的出口变），不再单列挂载按钮。
 
     m_teardownBtn = new QPushButton("撤销导出");
     m_teardownBtn->setEnabled(false);
@@ -461,31 +472,59 @@ Nas::Plan NasPage::currentPlan() const
 // 都会把用户显式选好的 iSCSI 翻成 SMB，等于跟用户抢方向盘。
 void NasPage::syncExportMode(int memberCount)
 {
-    const bool droppedToOne = (memberCount == 1 && m_lastMemberCount > 1);
-    const bool smbAllowed = (memberCount == 1);
+    // 本函数内部会 setChecked，触发 buttonToggled -> 又回到这里。加一层
+    // 再入保护，保证一次用户/成员变化只重算一遍。
+    if (m_syncingExportMode) return;
+    m_syncingExportMode = true;
+    struct G { bool &f; ~G(){ f = false; } } guard{ m_syncingExportMode };
+    // 三个出口的合法成员数各不相同，这是本函数唯一真正的规则来源：
+    //   iSCSI  ≥1 —— 块级，单盘也能导（只是没条带）
+    //   SMB    =1 —— 文件级，Samba 不跨盘条带
+    //   挂载   ≥2 —— 这条出口的卖点就是"多盘 RAID0 挂成一个目录"，
+    //                少于 2 个成员 nasrs 自己会拒，这里先挡下来
+    const bool smbAllowed   = (memberCount == 1);
+    const bool mountAllowed = (memberCount >= 2);
+    const bool wasMount = m_modeMount->isChecked();
 
     m_modeSmb->setEnabled(smbAllowed);
-    if (!smbAllowed && m_modeSmb->isChecked())
-        m_modeIscsi->setChecked(true);      // 成员数变了，SMB 不再合法 -> 回 iSCSI
+    m_modeMount->setEnabled(mountAllowed);
 
-    if (smbAllowed) {
-        if (droppedToOne && !m_modeSmb->isChecked()) {
-            m_modeSmb->setChecked(true);
-            setStatus("只剩 1 个分区，已切到 SMB 文件共享（可手动切回 iSCSI）");
-        }
-        m_modeHint->setText("单个分区：可走 SMB（文件级，最常用）或 iSCSI（块级）");
-    } else if (memberCount == 0) {
-        m_modeHint->setText("先在上方点选分区。选 1 个可切 SMB，选 ≥2 个做 iSCSI RAID0");
-    } else {
-        m_modeHint->setText(QString("已选 %1 个分区：多盘只能做 iSCSI RAID（SMB 不跨盘条带）")
-                                .arg(memberCount));
+    // 成员数变化可能让当前选中的出口失效，此时回落到 iSCSI（总是合法）。
+    if (!smbAllowed && m_modeSmb->isChecked())   m_modeIscsi->setChecked(true);
+    if (!mountAllowed && m_modeMount->isChecked()) m_modeIscsi->setChecked(true);
+
+    // 只有"刚刚才允许"时主动切过去，不做每敲一下都跳：
+    //   掉到 1 盘 -> 建议 SMB；升到 ≥2 盘且原本是 iSCSI -> 建议挂载。
+    // 用户手动选过别的就不抢（droppedToOne 那套同理）。
+    const bool roseToMulti = (memberCount >= 2 && m_lastMemberCount < 2);
+    const bool droppedToOne = (memberCount == 1 && m_lastMemberCount > 1);
+    if (smbAllowed && droppedToOne && !m_modeSmb->isChecked()) {
+        m_modeSmb->setChecked(true);
+        setStatus("只剩 1 个分区，已切到 SMB 文件共享（可手动切回 iSCSI）");
+    } else if (mountAllowed && roseToMulti && !wasMount && m_modeIscsi->isChecked()) {
+        m_modeMount->setChecked(true);
+        setStatus("已选多个分区，可挂成一个目录给影视服务扫（可切回 iSCSI）");
     }
 
-    const bool smb = m_modeSmb->isChecked();
-    m_iscsiBox->setVisible(!smb);
+    // 提示语按当前成员数说明"还能选哪些"，而不是只说选中的那个
+    if (memberCount == 0)
+        m_modeHint->setText("先在上方点选分区：1 个可走 SMB，≥2 个可做 RAID（iSCSI 或挂目录）");
+    else if (memberCount == 1)
+        m_modeHint->setText("单个分区：SMB（文件级，最常用）或 iSCSI（块级）；挂载目录需 ≥2 盘");
+    else
+        m_modeHint->setText(QString("已选 %1 个分区：iSCSI RAID 或挂成 /mnt 目录；SMB 不跨盘条带")
+                                .arg(memberCount));
+
+    // 三选一显隐 + 按钮文案
+    const bool smb   = m_modeSmb->isChecked();
+    const bool mount = m_modeMount->isChecked();
+    m_iscsiBox->setVisible(!smb && !mount);
     m_smbBox->setVisible(smb);
     m_smbWarn->setVisible(smb);
-    m_exportBtn->setText(smb ? "② 导出 SMB 共享" : "② 导出 iSCSI");
+    m_fsBox->setVisible(mount);
+    m_exportBtn->setText(smb   ? "② 导出 SMB 共享"
+                         : mount ? "② 挂载到目录"
+                                 : "② 导出 iSCSI");
 
     // SMB 表单预填：只在没被用户改过时填默认值，别覆盖用户输入
     if (smb) {
@@ -499,17 +538,15 @@ void NasPage::syncExportMode(int memberCount)
             break;
         }
     }
-    // 挂载目录预填：按卷名推一个 /mnt/<卷名>。只在空的时候填，不覆盖用户输入。
-    // 用 defaultMountPoint 而不是自己拼串：它保证返回值为空或必然合法，
-    // 预填一个非法路径等于在用户没动手之前就埋雷。
-    if (m_mountPoint && m_mountPoint->text().isEmpty()) {
+    // 挂载目录预填：按卷名推 /mnt/<卷名>，只在空时填，不覆盖用户输入。
+    // 用 defaultMountPoint：它保证返回值为空或必然合法，预填非法路径等于埋雷。
+    if (mount && m_mountPoint->text().isEmpty()) {
         const QString suggest = Nas::defaultMountPoint(m_volName->text().trimmed());
         if (!suggest.isEmpty()) m_mountPoint->setText(suggest);
     }
     refreshSmbWarning();
     refreshRaidFsStatus();
     m_lastMemberCount = memberCount;
-
 }
 
 // SMB 的红字警告。刻意「不过度报警」：正常配置只说清授予了什么权限，
@@ -627,8 +664,11 @@ void NasPage::createArray()
 // 导出按钮一个就够：按当前模式分派，避免并排两个按钮让用户猜哪个有效。
 void NasPage::onExportClicked()
 {
-    if (m_modeSmb->isChecked()) exportSmb();
-    else                        exportIscsi();
+    // 出口三选一，跟着当前单选走。三个出口共用同一个「②」按钮，
+    // 按钮文案已由 syncExportMode 改好，这里只负责分发。
+    if (m_modeSmb->isChecked())        exportSmb();
+    else if (m_modeMount->isChecked()) onMountFsClicked();
+    else                               exportIscsi();
 }
 
 // 导出 SMB 共享。这条路径**不会**碰分区上的数据，风险全在"暴露范围"，
@@ -804,10 +844,7 @@ void NasPage::onAllFinished(bool success)
     // 创建成功后才允许导出
     if (m_createBtn && !m_currentIqn.isEmpty())
         m_exportBtn->setEnabled(true);
-    // 挂目录走的是同一个卷，门槛一致；不给它单独放宽，
-    // 否则会出现"阵列还没建成就挂目录"这种半截状态。
-    if (m_createBtn && !m_currentIqn.isEmpty())
-        m_mountFsBtn->setEnabled(true);
+
     setStatus(success ? "完成" : "中途失败，后面的步骤已跳过", !success);
     refresh();
 }
@@ -827,64 +864,62 @@ void NasPage::setStatus(const QString &text, bool bad)
 // 这一页最要紧的是别让人以为能直接用。nasrs 现在只算布局就退出（退出码
 // 3），没有任何导出通路。所以状态徽标写的不是"环境未就绪"，而是"引擎未
 // 实现"—— 两者的处置动作完全不同，写成前者会把人引去装软件，白费功夫。
-QWidget *NasPage::buildRaidFsTab()
+QWidget *NasPage::buildRaidFsBox()
 {
-    auto *w = new QWidget();
-    auto *v = new QVBoxLayout(w);
+    // 这是导出页里的一个出口框，不是独立标签页。所以不再自带整页标题和
+    // 尾部 stretch —— 那些是标签页才需要的；出口框只负责"挂载目录"这块
+    // 表单本身，显隐由 syncExportMode 统一管（与 m_iscsiBox/m_smbBox 一致）。
+    auto *box = new QWidget();
+    auto *v = new QVBoxLayout(box);
     v->setContentsMargins(0, 8, 0, 0);
-
-    auto *intro = new QLabel("同样是 nasrs 做 RAID0，差别只在出口：不导成 iSCSI，而是挂成一个目录，影视服务能直接扫。");
-    // 上面那句只说差别，不承诺能用；下一行的徽标才说现在到底能不能。
-    intro->setWordWrap(true);
-    intro->setProperty("role", "mute");
-    v->addWidget(intro);
-
-    auto *card = new QGroupBox("挂载目录");
-    auto *form = new QFormLayout(card);
 
     m_mountPoint = new QLineEdit();
     m_mountPoint->setPlaceholderText("/mnt/raid");
     m_mountPoint->setToolTip("只接受 /mnt 的直接子目录。挂到会遮内容：原目录里的东西在挂载期间看不见，卸载后回来。");
-    form->addRow("挂载到", m_mountPoint);
 
     auto *scope = new QLabel("限定在 /mnt 的直接子目录：这一层不会盖住系统运行需要的目录，也不会挂到已有分区的挂载点里面去（那样分区一旦没挂，数据会写进根盘的同名目录，极难发现）。");
     scope->setWordWrap(true);
     scope->setProperty("role", "mute");
+
+    auto *form = new QFormLayout();
+    form->setContentsMargins(0, 0, 0, 0);
+    form->addRow("挂载到", m_mountPoint);
     form->addRow("", scope);
 
     m_fsPill = new QLabel("检查中…");
     m_fsPill->setProperty("role", "pill-warn");
-    // 刻意不设 role="pill"：QSS 里那条规则会和稍后的行内 setStyleSheet 打架，
-    // 实测文字整块消失只剩色块。电视墙那三个徽标同样是"不设 role、样式走行内"。
     m_fsDeps = new QLabel();
     m_fsDeps->setWordWrap(true);
     m_fsDeps->setTextFormat(Qt::RichText);
     m_fsDeps->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     auto *pillRow = new QHBoxLayout();
+    pillRow->setContentsMargins(0, 0, 0, 0);
     pillRow->addWidget(m_fsPill);
     pillRow->addWidget(m_fsDeps, 1);
     form->addRow("依赖", pillRow);
+    v->addLayout(form);
 
     m_fsNote = new QLabel();
     m_fsNote->setWordWrap(true);
     m_fsNote->setTextFormat(Qt::RichText);
     m_fsNote->setProperty("role", "note");
-    v->addWidget(card);
     v->addWidget(m_fsNote);
 
+    // 卸载入口内联在这里、且排在说明之后：它是"挂上之后"才成立的撤销动作，
+    // 跟着出口走，不放进底部按钮行（那里是跨出口的 ①/② 主流程，混在一起会
+    // 让人误以为卸载和导出是同一层级的步骤）。
     auto *row = new QHBoxLayout();
+    row->setContentsMargins(0, 0, 0, 0);
     row->addStretch(1);
     m_umountBtn = new QPushButton("卸载该目录");
     m_umountBtn->setToolTip("umount 挂载点。目录里原有的内容会重新显现。");
-    // 一开始没有可撤的东西，先禁用；导出成功后才放开（见 onMountFsClicked）
     m_umountBtn->setEnabled(false);
     connect(m_umountBtn, &QPushButton::clicked, this, &NasPage::onUmountFsClicked);
     row->addWidget(m_umountBtn);
     v->addLayout(row);
 
-    v->addStretch(1);
     refreshRaidFsStatus();
-    return w;
+    return box;
 }
 
 
@@ -976,8 +1011,6 @@ void NasPage::onMountFsClicked()
     const auto steps = m_ctl.planRaidfsMount(plan, mp);
     if (steps.isEmpty()) { setStatus("命令生成失败：参数不合法", true); return; }
 
-    // 引擎没实现，所以这里不走 confirmSteps 真的执行 —— 那是骗人。
-    // 把命令逐条列出来给人看，并明说现在跑不通：既让流程可审，也不假装能用。
     // 引擎没实现，所以这里不走 confirmSteps 真的执行 —— 那是骗人。
     // 改成把命令逐条列出来给人看并明说跑不通：流程可审，但不假装能用。
     QStringList lines;
