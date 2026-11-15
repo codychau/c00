@@ -1,6 +1,17 @@
 #include "motherboardwidget.h"
+#include "theme.h"
 
 #include <QPainter>
+// 取可用字号：font() 以像素设定字号时 pointSizeF() 返回 -1，
+// 直接参与 qMax/qBound 会触发 "Point size <= 0" 告警，这里统一兜底。
+static double basePointSize(const QFont &f)
+{
+    const double ps = f.pointSizeF();
+    if (ps > 0.0)
+        return ps;
+    return qMax(7.0, f.pixelSize() * 72.0 / 96.0);
+}
+
 #include <QLinearGradient>
 #include <QMouseEvent>
 #include <QToolTip>
@@ -340,16 +351,30 @@ void MotherboardWidget::drawPart(QPainter &p, const BoardPart &part, bool hot)
         }
     }
 
+    if (!hot) {
+        // 极淡的落影：向右下偏移一层半透明深色，比逐帧 QGraphicsShadow 便宜
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(0, 0, 0, 55));
+        p.drawRoundedRect(r.adjusted(1.5, 2.5, 1.5, 2.5), 6, 6);
+    }
+
     QLinearGradient g(r.topLeft(), r.bottomRight());
     g.setColorAt(0.0, base.lighter(128));
     g.setColorAt(1.0, base.lighter(104));
     p.setBrush(g);
-    p.setPen(QPen(hot ? QColor("#ffffff") : base.darker(190), hot ? 2.4 : 1.4));
+    p.setPen(QPen(hot ? Theme::accent() : base.darker(190), hot ? 2.0 : 1.4));
     p.drawRoundedRect(r, 6, 6);
 
     if (hot) {
+        // 外圈辉光：两层逐渐变淡的主色描边，模拟 demo 的霓虹高亮
+        p.setBrush(Qt::NoBrush);
+        p.setPen(QPen(Theme::alpha(Theme::accent(), 90), 5.0));
+        p.drawRoundedRect(r.adjusted(-2.5, -2.5, 2.5, 2.5), 8, 8);
+        p.setPen(QPen(Theme::alpha(Theme::accent(), 200), 1.6));
+        p.drawRoundedRect(r.adjusted(-0.5, -0.5, 0.5, 0.5), 7, 7);
+        // 内部提亮
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor(255, 255, 255, 70));
+        p.setBrush(Theme::alpha(QColor("#ffffff"), 46));
         p.drawRoundedRect(r.adjusted(2, 2, -2, -2), 5, 5);
     }
 
@@ -358,17 +383,20 @@ void MotherboardWidget::drawPart(QPainter &p, const BoardPart &part, bool hot)
     const double barZone = showBar ? 18.0 : 0.0;
     if (showBar) {
         QRectF bar(r.left() + 5, r.bottom() - 15, r.width() - 10, 11);
-        p.setPen(QPen(QColor(0, 0, 0, 60), 0.8));
-        p.setBrush(QColor(255, 255, 255, 120));
+        // 深色半透明槽 + 亮色填充：避免整块白色在深色芯片上炸眼
+        p.setPen(QPen(QColor(0, 0, 0, 70), 0.8));
+        p.setBrush(QColor(0, 0, 0, 80));
         p.drawRoundedRect(bar, 3, 3);            // 容量条底槽
         double w = bar.width() * qBound(0.0, part.fill, 1.0);
         p.setPen(Qt::NoPen);
-        p.setBrush(QColor("#f8fafc"));
+        p.setBrush(Theme::alpha(QColor("#ffffff"), 225));
         p.drawRoundedRect(QRectF(bar.left(), bar.top(), qMax(w, 3.0), bar.height()), 3, 3);
         QFont bf = font();
-        bf.setPointSizeF(qMax(7.0, font().pointSizeF() - 1.5));
+        bf.setPointSizeF(qMax(7.0, basePointSize(font()) - 1.5));
         p.setFont(bf);
-        p.setPen(QColor("#0b1e14"));
+        // 百分比写在条内右侧：填充越过中线时落在亮色上（用深色字），
+        // 低负载时落在深色空槽上（用浅色字），两种情况都保证可读。
+        p.setPen(part.fill > 0.55 ? QColor("#0b1e14") : QColor("#e6edf3"));
         p.drawText(bar.adjusted(4, -1, -4, -1), Qt::AlignRight | Qt::AlignVCenter,
                    QString("%1%").arg(part.fill * 100.0, 0, 'f', 0));
     }
@@ -378,13 +406,13 @@ void MotherboardWidget::drawPart(QPainter &p, const BoardPart &part, bool hot)
 
     QFont tf = font();
     tf.setBold(true);
-    tf.setPointSizeF(qBound(8.0, tf.pointSizeF() + 0.5, 10.0));
+    tf.setPointSizeF(qBound(8.0, basePointSize(tf) + 0.5, 10.0));
     QFontMetricsF tfm(tf);
     const double titleH = tfm.height();
 
     QFont sf = font();
     sf.setBold(false);
-    sf.setPointSizeF(qBound(7.0, font().pointSizeF() - 1.0, 9.0));
+    sf.setPointSizeF(qBound(7.0, basePointSize(font()) - 1.0, 9.0));
     QFontMetricsF sfm(sf);
     const double lineH = sfm.height() + 1;
 
@@ -418,7 +446,7 @@ void MotherboardWidget::drawLegend(QPainter &p, const QRectF &area)
     };
 
     QFont lf = font();
-    lf.setPointSizeF(qMax(font().pointSizeF() - 1.0, 7.5));
+    lf.setPointSizeF(qMax(basePointSize(font()) - 1.0, 7.5));
     QFontMetricsF lfm(lf);
     p.setFont(lf);
 
@@ -426,11 +454,11 @@ void MotherboardWidget::drawLegend(QPainter &p, const QRectF &area)
     for (const auto &it : items) {
         if (x > area.right() - 30) break;
         QRectF sw(x, area.top() + (area.height() - 10) / 2.0, 10, 10);
-        p.setPen(QPen(QColor("#0f172a"), 1.0));
+        p.setPen(QPen(Theme::alpha(QColor("#04121c"), 200), 1.0));
         p.setBrush(it.first);
         p.drawRoundedRect(sw, 2, 2);
         x += 13;
-        p.setPen(QColor("#334155"));
+        p.setPen(Theme::textDim());
         p.drawText(QRectF(x, area.top(), lfm.horizontalAdvance(it.second) + 6, area.height()),
                    Qt::AlignLeft | Qt::AlignVCenter, it.second);
         x += lfm.horizontalAdvance(it.second) + 14;
@@ -441,18 +469,19 @@ void MotherboardWidget::drawLegend(QPainter &p, const QRectF &area)
 void MotherboardWidget::drawInfoStrip(QPainter &p)
 {
     QRectF strip(10, height() - 52, width() - 20, 42);
-    p.setPen(QPen(QColor("#cbd5e1"), 1.2));
-    p.setBrush(QColor("#f8fafc"));
+    // 深色玻璃信息条：压在 PCB 上，避免整块浅色块打断主板观感
+    p.setPen(QPen(Theme::alpha(QColor("#38bdf8"), 70), 1.2));
+    p.setBrush(Theme::alpha(QColor("#04121c"), 190));
     p.drawRoundedRect(strip, 8, 8);
 
     QFont tf = font();
     tf.setBold(true);
-    tf.setPointSizeF(qMin(tf.pointSizeF() + 1.0, 11.0));
+    tf.setPointSizeF(qMin(basePointSize(tf) + 1.0, 11.0));
     QFontMetricsF tfm(tf);
 
     QFont sf = font();
     sf.setBold(false);
-    sf.setPointSizeF(qMax(font().pointSizeF(), 8.5));
+    sf.setPointSizeF(qMax(basePointSize(font()), 8.5));
     QFontMetricsF sfm(sf);
 
     const double left = strip.left() + 10;
@@ -461,12 +490,12 @@ void MotherboardWidget::drawInfoStrip(QPainter &p)
     if (m_hover >= 0 && m_hover < m_parts.size()) {
         const BoardPart &pt = m_parts[m_hover];
         p.setFont(tf);
-        p.setPen(QColor("#0f172a"));
+        p.setPen(Theme::text());
         p.drawText(QRectF(left, strip.top() + 3, avail, tfm.height()),
                    Qt::AlignLeft, tfm.elidedText(pt.title, Qt::ElideRight, avail));
 
         p.setFont(sf);
-        p.setPen(QColor("#475569"));
+        p.setPen(Theme::textDim());
         double y = strip.top() + 3 + tfm.height();
         for (int i = 0; i < pt.info.size() && y + sfm.height() <= strip.bottom() - 2; ++i) {
             p.drawText(QRectF(left, y, avail, sfm.height()), Qt::AlignLeft,
@@ -475,12 +504,20 @@ void MotherboardWidget::drawInfoStrip(QPainter &p)
         }
     } else {
         p.setFont(sf);
-        p.setPen(QColor("#64748b"));
+        p.setPen(Theme::textMute());
         const QString hint = "把鼠标移到主板部件上：这里显示它的信息、温度、容量（点击部件可展开下方分组）";
         p.drawText(QRectF(left, strip.top() + 4, avail, sfm.height()), Qt::AlignLeft,
                    sfm.elidedText(hint, Qt::ElideRight, avail));
         drawLegend(p, QRectF(left, strip.top() + 22, avail, 18));
     }
+}
+
+void MotherboardWidget::resizeEvent(QResizeEvent *event)
+{
+    // 布局是按画布宽高比例算的，尺寸一变必须重算，
+    // 否则部件仍停在旧尺寸（例如嵌入页面后被拉伸/压缩时右列会溢出）。
+    QWidget::resizeEvent(event);
+    relayout();
 }
 
 void MotherboardWidget::paintEvent(QPaintEvent *)
@@ -526,13 +563,22 @@ void MotherboardWidget::paintEvent(QPaintEvent *)
     // 丝印（右列空档）
     QFont sf = font();
     sf.setBold(true);
-    sf.setPointSizeF(qMax(font().pointSizeF() - 1.0, 7.5));
+    sf.setPointSizeF(qMax(basePointSize(font()) - 1.0, 7.5));
     p.setFont(sf);
     p.setPen(QColor("#7fb99f"));
     QFontMetricsF sfm(sf);
-    QRectF silk(b.left() + 0.610 * b.width(), b.bottom() - 0.10 * b.height(),
-               0.340 * b.width(), 0.08 * b.height());
-    p.drawText(silk, Qt::AlignCenter, sfm.elidedText("SERVER TOOLBOX · MB", Qt::ElideRight, silk.width()));
+    QRectF silk(b.left() + 0.560 * b.width(), b.bottom() - 0.10 * b.height(),
+               0.410 * b.width(), 0.08 * b.height());
+    // 按可用宽度反推字号，避免固定 16px 在窄面板下被省略成 "SERVER TOOLBO…"
+    const QString silkText = QStringLiteral("SERVER TOOLBOX · MB");
+    const double wantPt = sf.pointSizeF();
+    for (double pt = wantPt; pt >= 5.0; pt -= 0.5) {
+        sf.setPointSizeF(pt);
+        p.setFont(sf);
+        if (QFontMetricsF(sf).horizontalAdvance(silkText) <= silk.width()) break;
+    }
+    p.setFont(sf);
+    p.drawText(silk, Qt::AlignCenter, silkText);
 
     // 部件
     for (int i = 0; i < m_parts.size(); ++i)
