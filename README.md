@@ -109,6 +109,31 @@ sudo ./build-install.sh
 
 安装后通过 `~/.local/bin/server-toolbox` 运行。若该路径未在你的 `PATH` 中，可执行 `export PATH="$HOME/.local/bin:$PATH"`。
 
+## 打包 AppImage
+
+一条命令产出单文件可执行程序（免安装，拷到别的 x86_64 Linux 上直接跑）：
+
+```bash
+./packaging/build-appimage.sh
+# → dist/server-toolbox-1.0.0-x86_64.AppImage
+VERSION=1.2.0 ./packaging/build-appimage.sh     # 自定义版本号
+```
+
+打包范围：程序本体 + `llama-proxy` + **Qt 自己的库和插件**（core/gui/widgets/network/dbus、
+xcb / wayland 平台插件、imageformats）。libc、libGL、X11、ICU 等系统库一律不打进去 ——
+AppImage 的通行做法是依赖宿主已有的系统库，把 glibc 打包反而会在别的发行版上崩。
+
+跑之前需要 appimagetool 一次：
+
+```bash
+curl -L -o build/appimagetool \
+  https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+chmod +x build/appimagetool
+```
+
+在**没有 FUSE 的环境**（容器、CI）里跑 AppImage 或 appimagetool，加
+`export APPIMAGE_EXTRACT_AND_RUN=1` 绕开挂载。
+
 ## 更新顶部截图
 
 顶部那张图是 `app_shot` 在无头环境渲染出来的，改了界面后按下面重新生成：
