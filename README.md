@@ -2,6 +2,11 @@
 
 一个基于 Qt6 的 Linux 桌面工具，用于管理家庭服务器的各种功能。
 
+![主界面：左侧导航 + 系统状态仪表（主板画板实时显示 CPU / 内存 / NVMe / SATA / GPU）](doc/img/screenshot.png)
+
+> 界面为深色机房控制台风格，配色令牌与实现说明见 [doc/THEME.md](doc/THEME.md)；
+> 另有 4 套风格化 HTML 设计稿在 [doc/demos/](doc/demos/)。
+
 ## 功能
 
 - **📊 状态仪表** — 系统资源监控（CPU、内存、磁盘、网络）
@@ -103,6 +108,48 @@ sudo ./build-install.sh
 ```
 
 安装后通过 `~/.local/bin/server-toolbox` 运行。若该路径未在你的 `PATH` 中，可执行 `export PATH="$HOME/.local/bin:$PATH"`。
+
+## 打包 AppImage
+
+一条命令产出单文件可执行程序（免安装，拷到别的 x86_64 Linux 上直接跑）：
+
+```bash
+./packaging/build-appimage.sh
+# → dist/server-toolbox-1.0.0-x86_64.AppImage
+VERSION=1.2.0 ./packaging/build-appimage.sh     # 自定义版本号
+```
+
+打包范围：程序本体 + `llama-proxy` + **Qt 自己的库和插件**（core/gui/widgets/network/dbus、
+xcb / wayland 平台插件、imageformats）。libc、libGL、X11、ICU 等系统库一律不打进去 ——
+AppImage 的通行做法是依赖宿主已有的系统库，把 glibc 打包反而会在别的发行版上崩。
+
+跑之前需要 appimagetool 一次：
+
+```bash
+curl -L -o build/appimagetool \
+  https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+chmod +x build/appimagetool
+```
+
+在**没有 FUSE 的环境**（容器、CI）里跑 AppImage 或 appimagetool，加
+`export APPIMAGE_EXTRACT_AND_RUN=1` 绕开挂载。
+
+## 更新顶部截图
+
+顶部那张图是 `app_shot` 在无头环境渲染出来的，改了界面后按下面重新生成：
+
+```bash
+cmake -S . -B build -DENABLE_THEME_SHOT=ON && cmake --build build -j
+QT_QPA_PLATFORM=offscreen ./build/app_shot          # → build/app_main.png
+cp build/app_main.png doc/img/screenshot.png        # 顶部主画面用这张
+```
+
+`app_shot <n>` 渲染第 n 个导航页（如 `./build/app_shot 2` 出存储管理）；
+第三个参数是滚动像素，`./build/app_shot - 230` 用来看顶栏毛玻璃——静态首屏时
+玻璃背后只有页面边距，滚起来才看得出模糊。
+
+注意无头环境默认没有 emoji 字体，导航图标会渲染成 `□` 方块；装一个 emoji
+字体（如 `fonts-noto-color-emoji`）后再截即可。
 
 ## 许可证
 

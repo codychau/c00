@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=家用服务器工具箱
+Name[en]=Home Server Toolbox
+GenericName=Server Toolbox
+Comment=系统状态、存储、虚机、服务与 AI 服务的一站式家用服务器管理工具
+Comment[en]=Home server management: status, storage, VMs, services and AI
+Exec=server-toolbox %U
+Icon=server-toolbox
+Terminal=false
+Categories=System;Monitor;Qt;
+Keywords=server;system;monitor;storage;virtualbox;qemu;smartctl;
+StartupWMClass=server-toolbox
