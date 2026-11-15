@@ -9,6 +9,8 @@
 #include <QJsonValue>
 #include <QStringList>
 #include <QSet>
+#include <QDir>
+#include <QRegularExpression>
 
 namespace Nas {
 
@@ -741,4 +743,93 @@ bool looksLikeNfoFile(const QString &path)
     return extOf(path) == "nfo";
 }
 
+
+QString validateMountPoint(const QString &path)
+{
+    // 先给绝对路径与规范化把关：后面所有判断都建立在"没有 .. 与 //"上。
+    // 不规范化就拦不住 /mnt/../../etc 这种，字符串前缀判断会被绕过去。
+    if (path.isEmpty()) return QString::fromUtf8("挂载点不能为空");
+    if (!path.startsWith("/")) return QString::fromUtf8("挂载点必须是绝对路径");
+    const QString clean = QDir::cleanPath(path);
+    if (clean != path)
+        return QString("挂载点要写成规范路径（不要含 .. 或 //）：") + clean;
+
+    // /mnt 本身不行：那是所有挂载的父目录，把卷挂在这儿等于把别的挂载
+    // 全遮住（/mnt/d 会变成 /mnt/d/<d>，影视服务扫不到，用户只会觉得文件丢了）。
+    if (clean == "/mnt")
+        return QString::fromUtf8("不能直接挂到 /mnt 本身，请用 /mnt/<目录名>");
+
+    const QStringList parts = clean.mid(1).split("/", Qt::SkipEmptyParts);
+    if (parts.size() != 2 || parts.first() != "mnt")
+        return QString::fromUtf8("挂载点必须是 /mnt 的直接子目录，例如 /mnt/raid");
+
+    const QString leaf = parts.last();
+    // 目录名会进 shell 命令与 systemd 单元名，字符集收到最小。
+    static const QRegularExpression ok("^[A-Za-z0-9][A-Za-z0-9._-]*$");
+    if (!ok.match(leaf).hasMatch())
+        return QString("目录名只能用字母、数字、点、下划线、短横，且以字母数字开头：") + leaf;
+    if (leaf == "." || leaf == "..")
+        return QString::fromUtf8("目录名不能是 . 或 ..");
+    return QString();
+}
+
+QString defaultMountPoint(const QString &volumeName)
+{
+    // 卷名先洗一遍再拼，避免把怪字符带进路径。清洗后为空就不猜，
+    //
+    // 这里刻意不再 validateMountPoint(mp) 一次：清洗留下的字符集
+    // （字母数字 . _ -，且不以 . _ - 开头）是校验器允许集合的子集，
+    // "/mnt/" + n 必然合法，那一步永远为真 —— 死分支。测试也证实了这点：
+    // 把它删掉，40 条断言一条都不会红。留着的代价是让人以为这里有一道
+    // 真实防线。子集关系由下面 mnt_probe 的「默认值自带合法性」守住。
+    // 让调用方去报错 —— 返回一个 /mnt/unnamed 之类的会让用户以为是自己的命名。
+    QString n = volumeName;
+    n.replace(QRegularExpression("[^A-Za-z0-9._-]"), "_");
+    n = n.remove(QRegularExpression("^[._-]+"));
+    if (n.isEmpty()) return QString();
+    return "/mnt/" + n;
+}
+
+QString mountPointConflict(const QString &path, const QStringList &systemMounts)
+{
+    const QString clean = QDir::cleanPath(path);
+    // 根盘要单独处理，不能在循环里 continue 掉：
+    //   · 若把 "/" 直接跳过，那么"目标位于已有挂载之内"这一路永远查不到根盘，
+    //     而所有 /mnt/x 都在根盘之内 —— 检查等于没有做（本函数原先正是如此）；
+    //   · 若不跳过，mm == "/" 时 clean.startsWith("/" + "/") 又不成立，
+    //     而 startsWith("/") 会匹配一切绝对路径，等于一律报警。
+    // 所以：根盘只用来判"目标目录本身是否已存在"，不参与前缀包含判断。
+    const bool rootMounted = systemMounts.contains("/");
+    if (rootMounted) {
+        // /mnt 一定存在于根盘上，所以挂载点目录在根盘里必然能建，
+        // 这一路不算冲突；真正要拦的是"挂到已有目录上遮住内容"，
+        // 那由调用方用文件系统实际情况判断（见 mountPointBusy）。
+    }
+    for (const QString &m : systemMounts) {
+        const QString mm = QDir::cleanPath(m);
+        if (mm.isEmpty() || mm == "/") continue;   // 根盘已单独处理
+        // 完全相同：正是要挂的地方已经被挂了
+        if (mm == clean)
+            return QString("该路径已挂载 ") + mm;
+        // 目标在已有挂载之下：例如 /mnt/d/raid 而 /mnt/d 是分区挂载点。
+        // 挂上去的文件落在分区里没问题，但一旦分区没挂，卷会写到根盘的
+        // 同名目录里 —— 那种"内容跑错盘"的问题极难发现，直接拒绝。
+        if (clean.startsWith(mm + "/"))
+            return QString("该路径位于已挂载的 ") + mm + " 之内";
+        // 目标盖住已有挂载：把 /mnt/d 挂到已经是挂载点的 /mnt 之下会遮住下层
+        if (mm.startsWith(clean + "/"))
+            return QString("该目录内已有挂载 ") + mm + "，挂上去会把它遮住";
+    }
+    return QString();
+}
+QString mountPointBusy(const QString &path, const QStringList &existingEntries)
+{
+    Q_UNUSED(path);
+    // 调用方传的是"该目录下的条目"，空列表代表目录不存在或为空 —— 两种都安全。
+    // 隐藏文件同样算内容：只装着 .cache 的目录被挂上一样会遮住，
+    // 按"看得见的文件"来判会让用户以为没事。
+    if (existingEntries.isEmpty()) return QString();
+    return QString("目录已存在且有 ") + QString::number(existingEntries.size()) +
+           QString(" 项内容，挂载后这些会暂时看不见");
+}
 } // namespace Nas

@@ -73,6 +73,10 @@ private:
     QWidget *buildExtensionsTab();
     void refreshTvDeps();
     void onTvScanClicked();
+    QWidget *buildRaidFsTab();
+    void refreshRaidFsStatus();
+    void onMountFsClicked();
+    void onUmountFsClicked();
     // 逐条展示命令并要用户确认；返回要执行的步骤（可能为空 = 用户取消）
     QVector<NasController::Step> confirmSteps(const QVector<NasController::Step> &steps,
                                               const QString &title);
@@ -128,6 +132,7 @@ private:
     QTabWidget *m_tabs = nullptr;
     QWidget    *m_svcTab = nullptr;
     QWidget    *m_extTab = nullptr;
+    QWidget    *m_fsTab = nullptr;       // RAID FS 标签页
     QLabel     *m_tvRoot = nullptr;      // 当前扫描根（跟随所选分区）
     QLabel     *m_tvCount = nullptr;
     QLabel     *m_tvPill = nullptr;
@@ -136,6 +141,15 @@ private:
     QTableWidget *m_tvTable = nullptr;
     QPushButton *m_tvScan = nullptr;
     bool        m_tvScanned = false;
+
+    // ── RAID FS（把 RAID 卷挂到 /mnt 下的目录）──
+    // 与扩展服务同理：挂目录是可选出口，失败不能连带挡住 iSCSI 导出。
+    QLineEdit *m_mountPoint = nullptr;
+    QLabel    *m_fsPill = nullptr;       // 环境 + 是否已实现
+    QLabel    *m_fsDeps = nullptr;
+    QLabel    *m_fsNote = nullptr;
+    QPushButton *m_umountBtn = nullptr;  // 撤销挂载
+    QPushButton *m_mountFsBtn = nullptr; // ② 挂载到目录
 };
 
 #endif // NASPAGE_H

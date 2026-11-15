@@ -51,6 +51,10 @@ public:
         bool kernelModules = false;   // target_core_mod 等模块文件在不在
         bool losetup = false;
         bool nasrsBinary = false;     // 自研引擎可执行文件是否找到
+    // RAID FS 走 FUSE，与 iSCSI 那条完全不是一套依赖：不要并进
+    // readyForMdadm 的 missing，否则没装 fuse 的用户连 iSCSI 都被提示未就绪。
+    bool fuseDevice = false;      // /dev/fuse 在不在
+    bool fuseMount  = false;      // mount.fuse / fusermount3 在不在
 // SMB 相关：Samba 是可选功能，不能并进 readyForMdadm 的 missing 里，
 // 否则没装 Samba 的用户连 RAID 都会被提示环境未就绪。
 bool smbd       = false;      // smbd 在不在
@@ -58,6 +62,9 @@ bool testparm   = false;      // 能否离线校验 smb.conf
 bool smbService = false;      // systemd 是否有 smbd.service
         QStringList missing;          // 人类可读的缺失项
         bool readyForSmb() const { return smbd && testparm && smbService; }
+    // 注意这里只表示"环境具备挂 FUSE 的条件"，不表示 raidfs 能用：
+    // nasrs 目前还没有实现导出（见 planRaidfsMount 的说明）。
+    bool readyForFuse() const { return nasrsBinary && fuseDevice && fuseMount; }
 bool readyForMdadm() const { return mdadm && targetCli && configfsMounted; }
     };
 
@@ -81,6 +88,18 @@ bool readyForMdadm() const { return mdadm && targetCli && configfsMounted; }
     QVector<Step> planIscsiTeardown(const QString &iqn,
                                     const QString &backingPath) const;
     QVector<Step> planStop(const QString &deviceOrVolume) const;
+
+// RAID FS：同一个 nasrs 引擎做 RAID0，但不导成 iSCSI，而是挂到 /mnt/<目录>，
+// 让影视服务（Jellyfin / 电视墙）直接扫目录。用户要的正是这个：iSCSI 那条
+// 走到块设备就结束了，影视服务拿不到文件。
+//
+// 诚实说明：这两条命令链在当前 nasrs 上**跑不通**。nasrs 现在只算布局、
+// 打印容量就退出（退出码 3），没有任何导出通路 —— iSCSI 那条也没接
+// targetcli。所以命令是给"引擎实现之后"用的，UI 必须同屏显示"未实现"，
+// 不能让它看起来像点一下就能挂载。
+QVector<Step> planRaidfsMount(const Nas::Plan &plan, const QString &mountPoint) const;
+// 卸载。umount 对未挂载目标会失败，这一步本身就是那道检查。
+QVector<Step> planRaidfsUnmount(const QString &mountPoint) const;
 
 // SMB：把单个分区路径作为共享导出。写入 /etc/samba/smb.d 下的独立片段，
 // 不直接改主 smb.conf（便于撤销、也避免和发行版自带配置打架）。

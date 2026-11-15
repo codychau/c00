@@ -302,6 +302,24 @@ QLabel[role="badge"] {
         background: @surface3@;
         color: @mute@;
     }
+
+    // 状态徽标的告警版。底色沿用不透明的 surface3，只换文字色：
+    // 试过 alpha(warn,36) 做底 + warn 做字，离屏渲染下两者被压成同色实心块，
+    // 文字整块看不见（实测：旁边的绿色文字正常，唯独这块是纯黄）。
+    // 半透明同色系底 + 同色系字这个组合不要用。
+QLabel[role="pill-warn"] {
+        padding: 2px 8px; border-radius: 4px;
+        background: @surface3@;
+        color: @warn@; font-weight: 600;
+    }
+
+    // 同上，正常态。底坚持用不透明 surface3：半透明 ok 底 + ok 字
+    // 是同色系叠加，实测会被压成实心同色块导致文字看不见。
+QLabel[role="pill-ok"] {
+        padding: 2px 8px; border-radius: 4px;
+        background: @surface3@;
+        color: @ok@; font-weight: 600;
+    }
 QLabel[role="hero"] {
     color: @text@; background: @surface2@;
     border: 1px solid @border@; border-left: 3px solid @accent2@;
