@@ -1,4 +1,5 @@
 #include "storagepage.h"
+#include "theme.h"
 #include "storagedevicepage.h"
 #include "mountpage.h"
 #include "formatdialog.h"
@@ -8,16 +9,23 @@
 #include <QScrollArea>
 #include <QHBoxLayout>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 StoragePage::StoragePage(QWidget *parent)
     : QWidget(parent)
 {
     auto *outerLayout = new QVBoxLayout(this);
-    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setContentsMargins(0, kTopbarInset, 0, 0);
     outerLayout->setSpacing(0);
 
     // ── 主体内容（可滚动） ──
     auto *scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);
+    // 显式开启横向滚动条：widgetResizable(true) 下默认横向策略是 Ignored，
+    // 溢出内容会被静默裁掉而不出现滚动条
+scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scroll->setFrameShape(QFrame::NoFrame);
 
     auto *container = new QWidget();
@@ -46,25 +54,33 @@ StoragePage::StoragePage(QWidget *parent)
     // ── 底部全局状态栏（常驻） ──
     m_statusBar = new QWidget();
     m_statusBar->setObjectName("storageStatusBar");
-    m_statusBar->setStyleSheet(
-        "#storageStatusBar {"
-        "  background: rgba(255,255,255,0.7);"
-        "  border-top: 1px solid rgba(0,0,0,0.08);"
-        "}"
-        "#storageStatusBar QLabel { color: #475569; font-size: 12px; }"
-        "#storageStatusBar QPushButton {"
-        "  background: #475569; color: white; padding: 2px 12px;"
-        "  border-radius: 3px; font-size: 11px;"
-        "}"
-        "#storageStatusBar QPushButton:hover { background: #334155; }"
-        "#storageStatusBar QProgressBar {"
-        "  border: 1px solid #94a3b8; border-radius: 3px;"
-        "  background: rgba(241,245,249,0.6); height: 16px; text-align: center;"
-        "  color: #475569; font-size: 10px;"
-        "}"
-        "#storageStatusBar QProgressBar::chunk {"
-        "  background: #3b82f6; border-radius: 2px;"
-        "}");
+    {
+        const QString surf  = Theme::surface().name(QColor::HexRgb);
+        const QString bdr   = Theme::border().name(QColor::HexRgb);
+        const QString dim   = Theme::textDim().name(QColor::HexRgb);
+        const QString btn   = Theme::surface2().name(QColor::HexRgb);
+        const QString btnH  = Theme::surface3().name(QColor::HexRgb);
+        const QString acc   = Theme::accent().name(QColor::HexRgb);
+        m_statusBar->setStyleSheet(
+            QString("#storageStatusBar {"
+                    "  background: %1; border-top: 1px solid %2;"
+                    "}"
+                    "#storageStatusBar QLabel { color: %3; font-size: 12px; }"
+                    "#storageStatusBar QPushButton {"
+                    "  background: %4; color: %7; padding: 2px 12px;"
+                    "  border-radius: 3px; font-size: 11px;"
+                    "}"
+                    "#storageStatusBar QPushButton:hover { background: %5; }"
+                    "#storageStatusBar QProgressBar {"
+                    "  border: 1px solid %2; border-radius: 3px;"
+                    "  background: %1; height: 16px; text-align: center;"
+                    "  color: %3; font-size: 10px;"
+                    "}"
+                    "#storageStatusBar QProgressBar::chunk {"
+                    "  background: %6; border-radius: 2px;"
+                    "}").arg(surf).arg(bdr).arg(dim).arg(btn).arg(btnH)
+                       .arg(acc).arg(Theme::onAccent().name(QColor::HexRgb)));
+    }
 
     auto *barLayout = new QHBoxLayout(m_statusBar);
     barLayout->setContentsMargins(0, 0, 0, 0);

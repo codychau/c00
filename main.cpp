@@ -6,6 +6,7 @@
 #include <QString>
 
 #include "mainwindow.h"
+#include "theme.h"
 #include "healthmonitor.h"
 
 int main(int argc, char *argv[])
@@ -61,15 +62,10 @@ int main(int argc, char *argv[])
     QApplication app(argc, argv);
     QApplication::setApplicationName("ServerToolbox");
 
-    app.setStyleSheet(
-        "QPushButton {"
-        "  min-height: 25px;"
-        "  max-height: 25px;"
-        "  padding: 2px 12px;"
-        "}"
-        "QPushButton:disabled {"
-        "  color: #888;"
-        "}");
+    // 全局主题（深色机房控制台）。颜色只定义在 theme.h，
+    // 页面里不要再写 setStyleSheet 设颜色；需要层级请打 role 属性：
+    //     w->setProperty("role", "mute");   // 见 theme.cpp 模板末尾的 QLabel[role=...]
+    app.setStyleSheet(Theme::globalStyleSheet());
 
     MainWindow w;
     w.show();

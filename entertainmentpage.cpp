@@ -12,15 +12,22 @@
 
 #include <memory>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 EntertainmentPage::EntertainmentPage(QWidget *parent)
     : QWidget(parent)
 {
     // 整个页面用 QScrollArea 包裹
     auto *outerLayout = new QVBoxLayout(this);
-    outerLayout->setContentsMargins(0, 0, 0, 0);
+    outerLayout->setContentsMargins(0, kTopbarInset, 0, 0);
 
     auto *scrollArea = new QScrollArea();
     scrollArea->setWidgetResizable(true);
+    // 显式开启横向滚动条：widgetResizable(true) 下默认横向策略是 Ignored，
+    // 溢出内容会被静默裁掉而不出现滚动条
+scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scrollArea->setFrameShape(QFrame::NoFrame);
 
     auto *inner = new QWidget();
@@ -36,7 +43,7 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
 
     // ── 状态栏 ──
     m_status = new QLabel("正在检测…");
-    m_status->setStyleSheet("color: #666;");
+    m_status->setProperty("role", "dim");
     layout->addWidget(m_status);
 
     // ==================================================
@@ -158,7 +165,7 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
     ctrlOuter->addLayout(ctrlDetectRow);
 
     m_ctrlStatusLabel = new QLabel("未检测");
-    m_ctrlStatusLabel->setStyleSheet("color: #888;");
+    m_ctrlStatusLabel->setProperty("role", "mute");
     ctrlOuter->addWidget(m_ctrlStatusLabel);
 
     m_ctrlListLabel = new QLabel("");
@@ -196,7 +203,7 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
     {
         auto *p = new QProcess(this);
         auto *noneLbl = new QLabel("正在检测游戏启动器…");
-        noneLbl->setStyleSheet("color: #888;");
+        noneLbl->setProperty("role", "mute");
         gameL->addWidget(noneLbl, 1);
 
         connect(p, &QProcess::finished, this, [p, gameL, noneLbl](int, QProcess::ExitStatus) {
@@ -246,7 +253,7 @@ EntertainmentPage::EntertainmentPage(QWidget *parent)
 
             if (seen.isEmpty()) {
                 auto *lbl = new QLabel("未检测到 Steam / GOG Galaxy");
-                lbl->setStyleSheet("color: #999;");
+                lbl->setProperty("role", "mute");
                 gameL->addWidget(lbl, 1);
             }
             gameL->addStretch();

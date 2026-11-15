@@ -15,8 +15,17 @@
 
 // ── 工具函数 ──
 
-// 同步执行一条 VBoxManage 命令. 成功返回 0; err 携带失败原因.
-static int runVBox(const QStringList &args, QString *err)
+// VBoxManage 超时分级. 原来所有命令共用 180s 上限, 但 VBox 内核模块缺失时
+// (/dev/vboxdrv 不存在) VBoxManage 会挂在 IPC 上不返回, 于是启动阶段一条只读的
+// "list runningvms" 就能把界面冻住三分钟. 查询类命令不该享受建盘级的耐心.
+enum VboxTimeout {
+    VboxQueryTimeout = 8000,    // 只读查询: list vms / list runningvms / showvminfo
+    VboxOpTimeout    = 180000,  // 建盘、克隆、改配置等确实慢的操作
+};
+
+// 同步执行一条 VBoxManage 命令. 成功返回 0; 超时返回 -2 并终止子进程.
+// 默认按查询处理, 慢操作请显式传 VboxOpTimeout.
+static int runVBox(const QStringList &args, QString *err, int timeoutMs = VboxQueryTimeout)
 {
     QProcess proc;
     proc.start("VBoxManage", args);
@@ -24,7 +33,18 @@ static int runVBox(const QStringList &args, QString *err)
         if (err) *err = QString("无法启动 VBoxManage: %1").arg(proc.errorString());
         return -1;
     }
-    proc.waitForFinished(180000);  // 创建/建盘可能较慢
+    if (!proc.waitForFinished(timeoutMs)) {
+        proc.kill();
+        proc.waitForFinished(2000);
+        if (proc.state() != QProcess::NotRunning)
+            proc.waitForFinished(3000);   // 仍不退出就不等了, 交由系统回收
+        if (err)
+            *err = QString("VBoxManage %1 超过 %2 秒未响应, 已终止."
+                           " 若 VirtualBox 内核模块未加载(/dev/vboxdrv 不存在),"
+                           " 请安装 virtualbox-dkms 后重启.")
+                       .arg(args.join(" ")).arg(timeoutMs / 1000);
+        return -2;
+    }
     QString text = QString::fromUtf8(proc.readAllStandardOutput())
                  + QString::fromUtf8(proc.readAllStandardError());
     int rc = proc.exitCode();
@@ -65,7 +85,7 @@ static QString resolveBackend(const QString &backend)
 bool VirtualBox::vmExists(const QString &name)
 {
     QString out;
-    if (runVBox({"list", "vms"}, &out) != 0) return false;
+    if (runVBox({"list", "vms"}, &out, VboxQueryTimeout) != 0) return false;
     // 行格式: "name" {uuid}
     QRegularExpression re("^\\s*\"" + QRegularExpression::escape(name) + "\"\\s",
                           QRegularExpression::MultilineOption);
@@ -76,7 +96,7 @@ QSet<QString> VirtualBox::runningVMs()
 {
     QSet<QString> names;
     QString out;
-    if (runVBox({"list", "runningvms"}, &out) != 0) return names;
+    if (runVBox({"list", "runningvms"}, &out, VboxQueryTimeout) != 0) return names;
     // 行格式: "name" {uuid}
     QRegularExpression re("^\\s*\"([^\"]+)\"\\s*\\{",
                           QRegularExpression::MultilineOption);
@@ -112,16 +132,16 @@ bool VirtualBox::prepare(const VMConfig &vm, QString *err)
     // ── 新建 ──
     // 1) createvm (若 .vbox 残留未注册, 自动 registervm 复用而非报错)
     QString createOut;
-    int rc = runVBox({"createvm", "--name", name, "--ostype", vm.ostype, "--register"}, &createOut);
+    int rc = runVBox({"createvm", "--name", name, "--ostype", vm.ostype, "--register"}, &createOut, VboxOpTimeout);
     if (rc != 0 && createOut.contains("invalid guest OS type", Qt::CaseInsensitive)) {
         // 旧配置里的 ostype 可能是界面名或无效 ID (如 Windows11): 回退通用 64 位 Windows
         Logger::log("VirtualBox", QString("⚠️ ostype '%1' 无效, 回退 WindowsNT_64").arg(vm.ostype));
-        rc = runVBox({"createvm", "--name", name, "--ostype", "WindowsNT_64", "--register"}, &createOut);
+        rc = runVBox({"createvm", "--name", name, "--ostype", "WindowsNT_64", "--register"}, &createOut, VboxOpTimeout);
     }
     if (rc != 0) {
         if (createOut.contains("already exists", Qt::CaseInsensitive)) {
             QString vboxFile = QDir::homePath() + "/VirtualBox VMs/" + name + "/" + name + ".vbox";
-            if (runVBox({"registervm", vboxFile}, err) != 0) {
+            if (runVBox({"registervm", vboxFile}, err, VboxOpTimeout) != 0) {
                 if (err) *err = "复用残留 VM 配置失败: " + *err;
                 return false;
             }
@@ -151,7 +171,7 @@ bool VirtualBox::start(const QString &name, bool headless)
 {
     QString err;
     QStringList args = {"startvm", name, "--type", headless ? "headless" : "gui"};
-    if (int rc = runVBox(args, &err); rc != 0) {
+    if (int rc = runVBox(args, &err, VboxOpTimeout); rc != 0) {
         // 重复点击启动 (或状态表尚未刷新) 时, VBox 会以会话锁拒绝:
         // "The machine 'xxx' is already locked by a session".
         // 此时虚机多半正在启动或已经跑起来了, 轮询确认后再判定成败, 避免误报.
@@ -176,7 +196,7 @@ bool VirtualBox::stop(const QString &name, bool force)
 {
     QString err;
     QStringList args = {"controlvm", name, force ? "poweroff" : "shutdown"};
-    if (int rc = runVBox(args, &err); rc != 0) {
+    if (int rc = runVBox(args, &err, VboxOpTimeout); rc != 0) {
         Logger::log("VirtualBox", QString("❌ 停止失败 %1: %2").arg(name, err));
         return false;
     }
@@ -202,7 +222,7 @@ static VboxLayout readLayout(const QString &vmName)
 {
     VboxLayout lay;
     QString out;
-    if (runVBox({"showvminfo", vmName, "--machinereadable"}, &out) != 0)
+    if (runVBox({"showvminfo", vmName, "--machinereadable"}, &out, VboxQueryTimeout) != 0)
         return lay;
 
     for (int i = 0; i < 8; ++i) {
@@ -263,7 +283,7 @@ static bool attachDisks(const VMConfig &vm, QString *err)
             QString out;
             if (runVBox({"createmedium", "disk", "--filename", dd.path,
                          "--size", QString::number(vm.vboxDiskSize),
-                         "--format", vboxFormat(dd.format)}, &out) != 0) {
+                         "--format", vboxFormat(dd.format)}, &out, VboxOpTimeout) != 0) {
                 if (dd.system) {
                     if (err) *err = "创建系统盘失败: " + out;
                     return false;
@@ -278,7 +298,7 @@ static bool attachDisks(const VMConfig &vm, QString *err)
         QString out;
         if (runVBox({"storageattach", name, "--storagectl", "SATA",
                      "--port", QString::number(port), "--type", "hdd",
-                     "--medium", dd.path}, &out) != 0) {
+                     "--medium", dd.path}, &out, VboxOpTimeout) != 0) {
             if (dd.system) {
                 if (err) *err = "挂载系统盘失败: " + out;
                 return false;
@@ -293,7 +313,7 @@ static bool attachDisks(const VMConfig &vm, QString *err)
         QString out;
         if (runVBox({"storageattach", name, "--storagectl", "SATA",
                      "--port", QString::number(port), "--type", "dvddrive",
-                     "--medium", vm.iso}, &out) != 0) {
+                     "--medium", vm.iso}, &out, VboxOpTimeout) != 0) {
             // ISO 可能是占位路径 (尚未选择): 仅告警, 不阻断启动
             Logger::log("VirtualBox", QString("⚠️ ISO 挂载失败 (%1), 可能尚未选择镜像").arg(vm.iso));
         }
@@ -311,10 +331,10 @@ static int addController(const QString &vmName, const QString &ctrlName,
     if (it != lay.portcounts.constEnd()) {
         if (it.value() >= portcount) return 0;  // 已存在且端口够用
         return runVBox({"storagectl", vmName, "--name", ctrlName,
-                        "--portcount", QString::number(portcount)}, err);
+                        "--portcount", QString::number(portcount)}, err, VboxOpTimeout);
     }
     return runVBox({"storagectl", vmName, "--name", ctrlName, "--add", type,
-                    "--portcount", QString::number(portcount)}, err);
+                    "--portcount", QString::number(portcount)}, err, VboxOpTimeout);
 }
 
 static int applySettings(const VMConfig &vm, QString *err)
@@ -350,7 +370,7 @@ static int applySettings(const VMConfig &vm, QString *err)
     if (!vm.vboxNicModel.isEmpty())
         a << "--nic-type1" << vm.vboxNicModel;
 
-    return runVBox(a, err);
+    return runVBox(a, err, VboxOpTimeout);
 }
 
 // NAT 端口转发: 先删现有规则, 再按配置重建. bridged 模式无 NAT, 清空即可.
@@ -361,7 +381,7 @@ static void applyNatpf(const VMConfig &vm)
     const VboxLayout lay = readLayout(name);
 
     for (const auto &ruleName : lay.natpfNames)
-        runVBox({"modifyvm", name, "--natpf1", "delete", ruleName}, nullptr);
+        runVBox({"modifyvm", name, "--natpf1", "delete", ruleName}, nullptr, VboxOpTimeout);
 
     if (vm.vboxNicType != "nat")
         return;
@@ -372,7 +392,7 @@ static void applyNatpf(const VMConfig &vm)
         QString proto = (pf.protocol.toLower() == "udp") ? "udp" : "tcp";
         QString rule  = QString("pf%1,%2,,%3,,%4").arg(i).arg(proto).arg(pf.hostPort).arg(pf.guestPort);
         QString out;
-        if (runVBox({"modifyvm", name, "--natpf1", rule}, &out) != 0)
+        if (runVBox({"modifyvm", name, "--natpf1", rule}, &out, VboxOpTimeout) != 0)
             Logger::log("VirtualBox", QString("⚠️ 端口转发 %1 写入失败: %2").arg(rule, out));
     }
 }

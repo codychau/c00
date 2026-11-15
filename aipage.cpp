@@ -21,6 +21,10 @@
 #include <toml++/toml.h>
 #include <fstream>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 // ── 阻止鼠标滚轮改变控件值 ──
 class NoWheelFilter : public QObject
 {
@@ -42,10 +46,13 @@ AIPage::AIPage(QWidget *parent)
     m_configDir = QDir::homePath() + "/.config/systemd/user";
 
     auto *outer = new QVBoxLayout(this);
-    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setContentsMargins(0, kTopbarInset, 0, 0);
 
     auto *scroll = new QScrollArea();
     scroll->setWidgetResizable(true);
+    // 显式开启横向滚动条：widgetResizable(true) 下默认横向策略是 Ignored，
+    // 溢出内容会被静默裁掉而不出现滚动条
+scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     scroll->setFrameShape(QFrame::NoFrame);
 
     auto *inner = new QWidget();

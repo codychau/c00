@@ -53,7 +53,7 @@ StorageDevicePage::StorageDevicePage(QWidget *parent)
     // ── 底部按钮行 ──
     auto *row = new QHBoxLayout();
     m_status = new QLabel("双击设备行查看详情");
-    m_status->setStyleSheet("color: #888;");
+    m_status->setProperty("role", "mute");
     row->addWidget(m_status, 1);
 
     m_formatBtn = new QPushButton("🔧 格式化");

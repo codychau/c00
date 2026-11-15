@@ -1,10 +1,15 @@
 #include "statuspage.h"
+#include "theme.h"
+
+// 与 MainWindow 的顶栏高度保持一致（见 mainwindow.cpp 的 kTopbarHeight）
+static constexpr int kTopbarInset = 52;
 #include "shutdowndialog.h"
 #include "healthmonitor.h"
 #include "adminhelper.h"
 #include "watchdoginstalldialog.h"
 
 #include <QVBoxLayout>
+#include <QTimer>
 #include <QHBoxLayout>
 #include <QGridLayout>
 #include <QGroupBox>
@@ -44,11 +49,17 @@ StatusPage::StatusPage(QWidget *parent)
     auto *scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
+    // 必须显式开启横向滚动条：widgetResizable(true) 下默认策略是 Ignored，
+    // 横向溢出既不滚动也不提示，内容会被静默裁掉（窄窗口时概览右列首当其冲）
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
     auto *container = new QWidget();
     auto *layout = new QVBoxLayout(container);
     layout->setSpacing(10);
-    layout->setContentsMargins(16, 16, 16, 16);
+    // 顶部留出一个顶栏的高度：主窗口的堆栈是铺满的，顶栏以浮层形式盖在
+    // 内容之上做毛玻璃。留白保证正文不被标题压住，而滚动时正文会滑到玻璃
+    // 下方 —— 这正是毛玻璃该有的效果（backdrop 会跟着变）。
+    layout->setContentsMargins(16, kTopbarInset, 16, 16);
 
     // ── 标题 ──
     auto *title = new QLabel("📊 系统状态仪表");
@@ -65,6 +76,10 @@ StatusPage::StatusPage(QWidget *parent)
     m_board = new MotherboardWidget(sysGroup);
     m_board->setMinimumSize(340, 500);
     m_board->setMaximumWidth(500);
+    // 主板最小宽 340，右侧概览需要约 520（两组 100px 标签 + 值）。
+    // 不锁滚动区最小宽的话，widgetResizable 会把内容压到可视宽，
+    // 概览右列直接被挤出边界且不出现滚动条（横向策略形同虚设）。
+    scroll->setMinimumWidth(1000);
     sysRow->addWidget(m_board);
     connect(m_board, &MotherboardWidget::partClicked, this, &StatusPage::onBoardPartClicked);
 
@@ -78,9 +93,11 @@ StatusPage::StatusPage(QWidget *parent)
     };
     for (int i = 0; i < 12; ++i) {
         auto *k = new QLabel(QString("%1：").arg(keys[i]));
-        k->setStyleSheet("font-weight: bold; color: #555;");
+        k->setProperty("role", "key");
         k->setFixedWidth(100);
         m_labels[i] = new QLabel("—");
+        m_labels[i]->setProperty("role", "val");
+        m_labels[i]->setMinimumWidth(150);   // 内核名、磁盘容量等较长文本不被压缩
         grid->addWidget(k, i / 2, (i % 2) * 2);
         grid->addWidget(m_labels[i], i / 2, (i % 2) * 2 + 1);
     }
@@ -105,7 +122,7 @@ StatusPage::StatusPage(QWidget *parent)
     diskLayout->addWidget(m_diskTable);
 
     m_diskStatus = new QLabel("检测中…");
-    m_diskStatus->setStyleSheet("color: #888; font-size: 12px;");
+    m_diskStatus->setProperty("role", "mute");
     diskLayout->addWidget(m_diskStatus);
 
     layout->addWidget(makeCollapsible("磁盘状态", m_diskBody, true, m_diskToggle));
@@ -361,10 +378,8 @@ QWidget *StatusPage::makeCollapsible(const QString &title, QWidget *body, bool c
 
     toggle = new QPushButton();
     toggle->setCursor(Qt::PointingHandCursor);
-    toggle->setStyleSheet(
-        "QPushButton { text-align: left; padding: 6px 10px; font-weight: bold;"
-        " background: #eef2f7; border: 1px solid #cbd5e1; border-radius: 6px; }"
-        "QPushButton:hover { background: #e2e8f0; }");
+    // 配色交给全局主题：QPushButton[role="toggle"]（见 theme.cpp）
+    toggle->setProperty("role", "toggle");
 
     body->setVisible(!collapsed);
     toggle->setText(QString("%1  %2").arg(collapsed ? "▸" : "▾", title));
@@ -594,9 +609,9 @@ void StatusPage::fetchDiskTemp(const QString &devName, int tableRow)
             if (degreePos > 0) {
                 int t = tempStr.left(degreePos).toInt();
                 if (t > 60)
-                    item->setForeground(QColor("#ef4444"));
+                    item->setForeground(Theme::bad());
                 else if (t > 50)
-                    item->setForeground(QColor("#eab308"));
+                    item->setForeground(Theme::warn());
             }
         }
         m_tempCache[cacheKey] = tempStr;
@@ -688,15 +703,20 @@ void StatusPage::fetchAllTemps()
         if (hasPasswordlessSmartctl()) {
             m_smartSetupDone = true; // 已配置过，直接读取
         } else {
-            bool ok = false;
-            QString password = QInputDialog::getText(
-                this, "首次授权（一次性）",
-                "读取硬盘温度需要调用 smartctl。\n"
-                "请输入管理员(root)密码，将自动配置免密权限（仅一次），\n"
-                "之后每次打开本软件都能直接显示硬盘温度。",
-                QLineEdit::Password, QString(), &ok);
-            if (ok) setupSmartctlSudo(password);
-            else m_diskStatus->setText("未授权，硬盘温度可能无法读取");
+            // 推迟到事件循环空闲再弹：本函数由 showEvent → refresh() 同步调用，
+            // 在这里直接弹模态框等于"软件刚打开就先索要 root 密码"，
+            // 模态循环会挡住首轮渲染，界面还没出来就被对话框盖住。
+            QTimer::singleShot(0, this, [this]() {
+                bool ok = false;
+                const QString password = QInputDialog::getText(
+                    this, "首次授权（一次性）",
+                    "读取硬盘温度需要调用 smartctl。\n"
+                    "请输入管理员(root)密码，将自动配置免密权限（仅一次），\n"
+                    "之后每次打开本软件都能直接显示硬盘温度。",
+                    QLineEdit::Password, QString(), &ok);
+                if (ok) setupSmartctlSudo(password);
+                else m_diskStatus->setText("未授权，硬盘温度可能无法读取");
+            });
         }
     }
 

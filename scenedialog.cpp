@@ -47,7 +47,7 @@ SceneDialog::SceneDialog(const Scene &scene, QWidget *parent)
         "为场景勾选需要控制的系统服务和虚机。定时场景在开始时间执行「启动」项，结束时间执行「停止」项；"
         "手动场景请在场景页面下方勾选「手动触发场景」，只通过「立即执行启动 / 结束」按钮触发。");
     hint->setWordWrap(true);
-    hint->setStyleSheet("color: #888;");
+    hint->setProperty("role", "mute");
     layout->addWidget(hint);
 
     auto *tabs = new QTabWidget();
@@ -98,7 +98,7 @@ SceneDialog::SceneDialog(const Scene &scene, QWidget *parent)
     auto *vmLayout = new QVBoxLayout(vmTab);
 
     auto *vmHint = new QLabel("选择虚机管理中的虚机：启动项会在开始时间启动，停止项会在结束时间关机。");
-    vmHint->setStyleSheet("color: #888;");
+    vmHint->setProperty("role", "mute");
     vmHint->setWordWrap(true);
     vmLayout->addWidget(vmHint);
 

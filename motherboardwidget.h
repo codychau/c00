@@ -9,6 +9,7 @@
 #include <QStringList>
 
 class QPaintEvent;
+class QResizeEvent;
 class QMouseEvent;
 class QEvent;
 class QPainter;
@@ -67,6 +68,7 @@ signals:
     void partClicked(const QString &id);
 
 protected:
+    void resizeEvent(QResizeEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void mouseMoveEvent(QMouseEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;

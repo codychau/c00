@@ -22,6 +22,10 @@
 
 #include <algorithm>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 namespace {
 const char *kSceneTag = "SCENE";
 
@@ -36,7 +40,7 @@ ScenePage::ScenePage(VMPage *vmPage, QWidget *parent)
     , m_vmPage(vmPage)
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setContentsMargins(16, kTopbarInset, 16, 16);
 
     auto *title = new QLabel("🎬 场景设定");
     QFont f = title->font(); f.setPointSize(14); f.setBold(true);
@@ -46,7 +50,7 @@ ScenePage::ScenePage(VMPage *vmPage, QWidget *parent)
     auto *hint = new QLabel(
         "定时场景会在「开始时间」启动指定服务 / 虚机，在「结束时间」停止它们；"
         "手动场景只通过「立即执行启动 / 结束」按钮触发。定时执行需要保持工具箱运行。");
-    hint->setStyleSheet("color: #888;");
+    hint->setProperty("role", "mute");
     hint->setWordWrap(true);
     layout->addWidget(hint);
 
@@ -149,14 +153,14 @@ ScenePage::ScenePage(VMPage *vmPage, QWidget *parent)
     auto *windowHint = new QLabel(
         "开始与结束时间相同表示全天生效；开始晚于结束时为跨午夜窗口。"
         "勾选「手动触发场景」后，时间设置会被禁用。");
-    windowHint->setStyleSheet("color: #888;");
+    windowHint->setProperty("role", "mute");
     windowHint->setWordWrap(true);
     grid->addWidget(windowHint, 5, 0, 1, 6);
 
     layout->addWidget(m_timeBox);
 
     m_statusLabel = new QLabel("");
-    m_statusLabel->setStyleSheet("color: #666;");
+    m_statusLabel->setProperty("role", "dim");
     m_statusLabel->setWordWrap(true);
     layout->addWidget(m_statusLabel);
 
