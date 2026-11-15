@@ -182,6 +182,25 @@ QString makeShareSection(const SmbShare &share);
 // 返回空串表示可安全写入 smb.conf，否则返回拒绝原因。
 QString validateSharePath(const QString &path);
 
+// 由分区名/挂载点生成一个合法且可读的默认共享名，避免用户手输踩坑。
+// 例如挂载点 /mnt/d → "d"；分区 sda1 无挂载点 → "sda1"。结果会经过
+// validateShareName 的约束（非法字符替换为 -，命中保留名则加后缀）。
+QString suggestShareName(const QString &mountpoint, const QString &partitionName);
+
+// 从已枚举的块设备里挑出「系统挂载点」：根、/boot、/home 以及系统盘上的
+// 任何挂载点。共享路径命中它们要红字强确认。
+// 刻意从已有 Block 列表推导，而不是另读一遍 /proc/mounts —— 两处读挂载表
+// 迟早会因为解析口径不同而给出矛盾答案。
+QStringList systemMountPoints(const QVector<Block> &blocks,
+                              const QString &procMounts);
+
+// 当前登录用户名，作为 SMB「映射用户」的默认值。
+QString currentUserName();
+
+// 单分区 SMB 的默认导出路径：就是该分区的挂载点。
+// 返回空串表示未挂载，UI 应提示"先挂载才能共享"。
+QString defaultSharePath(const QString &mountpoint);
+
 } // namespace Nas
 
 #endif // NASMODEL_H

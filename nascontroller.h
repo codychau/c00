@@ -51,8 +51,14 @@ public:
         bool kernelModules = false;   // target_core_mod 等模块文件在不在
         bool losetup = false;
         bool nasrsBinary = false;     // 自研引擎可执行文件是否找到
+// SMB 相关：Samba 是可选功能，不能并进 readyForMdadm 的 missing 里，
+// 否则没装 Samba 的用户连 RAID 都会被提示环境未就绪。
+bool smbd       = false;      // smbd 在不在
+bool testparm   = false;      // 能否离线校验 smb.conf
+bool smbService = false;      // systemd 是否有 smbd.service
         QStringList missing;          // 人类可读的缺失项
-        bool readyForMdadm() const { return mdadm && targetCli && configfsMounted; }
+        bool readyForSmb() const { return smbd && testparm && smbService; }
+bool readyForMdadm() const { return mdadm && targetCli && configfsMounted; }
     };
 
     explicit NasController(QObject *parent = nullptr);
@@ -75,6 +81,16 @@ public:
     QVector<Step> planIscsiTeardown(const QString &iqn,
                                     const QString &backingPath) const;
     QVector<Step> planStop(const QString &deviceOrVolume) const;
+
+// SMB：把单个分区路径作为共享导出。写入 /etc/samba/smb.d 下的独立片段，
+// 不直接改主 smb.conf（便于撤销、也避免和发行版自带配置打架）。
+// shareSection 由 Nas::makeShareSection 生成（已做 ini 转义）。
+// 返回的命令**不含** smbpasswd：改用户密码永远是单独的手动步骤，
+// 不混进这条链，免得一次确认顺带把用户 Samba 密码改了。
+QVector<Step> planSmbExport(const QString &shareName,
+                            const QString &shareSection) const;
+// 撤销：删掉该片段并 reload。文件名按共享名推导，可预测、好核对。
+QVector<Step> planSmbRemove(const QString &shareName) const;
 
     // ── 执行 ──
     // 按序执行；任一步失败立即停止并把 stderr 交给 stepFailed。

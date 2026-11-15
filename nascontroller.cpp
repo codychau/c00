@@ -1,4 +1,5 @@
 #include "nascontroller.h"
+#include "nasmodel.h"
 
 #include <QProcess>
 #include <QFile>
@@ -116,6 +117,12 @@ NasController::Env NasController::probe() const
     e.losetup     = !findTool("losetup").isEmpty();
     e.nasrsBinary = !nasrsBinaryPath().isEmpty();
 
+// SMB：smbd 多在 /usr/sbin，findTool 已覆盖该路径
+e.smbd     = !findTool("smbd").isEmpty();
+e.testparm = !findTool("testparm").isEmpty();
+e.smbService = QFileInfo::exists("/usr/lib/systemd/system/smbd.service")
+            || QFileInfo::exists("/lib/systemd/system/smbd.service");
+
     // configfs 是否挂载：LIO 的一切都建立在它上面
     QFile mounts("/proc/mounts");
     if (mounts.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -141,6 +148,8 @@ NasController::Env NasController::probe() const
     if (!e.kernelModules) e.missing << "target_core_mod 内核模块";
     // loop 在本机是 built-in，所以不检查 loop.ko 是否存在，只看 losetup
     if (!e.losetup)       e.missing << "losetup（自研引擎需要）";
+    // 注意：smbd/testparm/smb.service 缺失**不进** missing。SMB 是可选功能，
+    // 没装 Samba 的人用 RAID 不该看到环境未就绪。SMB 页自己判断 readyForSmb。
 
     return e;
 }
@@ -402,6 +411,101 @@ NasController::planIscsiTeardown(const QString &iqn, const QString &backingPath)
         l.destructive = false;
         steps.append(l);
     }
+    return steps;
+}
+
+// SMB 片段文件：/etc/samba/smb.d/<name>.conf
+// 主 smb.conf 需 include /etc/samba/smb.d/*.conf；很多发行版默认没有这一行，
+// 这里不自动改主配置，交给 UI 提示（自动改主 smb.conf 风险太高）。
+static QString smbConfPath(const QString &shareName)
+{
+    QString n = shareName;
+    n.replace(QRegularExpression("[^A-Za-z0-9._-]"), "_");
+    if (n.isEmpty()) n = "share";
+    return "/etc/samba/smb.d/" + n + ".conf";
+}
+
+QVector<NasController::Step>
+NasController::planSmbExport(const QString &shareName,
+                             const QString &shareSection) const
+{
+    QVector<Step> steps;
+    // 共享名与配置内容都必须先过模型层校验，这里再兜一道底
+    if (!Nas::validateShareName(shareName).isEmpty()) return steps;
+    if (shareSection.trimmed().isEmpty()) return steps;
+    // 内容必须真含一个 path= 行，且该路径本身合法。这里从 [name] 段里
+    // 抠出 path 值再交给模型层校验，防止调用方绕过 makeShareSection 拼串。
+    {
+        QString pathVal;
+        for (const QString &line : shareSection.split('\n')) {
+            const QString t = line.trimmed();
+            if (t.startsWith("path =")) { pathVal = t.section('=', 1).trimmed(); break; }
+        }
+        if (pathVal.isEmpty()) return steps;
+        if (!Nas::validateSharePath(pathVal).isEmpty()) return steps;
+    }
+
+    const QString confPath = smbConfPath(shareName);
+
+    // 1) 建目录（drop-in 目录可能不存在）。非破坏。
+    Step mkdir;
+    mkdir.program = "pkexec";
+    mkdir.args = { "install", "-d", "-m", "0755", "/etc/samba/smb.d" };
+    mkdir.describe = "创建 SMB 片段目录 /etc/samba/smb.d";
+    mkdir.destructive = false;
+    steps.append(mkdir);
+
+    // 2) 写片段：用 tee 覆盖该 <name>.conf。只覆盖同名片段，不动主配置。
+    //    对同名共享是"覆盖"——这就是重复导出的语义，UI 会提示。
+    Step write;
+    write.program = "pkexec";
+    write.args = { "tee", confPath };
+    write.describe = QString("写入共享配置 %1（共享名 %2）").arg(confPath, shareName);
+    write.stdinLines = { shareSection.trimmed() };   // 经 stdin 传入，不进 argv
+    write.destructive = false;   // 覆盖的是我们自己的片段文件，非用户数据
+    steps.append(write);
+
+    // 3) testparm 离线校验：内容不合法就别 reload，免得把整个 Samba 配崩
+    Step check;
+    check.program = "pkexec";
+    check.args = { "testparm", "-s", "/etc/samba/smb.conf" };
+    check.describe = "testparm 校验 smb.conf（片段有语法错误会在这里暴露）";
+    check.destructive = false;
+    steps.append(check);
+
+    // 4) 让 smbd 重载（不 restart，避免中断已有连接）
+    Step reload;
+    reload.program = "systemctl";
+    reload.args = { "reload-or-restart", "smbd" };
+    reload.describe = "重载 smbd 使新共享生效";
+    reload.destructive = false;
+    steps.append(reload);
+
+    return steps;
+}
+
+QVector<NasController::Step>
+NasController::planSmbRemove(const QString &shareName) const
+{
+    QVector<Step> steps;
+    if (!Nas::validateShareName(shareName).isEmpty()) return steps;
+    const QString confPath = smbConfPath(shareName);
+
+    // 删片段前先看它在不在（不存在就别 rm，避免误导性的报错）
+    Step del;
+    del.program = "pkexec";
+    del.args = { "rm", "-f", confPath };
+    del.describe = QString("删除共享配置片段 %1（撤销共享 %2）").arg(confPath, shareName);
+    del.destructive = true;   // 删除配置文件，虽可恢复，仍标记为破坏性以走强确认
+    steps.append(del);
+
+    Step reload;
+    reload.program = "systemctl";
+    reload.args = { "reload-or-restart", "smbd" };
+    reload.describe = "重载 smbd 移除共享";
+    reload.destructive = false;
+    steps.append(reload);
+
     return steps;
 }
 
