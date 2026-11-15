@@ -197,6 +197,16 @@ QStringList systemMountPoints(const QVector<Block> &blocks,
 // 当前登录用户名，作为 SMB「映射用户」的默认值。
 QString currentUserName();
 
+// ── 发行版判定（给"一键装依赖"按钮把门）─────────────────────
+
+// 从 /etc/os-release 的内容判断能不能用 apt 装东西。做成纯函数、把文件
+// 内容当参数传进来，是为了能离线、无副作用地测各种发行版取值 —— 这个判断
+// 直接决定要不要在 UI 上摆一个会跑 root 命令的按钮，测不到就等于没测。
+//   aptInstallable：ID 或 ID_LIKE 里含 ubuntu/debian，即 apt 系
+// 返回 true 只说明"发行版认得 apt"，不代表 apt 一定在 PATH —— 那是
+// 控制器另外查的事，两件事分开，缺一个都不该出现安装按钮。
+bool aptInstallable(const QString &osReleaseText);
+
 // ── RAID FS：挂载点校验 ──────────────────────────────────
 
 // 挂载点必须是 /mnt 直接子目录。理由有三条，缺一不可：

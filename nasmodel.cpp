@@ -832,4 +832,31 @@ QString mountPointBusy(const QString &path, const QStringList &existingEntries)
     return QString("目录已存在且有 ") + QString::number(existingEntries.size()) +
            QString(" 项内容，挂载后这些会暂时看不见");
 }
+
+bool aptInstallable(const QString &osReleaseText)
+{
+    // 只认 ID= / ID_LIKE= 两行。os-release 的格式是 KEY=VALUE，值可带引号，
+    // ID_LIKE 可含多个空格分隔的父系（如 debian）。用逐行解析而不是整串 find：
+    // 整串 find("ubuntu") 会被 PRETTY_NAME="Ubuntu 26.04" 命中，也会把任意
+    // 注释里提到的 ubuntu 当成是 —— 那是把按钮的开关交给了一段自由文本。
+    for (const QString &raw : osReleaseText.split(QChar(10))) {
+        const QString line = raw.trimmed();
+        if (!(line.startsWith("ID=") || line.startsWith("ID_LIKE="))) continue;
+        // 取第一个 = 之后的部分（KEY=VALUE）；用 indexOf 而非 section，意图更直白
+        const int eq = line.indexOf(QChar(61));
+        if (eq < 0) continue;
+        QString val = line.mid(eq + 1).trimmed();
+        // 去掉包裹的双引号
+        if (val.startsWith(QChar(34)) && val.endsWith(QChar(34)) && val.size() >= 2)
+            val = val.mid(1, val.size() - 2);
+        // 值是空格分隔的列表，逐个比对（大小写不敏感：os-release 约定小写，
+        // 但不依赖它一定遵守）
+        const QStringList parts = val.split(QChar(32), Qt::SkipEmptyParts);
+        for (const QString &p : parts) {
+            const QString lp = p.toLower();
+            if (lp == "ubuntu" || lp == "debian") return true;
+        }
+    }
+    return false;
+}
 } // namespace Nas

@@ -53,6 +53,8 @@ public:
         bool nasrsBinary = false;     // 自研引擎可执行文件是否找到
     // RAID FS 走 FUSE，与 iSCSI 那条完全不是一套依赖：不要并进
     // readyForMdadm 的 missing，否则没装 fuse 的用户连 iSCSI 都被提示未就绪。
+    bool aptAvailable = false;    // apt-get 在不在（安装按钮的另一半条件）
+    bool aptFamily  = false;    // 发行版是否 ubuntu/debian 系（os-release 判定）
     bool fuseDevice = false;      // /dev/fuse 在不在
     bool fuseMount  = false;      // mount.fuse / fusermount3 在不在
 // SMB 相关：Samba 是可选功能，不能并进 readyForMdadm 的 missing 里，
@@ -65,6 +67,10 @@ bool smbService = false;      // systemd 是否有 smbd.service
     // 注意这里只表示"环境具备挂 FUSE 的条件"，不表示 raidfs 能用：
     // nasrs 目前还没有实现导出（见 planRaidfsMount 的说明）。
     bool readyForFuse() const { return nasrsBinary && fuseDevice && fuseMount; }
+    // 能不能"一键装 fuse"：只在 fuse 助手还缺、且确实是 apt 系、且 apt 在时成立。
+    // 注意这里不含 fuseDevice —— /dev/fuse 缺不是 apt 能补的（那是内核 fuse 模块），
+    // 真缺它时该提示"加载 fuse 模块"而不是装包。装包只解决 fusermount3。
+    bool canInstallFuse() const { return !fuseMount && aptFamily && aptAvailable; }
 bool readyForMdadm() const { return mdadm && targetCli && configfsMounted; }
     };
 
@@ -100,6 +106,8 @@ bool readyForMdadm() const { return mdadm && targetCli && configfsMounted; }
 QVector<Step> planRaidfsMount(const Nas::Plan &plan, const QString &mountPoint) const;
 // 卸载。umount 对未挂载目标会失败，这一步本身就是那道检查。
 QVector<Step> planRaidfsUnmount(const QString &mountPoint) const;
+    // 一键装 fuse3：仅在 Env::canInstallFuse() 为真时由页面调用。
+    QVector<Step> planInstallFuse() const;
 
 // SMB：把单个分区路径作为共享导出。写入 /etc/samba/smb.d 下的独立片段，
 // 不直接改主 smb.conf（便于撤销、也避免和发行版自带配置打架）。

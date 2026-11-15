@@ -77,6 +77,7 @@ private:
     void refreshRaidFsStatus();
     void onMountFsClicked();
     void onUmountFsClicked();
+    void onInstallFuseClicked();
     // 逐条展示命令并要用户确认；返回要执行的步骤（可能为空 = 用户取消）
     QVector<NasController::Step> confirmSteps(const QVector<NasController::Step> &steps,
                                               const QString &title);
@@ -151,6 +152,7 @@ private:
     QLabel    *m_fsDeps = nullptr;
     QLabel    *m_fsNote = nullptr;
     QPushButton *m_umountBtn = nullptr;  // 撤销挂载
+    QPushButton *m_installFuseBtn = nullptr; // 一键装 fuse3（仅 apt 系且缺时出现）
 };
 
 #endif // NASPAGE_H
