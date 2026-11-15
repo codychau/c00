@@ -46,7 +46,7 @@ PCIDialog::PCIDialog(QWidget *parent)
 
     // 状态
     m_statusLabel = new QLabel("正在扫描 PCI 设备...");
-    m_statusLabel->setStyleSheet("color: #888;");
+    m_statusLabel->setProperty("role", "mute");
     layout->addWidget(m_statusLabel);
 
     // 按钮

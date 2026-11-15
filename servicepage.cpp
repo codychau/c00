@@ -10,11 +10,15 @@
 #include <QSharedPointer>
 #include <QFile>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 ServicePage::ServicePage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setContentsMargins(16, kTopbarInset, 16, 16);
 
     auto *title = new QLabel("⚙️ 服务控制");
     QFont f = title->font(); f.setPointSize(14); f.setBold(true);
@@ -107,7 +111,7 @@ ServicePage::ServicePage(QWidget *parent)
     layout->addWidget(m_table);
 
     m_selectedLabel = new QLabel("未选择服务");
-    m_selectedLabel->setStyleSheet("color: #888;");
+    m_selectedLabel->setProperty("role", "mute");
     layout->addWidget(m_selectedLabel);
 
     auto *row = new QHBoxLayout();
@@ -118,7 +122,7 @@ ServicePage::ServicePage(QWidget *parent)
     row->addStretch();
 
     m_status = new QLabel("");
-    m_status->setStyleSheet("color: #666;");
+    m_status->setProperty("role", "dim");
     row->addWidget(m_status, 1);
 
     m_refreshBtn = new QPushButton("刷新");

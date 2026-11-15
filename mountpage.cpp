@@ -6,11 +6,15 @@
 #include <QRegularExpression>
 #include <QMessageBox>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 MountPage::MountPage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setContentsMargins(0, kTopbarInset, 0, 0);
 
     m_table = new QTableWidget(0, 5);
     m_table->setHorizontalHeaderLabels({"设备", "容量", "已用", "可用", "挂载点"});
@@ -25,7 +29,7 @@ MountPage::MountPage(QWidget *parent)
 
     auto *row = new QHBoxLayout();
     m_status = new QLabel("就绪");
-    m_status->setStyleSheet("color: #888;");
+    m_status->setProperty("role", "mute");
     row->addWidget(m_status, 1);
 
     m_unmountBtn = new QPushButton("⏏️ 卸载");

@@ -4,11 +4,15 @@
 #include <QProcess>
 #include <QApplication>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 AboutPage::AboutPage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(20, 20, 20, 20);
+    layout->setContentsMargins(20, kTopbarInset, 20, 20);
     layout->setSpacing(12);
 
     auto *title = new QLabel("ℹ️  关于家用服务器工具箱");

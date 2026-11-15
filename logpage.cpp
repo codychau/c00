@@ -9,11 +9,15 @@
 #include <QRegularExpression>
 #include <QMessageBox>
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 LogPage::LogPage(QWidget *parent)
     : QWidget(parent)
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setContentsMargins(0, kTopbarInset, 0, 0);
 
     // ── 标题 ──
     auto *title = new QLabel("📋  日志管理");
@@ -89,7 +93,7 @@ LogPage::LogPage(QWidget *parent)
     // ── 底部状态 ──
     auto *bottomRow = new QHBoxLayout();
     m_status = new QLabel("");
-    m_status->setStyleSheet("color: #888;");
+    m_status->setProperty("role", "mute");
     bottomRow->addWidget(m_status, 1);
 
     m_refreshBtn = new QPushButton("🔄 刷新");

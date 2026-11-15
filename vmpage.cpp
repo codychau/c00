@@ -24,6 +24,10 @@
 
 #include "logger.h"
 
+// 与 MainWindow 顶栏高度一致：主窗口的页面堆栈铺满整块主区，顶栏以浮层
+// 形式盖在内容上做毛玻璃，因此正文要自行让出这段顶部空间。
+static constexpr int kTopbarInset = 52;
+
 // 列索引
 enum Col { ColName = 0, ColCPU, ColMem, ColDisk, ColNet, ColVNC, ColStatus, ColExtra, ColCount };
 
@@ -31,7 +35,7 @@ VMPage::VMPage(QWidget *parent)
     : QWidget(parent), m_mgr(VMConfigManager::defaultConfigPath())
 {
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(16, 16, 16, 16);
+    layout->setContentsMargins(16, kTopbarInset, 16, 16);
 
     auto *title = new QLabel("🖥️  虚机管理");
     QFont f = title->font(); f.setPointSize(14); f.setBold(true);
@@ -61,7 +65,7 @@ VMPage::VMPage(QWidget *parent)
     auto *btnRow = new QHBoxLayout();
 
     m_status = new QLabel("就绪");
-    m_status->setStyleSheet("color: #888;");
+    m_status->setProperty("role", "mute");
     btnRow->addWidget(m_status, 1);
 
     m_addBtn = new QPushButton("➕ 新建");

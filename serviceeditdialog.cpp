@@ -25,7 +25,7 @@ ServiceEditDialog::ServiceEditDialog(const QString &serviceName,
     auto *layout = new QVBoxLayout(this);
 
     auto *info = new QLabel(QString("文件：%1　（%2 级）").arg(filePath, scope));
-    info->setStyleSheet("color: #666;");
+    info->setProperty("role", "dim");
     info->setTextInteractionFlags(Qt::TextSelectableByMouse);
     layout->addWidget(info);
 
@@ -35,24 +35,17 @@ ServiceEditDialog::ServiceEditDialog(const QString &serviceName,
     layout->addWidget(m_editor, 1);
 
     m_status = new QLabel("");
-    m_status->setStyleSheet("color: #666;");
+    m_status->setProperty("role", "dim");
     layout->addWidget(m_status);
 
     auto *btnRow = new QHBoxLayout();
     m_saveBtn = new QPushButton("保存");
-    m_saveBtn->setStyleSheet(
-        "QPushButton { background: #16a34a; color: white; padding: 2px 12px; "
-        "border-radius: 4px; font-weight: bold; }"
-        "QPushButton:hover { background: #15803d; }"
-        "QPushButton:disabled { background: #9ca3af; }");
+    m_saveBtn->setProperty("role", "primary");
     connect(m_saveBtn, &QPushButton::clicked, this, &ServiceEditDialog::onSave);
     btnRow->addWidget(m_saveBtn);
 
     m_cancelBtn = new QPushButton("取消");
-    m_cancelBtn->setStyleSheet(
-        "QPushButton { background: #6b7280; color: white; padding: 2px 12px; "
-        "border-radius: 4px; }"
-        "QPushButton:hover { background: #4b5563; }");
+    // 取消：常规操作，直接用主题默认按钮样式，无需内联覆盖
     connect(m_cancelBtn, &QPushButton::clicked, this, &ServiceEditDialog::onCancel);
     btnRow->addWidget(m_cancelBtn);
 
@@ -73,7 +66,7 @@ void ServiceEditDialog::loadFile()
     QFile f(m_filePath);
     if (!f.open(QIODevice::ReadOnly)) {
         m_status->setText(QString("⚠️  无法读取文件：%1").arg(f.errorString()));
-        m_status->setStyleSheet("color: #e74c3c;");
+        m_status->setProperty("role", "bad");
         m_saveBtn->setEnabled(false);
         m_cancelBtn->setText("关闭");
         return;
@@ -124,7 +117,7 @@ void ServiceEditDialog::writeViaRoot()
     tmp->close();
 
     m_status->setText("正在写入（需要管理员授权）…");
-    m_status->setStyleSheet("color: #666;");
+    m_status->setProperty("role", "dim");
 
     m_proc = new QProcess(this);
     connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -145,7 +138,7 @@ void ServiceEditDialog::writeViaRoot()
 void ServiceEditDialog::reloadUnit(bool asUser)
 {
     m_status->setText("正在重新加载 unit 配置…");
-    m_status->setStyleSheet("color: #666;");
+    m_status->setProperty("role", "dim");
 
     m_proc = new QProcess(this);
     connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
@@ -159,7 +152,7 @@ void ServiceEditDialog::reloadUnit(bool asUser)
                     m_tempPath.clear();
                 }
                 m_status->setText("✅ 已保存并重新加载");
-                m_status->setStyleSheet("color: #16a34a;");
+                m_status->setProperty("role", "ok");
                 Logger::log("SERVICE", QString("服务 %1 配置已保存").arg(m_serviceName));
                 emit saved(m_serviceName);
                 accept();
@@ -178,7 +171,7 @@ void ServiceEditDialog::reloadUnit(bool asUser)
 void ServiceEditDialog::saveFailed(const QString &msg)
 {
     m_status->setText(QString("⚠️  %1").arg(msg));
-    m_status->setStyleSheet("color: #e74c3c;");
+    m_status->setProperty("role", "bad");
     m_saveBtn->setEnabled(true);
     m_cancelBtn->setEnabled(true);
     if (!m_tempPath.isEmpty()) {
