@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  按 github.com/claude（u/81847）的头像重画：橙红渐变底 + 白色放射星芒，
+  上面压一道红叉。
+
+  为什么是重画而不是贴原图：原图是 256×256 的位图，放大到 retina 会糊；
+  这里全是 path/line，任意尺寸都干净。图案本身是几何放射线，用几何图形
+  逼近得足够近，也不需要带上任何人的商标素材。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256"
+     role="img" aria-label="Claude 头像已划除">
+  <title>Claude 头像（已划除）</title>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.65" y2="1">
+      <stop offset="0" stop-color="#d97756"/>
+      <stop offset="0.55" stop-color="#d9724e"/>
+      <stop offset="1" stop-color="#db6743"/>
+    </linearGradient>
+    <clipPath id="round">
+      <rect x="0" y="0" width="256" height="256" rx="56" ry="56"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#round)">
+    <rect x="0" y="0" width="256" height="256" fill="url(#bg)"/>
+
+    <!-- 白色放射星芒：12 条，长短交替，中心留一点厚度 -->
+    <g stroke="#fafaf8" stroke-width="11" stroke-linecap="round">
+      <line x1="128" y1="128" x2="198"  y2="128"/>   <!--   0°  -->
+      <line x1="128" y1="128" x2="175"  y2="153"/>   <!--  30°  -->
+      <line x1="128" y1="128" x2="190"  y2="172"/>   <!--  45°  -->
+      <line x1="128" y1="128" x2="153"  y2="175"/>   <!--  60°  -->
+      <line x1="128" y1="128" x2="128"  y2="192"/>   <!--  90°  -->
+      <line x1="128" y1="128" x2="103"  y2="175"/>   <!-- 120°  -->
+      <line x1="128" y1="128" x2="66"   y2="172"/>   <!-- 135°  -->
+      <line x1="128" y1="128" x2="82"   y2="153"/>   <!-- 150°  -->
+      <line x1="128" y1="128" x2="58"   y2="128"/>   <!-- 180°  -->
+      <line x1="128" y1="128" x2="82"   y2="103"/>   <!-- 210°  -->
+      <line x1="128" y1="128" x2="66"   y2="84"/>    <!-- 225°  -->
+      <line x1="128" y1="128" x2="103"  y2="81"/>    <!-- 240°  -->
+      <line x1="128" y1="128" x2="128"  y2="64"/>    <!-- 270°  -->
+      <line x1="128" y1="128" x2="153"  y2="81"/>    <!-- 300°  -->
+      <line x1="128" y1="128" x2="190"  y2="84"/>    <!-- 315°  -->
+      <line x1="128" y1="128" x2="175"  y2="103"/>   <!-- 330°  -->
+    </g>
+    <circle cx="128" cy="128" r="14" fill="#fafaf8"/>
+
+    <!-- 红叉：压在图案之上，足够粗，缩到 32px 也认得出 -->
+    <g stroke="#d92d20" stroke-width="19" stroke-linecap="round">
+      <line x1="54" y1="54" x2="202" y2="202"/>
+      <line x1="202" y1="54" x2="54"  y2="202"/>
+    </g>
+  </g>
+</svg>

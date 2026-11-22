@@ -9,6 +9,8 @@ A Qt6 desktop tool for Linux, for driving the various jobs a home server has to 
 
 ![Main window: navigation on the left, system status gauges (the motherboard board shows CPU / memory / NVMe / SATA / GPU live)](doc/img/screenshot.png)
 
+<img src="doc/img/claude-banned.svg" width="72" alt="Claude avatar crossed out"> **Claude and I are sworn enemies**
+
 > The UI is a dark machine-room console style; colour tokens and implementation notes are in
 > [doc/THEME.md](doc/THEME.md). There are also 4 styled HTML mock-ups in [doc/demos/](doc/demos/).
 

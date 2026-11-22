@@ -8,6 +8,8 @@
 
 ![主介面：左側導覽 + 系統狀態儀表（主機板畫布即時顯示 CPU / 記憶體 / NVMe / SATA / GPU）](doc/img/screenshot.png)
 
+<img src="doc/img/claude-banned.svg" width="72" alt="Claude 已劃除"> **我與 Claude 不共戴天**
+
 > 介面採深色機房控制台風格；配色權杖與實作說明見 [doc/THEME.md](doc/THEME.md)；
 > 另有 4 組風格化 HTML 設計稿在 [doc/demos/](doc/demos/)。
 
