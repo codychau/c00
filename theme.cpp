@@ -150,6 +150,27 @@ QPushButton[role="danger"] {
     color: @bad@; background: @surface@; border-color: @bad@;
 }
 QPushButton[role="danger"]:hover { background: @surface3@; }
+/* 通栏「一键安装」：btn->setProperty("role", "install")
+   比常规按钮高一档（第一动作要一眼看见），但只高一档 —— 40px 那版实测把
+   机箱整块往下推了一截，通栏条压到 30px 就够了。颜色用橘黄渐变（左黄右橘），
+   比纯色更像一个"入口条"。 */
+QPushButton[role="install"] {
+    min-height: 20px; max-height: 20px; padding: 4px 14px;
+    color: @on_install@;
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 @install_hi@, stop:1 @install@);
+    border: 1px solid @install@; border-radius: 8px;
+    font-weight: 700;
+}
+QPushButton[role="install"]:hover {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                                stop:0 @install@, stop:1 @install_hi@);
+    border-color: @install_hi@;
+}
+QPushButton[role="install"]:pressed { background: @install@; }
+QPushButton[role="install"]:disabled {
+    color: @mute@; background: @surface2@; border-color: @border@;
+}
 /* 折叠分组标题：占满整行、左对齐 */
 QPushButton[role="toggle"] {
     min-height: 34px; max-height: 34px; padding: 6px 12px;
@@ -362,6 +383,9 @@ QString Theme::globalStyleSheet()
         { "on_accent",  onAccent()  },
         { "ok",         ok()        },
         { "warn",       warn()      },
+        { "install",    install()   },
+        { "install_hi", installHi() },
+        { "on_install", onInstall() },
         { "bad",        bad()       },
         { "info",       info()      },
     };

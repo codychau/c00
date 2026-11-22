@@ -44,6 +44,14 @@ inline QColor warn()      { return QColor("#fbbf24"); }
 inline QColor bad()       { return QColor("#f87171"); }
 inline QColor info()      { return QColor("#60a5fa"); }
 
+// ── 通栏「一键安装」的橘黄 ──
+// 单独一组而不是复用 warn()：warn 的语义是"出问题了"，会被用在黄字提示上；
+// 这里的语义是"先把我点了"，是召唤而不是报警。两者混用会让真正的警告
+// 看起来也像可以点的东西。
+inline QColor install()   { return QColor("#f97316"); }   // 橘：底色收尾
+inline QColor installHi() { return QColor("#fbbf24"); }   // 黄：底色起端 / hover
+inline QColor onInstall() { return QColor("#2b1503"); }   // 落在橘上的文字
+
 // ── 进度条：按使用率取色（与状态页告警阈值一致） ──
 inline QColor levelColor(double ratio)
 {

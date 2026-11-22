@@ -122,15 +122,31 @@ NasController::Env NasController::probe() const
     //   · fusermount3 是 setuid 的挂载助手，非 root 挂 FUSE 必须经它。
     //     只查 mount.fuse 不够：那是 mount(8) 的 helper，手动 mount -t fuse
     //     才用得到；程序里直接调 fuse 库时真正需要的是 fusermount。
-    // 发行版判定：读 /etc/os-release 交给纯函数解析（可单测）。读不到就当非 apt 系，
-    // 宁可少给一个按钮，也不给一个会失败的安装按钮。
+    // 发行版判定：读 /etc/os-release 交给纯函数解析（可单测）。读不到就当
+    // 认不出家族，宁可少给一个按钮，也不给一个会失败的安装按钮。
+    // 同一份文本喂两个判定：aptFamily 是旧的「只认 apt」口径（fuse 那一格
+    // 还在用它把门），pkg 是新的「dnf / apt-get / pacman 三选一」口径。
+    QString osrText;
     {
         QFile osr("/etc/os-release");
-        e.aptFamily = osr.open(QIODevice::ReadOnly | QIODevice::Text)
-                    ? Nas::aptInstallable(QString::fromUtf8(osr.readAll()))
-                    : false;
+        if (osr.open(QIODevice::ReadOnly | QIODevice::Text))
+            osrText = QString::fromUtf8(osr.readAll());
     }
+    e.aptFamily = Nas::aptInstallable(osrText);
     e.aptAvailable = !findTool("apt-get").isEmpty();
+    {
+        const bool haveDnf    = !findTool("dnf").isEmpty();
+        const bool havePacman = !findTool("pacman").isEmpty();
+        e.pkg = Nas::detectPkgManager(osrText, e.aptAvailable, haveDnf, havePacman);
+    }
+    // 缺哪些依赖：按可执行名逐个找（findTool 已经覆盖 /usr/sbin 那批）。
+    // 只收表里登记过的项，所以"缺 nasrs 引擎"不会混进来 —— 那个没有包可装，
+    // 混进来只会让一键安装多一次注定失败的 root 调用。
+    for (const Nas::DepSpec &s : Nas::nasDepSpecs())
+        if (findTool(s.binary).isEmpty())
+            e.missingDeps << s.binary;
+    e.missingDepLabels = Nas::dependencyLabels(e.missingDeps);
+
     e.fuseDevice = QFileInfo::exists("/dev/fuse");
     e.fuseMount  = !findTool("fusermount3").isEmpty() || !findTool("fusermount").isEmpty();
 
@@ -706,4 +722,78 @@ QVector<NasController::Step> NasController::planInstallFuse() const
     s.destructive = true;
     steps << s;
     return steps;
+}
+
+// ── 页顶「一键安装依赖的组件」───────────────────────────────
+//
+// 与 planInstallFuse 的分工：那条只处理「fuse 缺了」这一个点，走 pkexec；
+// 这条管整页缺的依赖，走 sudo + 密码框，因为用户要的是一按到底、并且看得见
+// 装的过程（pkexec 只给一个授权对话框，装包那几十行输出没有落点）。
+//
+// 为什么这里允许拼 shell 脚本，而本文件顶部写着"绝不拼 shell 字符串"：
+// 脚本里出现的每一个 token 都来自 Nas::nasDepSpecs() 这张常量表或本函数自己
+// 写的字面量，没有一个字来自输入框、文件名或设备名 —— 没有外部输入，就没有
+// 注入口。为了让这句话不只是说说，生成前还会逐个包名过白名单，不合规矩就
+// 整批作废（返回一个 valid()==false 的计划），而不是"清洗一下照跑"。
+//
+// 为什么 apt 要先 update：Debian/Ubuntu 的索引过期时 install 会直接
+// "Unable to locate package"，那是这台机器上最常见的一次失败；这条链跑在
+// set -e 下，update 失败就停，不会接着跑一条注定失败的 install。
+// dnf 自己会在元数据过期时刷新，pacman 则**不**做 -Sy —— 部分刷新数据库是
+// Arch 官方明确反对的做法（会造成部分升级），宁可让用户自己去刷新。
+NasController::InstallPlan NasController::planInstallDeps(const Env &env) const
+{
+    InstallPlan p;
+    p.pmName  = Nas::pkgManagerName(env.pkg);
+    p.blocked = Nas::packagesUnavailable(env.pkg, env.missingDeps);
+    p.packages = Nas::packagesToInstall(env.pkg, env.missingDeps);
+
+    for (const QString &pkg : p.packages) {
+        if (!Nas::isSafePackageName(pkg)) {
+            // 表被改坏了。清空一切：宁可页面上报"生成失败"，
+            // 也不把一个没审过的字符集交给 root。
+            p.packages.clear();
+            p.commands.clear();
+            p.script.clear();
+            return p;
+        }
+    }
+    if (p.packages.isEmpty()) return p;
+
+    // 展示行：「缺的东西 → 要装的包」，让人一眼看出这条命令补的是哪个洞
+    for (const QString &bin : env.missingDeps) {
+        const QStringList pkgs = Nas::packagesToInstall(env.pkg, { bin });
+        const QString label = Nas::dependencyLabels({ bin }).value(0, bin);
+        p.rows << (pkgs.isEmpty()
+                       ? QString("%1 → 无包可装").arg(label)
+                       : QString("%1 → %2").arg(label, pkgs.join(" ")));
+    }
+
+    QStringList lines;
+    lines << QStringLiteral("set -e");   // 任一条失败就停，不带病继续
+
+    const QString joined = p.packages.join(QLatin1Char(' '));
+    switch (env.pkg) {
+    case Nas::Pkg::Apt:
+        lines << QStringLiteral("export DEBIAN_FRONTEND=noninteractive");
+        lines << QStringLiteral("apt-get update");
+        p.commands << QStringLiteral("apt-get update");
+        lines << QStringLiteral("apt-get install -y ") + joined;
+        p.commands << QStringLiteral("apt-get install -y ") + joined;
+        break;
+    case Nas::Pkg::Dnf:
+        lines << QStringLiteral("dnf install -y ") + joined;
+        p.commands << QStringLiteral("dnf install -y ") + joined;
+        break;
+    case Nas::Pkg::Pacman:
+        // --needed：已装着的跳过，不重复下载也不重装，重复点这个按钮无害
+        lines << QStringLiteral("pacman -S --noconfirm --needed ") + joined;
+        p.commands << QStringLiteral("pacman -S --noconfirm --needed ") + joined;
+        break;
+    case Nas::Pkg::None:
+        return p;   // 认不出包管理器，什么都不生成
+    }
+
+    p.script = lines.join(QLatin1Char('\n')) + QLatin1Char('\n');
+    return p;
 }

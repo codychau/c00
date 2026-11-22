@@ -38,6 +38,20 @@ public:
         QStringList stdinLines;
     };
 
+    // 一键安装的成品：页面只管展示 rows/commands、把 script 交给 sudo。
+    // 之所以不复用 Step —— Step 那条队列走 pkexec 且一次一条，而装包需要
+    // "一次授权、全程输出可见"，执行方式不同，硬套只会两边都别扭。
+    struct InstallPlan
+    {
+        QString   pmName;      // 界面用：apt-get / dnf / pacman
+        QStringList rows;      // 「缺的组件 → 要装的包」，一行一条，只用于展示
+        QStringList packages;  // 真正要装的包名（全部来自 Nas::nasDepSpecs 常量表）
+        QStringList blocked;   // 这家装不了的组件（人话名），只展示不执行
+        QStringList commands;  // 会跑的几条命令，与 script 同源，展示用
+        QString   script;      // 交给 sudo bash -c 的完整脚本
+        bool valid() const { return !packages.isEmpty() && !script.isEmpty(); }
+    };
+
     // 注意：targetcli saveconfig 会把 CHAP 密码**明文**写进
     // /etc/rtslib-fb-target/saveconfig.json，且该文件默认权限不是 600。
     // 所以本工具不提供"保存含 CHAP 的配置"这一步，除非调用方显式要。
@@ -51,17 +65,23 @@ public:
         bool kernelModules = false;   // target_core_mod 等模块文件在不在
         bool losetup = false;
         bool nasrsBinary = false;     // 自研引擎可执行文件是否找到
-    // RAID FS 走 FUSE，与 iSCSI 那条完全不是一套依赖：不要并进
-    // readyForMdadm 的 missing，否则没装 fuse 的用户连 iSCSI 都被提示未就绪。
+    // RAID FS 走 FUSE，与 iSCSI 那条完全不是一套依赖：不要并进 iSCSI 那批
+    // 缺失项里，否则没装 fuse 的用户连 iSCSI 都会被提示"环境未就绪"。
     bool aptAvailable = false;    // apt-get 在不在（安装按钮的另一半条件）
     bool aptFamily  = false;    // 发行版是否 ubuntu/debian 系（os-release 判定）
     bool fuseDevice = false;      // /dev/fuse 在不在
     bool fuseMount  = false;      // mount.fuse / fusermount3 在不在
-// SMB 相关：Samba 是可选功能，不能并进 readyForMdadm 的 missing 里，
+// SMB 相关：Samba 是可选功能，不能并进 RAID/iSCSI 那批缺失项里，
 // 否则没装 Samba 的用户连 RAID 都会被提示环境未就绪。
-bool smbd       = false;      // smbd 在不在
+    bool smbd       = false;      // smbd 在不在
 bool testparm   = false;      // 能否离线校验 smb.conf
 bool smbService = false;      // systemd 是否有 smbd.service
+    // ── 一键安装（页顶那个通栏按钮）用 ──
+    // 用哪家包管理器。None = 认不出 dnf/apt-get/pacman 里的任何一家，
+    // 这时按钮点下去只会解释"为什么没法装"，不会去猜一个命令跑。
+    Nas::Pkg pkg = Nas::Pkg::None;
+    QStringList missingDeps;      // 缺的依赖，按探测用的可执行名（喂给包名表）
+    QStringList missingDepLabels; // 同一批的人话名，界面直接显示
         QStringList missing;          // 人类可读的缺失项
         bool readyForSmb() const { return smbd && testparm && smbService; }
     // 注意这里只表示"环境具备挂 FUSE 的条件"，不表示 raidfs 能用：
@@ -71,7 +91,14 @@ bool smbService = false;      // systemd 是否有 smbd.service
     // 注意这里不含 fuseDevice —— /dev/fuse 缺不是 apt 能补的（那是内核 fuse 模块），
     // 真缺它时该提示"加载 fuse 模块"而不是装包。装包只解决 fusermount3。
     bool canInstallFuse() const { return !fuseMount && aptFamily && aptAvailable; }
-bool readyForMdadm() const { return mdadm && targetCli && configfsMounted; }
+    // 一键安装该不该真去装：认得出包管理器、且确实有缺的依赖。
+    // 「有缺」也算在这里，是为了让按钮点下去不会什么都没发生又不说明。
+    bool hasMissingDeps() const { return !missingDeps.isEmpty(); }
+    // 曾经有个 readyForMdadm() = mdadm && targetCli && configfsMounted，被
+    // 「① 创建阵列」当门卫。它把**导出 iSCSI** 的前置条件（targetcli、configfs）
+    // 算进了建阵列的头上，于是没挂 configfs 的机器连 RAID 都建不了，理由是句
+    // 八竿子打不着的话。现在两个动作各查各的：建阵列看引擎在不在
+    // （naspage.cpp::createArray），导出看 targetcli 在不在（exportIscsi）。
     };
 
     explicit NasController(QObject *parent = nullptr);
@@ -108,6 +135,12 @@ QVector<Step> planRaidfsMount(const Nas::Plan &plan, const QString &mountPoint) 
 QVector<Step> planRaidfsUnmount(const QString &mountPoint) const;
     // 一键装 fuse3：仅在 Env::canInstallFuse() 为真时由页面调用。
     QVector<Step> planInstallFuse() const;
+
+    // 页顶「一键安装依赖的组件」用。输入是刚探到的 Env（不再自己重探一次：
+    // 用户在界面上看到的缺失项，必须和真去装的那批是同一批）。
+    // 纯生成：不起进程、不碰网络，包名全部来自 Nas::nasDepSpecs() 常量表，
+    // 再过一遍包名白名单，任何不合规矩的名字都会让整批作废而不是"清洗后照跑"。
+    InstallPlan planInstallDeps(const Env &env) const;
 
 // SMB：把单个分区路径作为共享导出。写入 /etc/samba/smb.d 下的独立片段，
 // 不直接改主 smb.conf（便于撤销、也避免和发行版自带配置打架）。

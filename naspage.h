@@ -10,6 +10,7 @@
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QVector>
+#include <QProcess>          // 槽签名里要用 QProcess::ExitStatus
 #include "nasmodel.h"
 #include "nasboardwidget.h"
 #include "nascontroller.h"
@@ -22,6 +23,8 @@ class QTableWidget;
 class QPushButton;
 class QRadioButton;
 class QWidget;
+class QPlainTextEdit;
+class QTimer;
 
 // ─────────────────────────────────────────────────────────────
 //  NAS 页面：挑分区 → 拖线组 RAID → 导出 iSCSI
@@ -48,6 +51,12 @@ public:
     // 路径（那样测试通过也说明不了线上行为）。
     void setMemberDevicesForTest(const QVector<QString> &devices);
 
+    // 同样是探针专用：塞进一个假的探测结果，然后走与 refresh() 完全相同的
+    // 那段同步代码（右上角缺失提示 + 页顶通栏按钮的显隐）。装齐之后按钮该
+    // 消失这种结论，只有能喂出"装齐了"这个状态才测得到 —— 真机上不一定缺
+    // 东西，靠真机状态去断言等于让探针看机器脸色。
+    void setEnvForTest(const NasController::Env &env);
+
 private slots:
     void refresh();                       // 重新枚举分区与环境
     void onSlotClicked(const QString &device, int slotIndex);
@@ -62,6 +71,17 @@ private slots:
     void teardownIscsi();
     void showStepLog(int index, bool ok, const QString &output);
     void onAllFinished(bool success);
+
+    // ── 页顶通栏「一键安装依赖的组件」（dnf / apt-get / pacman）──
+    // 分四步是因为提权可能失败要重来，而装包是异步的：
+    // 点击（确认） → 取密码 → 起进程 → 收输出/收尾。
+    // 刻意**不走** NasController 那条 Step 队列：它按条 pkexec，
+    // 而装包要"一次授权 + 全程输出可见"。
+    void onInstallAllDepsClicked();
+    void askInstallPassword();                  // 弹 sudo 密码框（可能要重来）
+    void startInstall(const QString &password); // 真正起进程；空密码 = 免密
+    void onInstallOutput();                     // 流式追加包管理器的输出
+    void onInstallFinished(int exitCode, QProcess::ExitStatus status);
 
 private:
     // 把画板上的连线收集成可执行的 Plan
@@ -78,6 +98,15 @@ private:
     void onMountFsClicked();
     void onUmountFsClicked();
     void onInstallFuseClicked();
+    void appendInstallLog(const QString &chunk);  // 写日志框（\r 也算换行）
+    // 把 m_env 翻译成右上角缺失提示 + 页顶按钮显隐。两处必须同一次算完，
+    // 否则会在中间状态下互相打脸（按钮说"齐了"、红字还说"缺"）。
+    void syncEnvAndInstallUi();
+    // 装包补不了的几样（configfs 未挂载 / 内核没有 target 模块 / nasrs 不在），
+    // 按当前出口过滤后返回，每条自带处置办法。守卫和那条说明共用它，
+    // 免得两处对"还缺什么"给出不同答案。
+    QStringList nonPackageBlockers() const;
+    void refreshBlockNote();
     // 逐条展示命令并要用户确认；返回要执行的步骤（可能为空 = 用户取消）
     QVector<NasController::Step> confirmSteps(const QVector<NasController::Step> &steps,
                                               const QString &title);
@@ -85,6 +114,10 @@ private:
 
     NasBoardWidget *m_board = nullptr;
     QLabel *m_envLabel = nullptr;      // 环境是否齐备
+    // 「装包补不了的那几样」的说明（configfs / 内核 target 模块 / nasrs 引擎）。
+    // 刻意与右上角那条分开：那条说的是"缺组件"，一键安装能把它们清干净；
+    // 这几样装包清不掉，混在一起就会变成"按钮消失了但还在提示缺东西"。
+    QLabel *m_blockNote = nullptr;
     QLabel *m_status = nullptr;
     QComboBox *m_engine = nullptr;
     QLineEdit *m_volName = nullptr;    // 阵列/卷名（破坏性确认时要手输核对）
@@ -153,6 +186,16 @@ private:
     QLabel    *m_fsNote = nullptr;
     QPushButton *m_umountBtn = nullptr;  // 撤销挂载
     QPushButton *m_installFuseBtn = nullptr; // 一键装 fuse3（仅 apt 系且缺时出现）
+
+    // ── 页顶通栏「一键安装依赖的组件」──
+    // 这一组的状态只有"在装 / 没在装"两种，全部围绕 m_installProc 转。
+    QPushButton    *m_installAllBtn = nullptr;
+    QPlainTextEdit *m_installLog    = nullptr;  // 默认隐藏，点下去才现身
+    QProcess       *m_installProc   = nullptr;
+    QTimer         *m_installTimer  = nullptr;  // 兜底：网络卡死不至于永远转圈
+    NasController::InstallPlan m_installPlan;   // 确认过的那一批，收尾要照它报
+    int  m_installAttempts = 0;                 // 密码错了几次（只许重来一次）
+    bool m_installTimedOut = false;
 };
 
 #endif // NASPAGE_H

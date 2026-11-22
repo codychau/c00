@@ -1,5 +1,6 @@
 #include "naspage.h"
 #include "theme.h"
+#include "adminhelper.h"
 
 #include <QProcess>
 #include <QVBoxLayout>
@@ -37,9 +38,20 @@
 #include <QHeaderView>
 #include <QDirIterator>
 #include <QDateTime>
+#include <QPlainTextEdit>
+#include <QScrollBar>
+#include <QTextCursor>
+#include <QTimer>
 #include <algorithm>
 
 static constexpr int kTopbarInset = 52;   // 与 MainWindow 顶栏一致，正文自行让出
+
+// 页顶通栏按钮的文案。抽成常量是因为装完/失败/取消都要把文案**还原**成
+// 一模一样的一句，散在三处的字面串迟早会写成三个不同的版本。
+static const QString kInstallBtnText = QString::fromUtf8("点击此按钮一键安装依赖的组件");
+// 装包的兜底超时。取 20 分钟：镜像慢时 apt 装 samba 能到十几分钟，
+// 再长就属于"网络或仓库出问题了"，继续挂着只会让人以为程序死了。
+static constexpr int kInstallTimeoutMs = 20 * 60 * 1000;
 
 // ── 小工具 ──────────────────────────────────────────────────
 static QString runCapture(const QString &prog, const QStringList &args)
@@ -68,6 +80,40 @@ NasPage::NasPage(QWidget *parent)
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(10, kTopbarInset, 10, 8);
     layout->setSpacing(8);
+
+    // ── 页顶通栏：一键安装依赖的组件 ──
+    // 摆在这里而不是塞进某一格里，是因为"依赖没装"是这台机器上最常见的
+    // 第一道坎，而它原先藏在「挂载目录」那一格的角落里，没人会发现。
+    // 颜色走 Theme 的 install 角色（橘黄），不在页面里写死十六进制。
+    // 宽度：跟着正文走，占满整行（左右各让出布局的 10px 内缩）。
+    m_installAllBtn = new QPushButton(kInstallBtnText);
+    m_installAllBtn->setProperty("role", "install");
+    m_installAllBtn->setToolTip(QString::fromUtf8("检测缺失组件，用系统自带的包管理器安装。"));
+    connect(m_installAllBtn, &QPushButton::clicked, this, &NasPage::onInstallAllDepsClicked);
+    layout->addWidget(m_installAllBtn);
+
+    // 安装日志：平时不占地方，点下去才现身。装包动辄几十行输出，塞进单行
+    // 状态栏等于没给 —— 装失败的人最需要看到的是包管理器的原话。
+    m_installLog = new QPlainTextEdit();
+    m_installLog->setReadOnly(true);
+    m_installLog->setProperty("role", "mono");
+    m_installLog->setFixedHeight(150);
+    // 只留最近 400 行：apt 的进度输出能刷上千行，不设上限长跑会一直吃内存
+    m_installLog->setMaximumBlockCount(400);
+    m_installLog->setVisible(false);
+    layout->addWidget(m_installLog);
+
+    // 兜底超时。装包卡在镜像上是常态，没有这道闸，按钮会永远停在"安装中"，
+    // 而用户唯一能做的就是关掉重开。
+    m_installTimer = new QTimer(this);
+    m_installTimer->setSingleShot(true);
+    connect(m_installTimer, &QTimer::timeout, this, [this]() {
+        if (!m_installProc || m_installProc->state() == QProcess::NotRunning) return;
+        m_installTimedOut = true;
+        appendInstallLog(QString::fromUtf8("!! 超过 20 分钟没有结束，已中止。"
+                                           "通常是镜像源太慢或不可达，可稍后重试。"));
+        m_installProc->kill();
+    });
 
     // ── 第一行：引擎选择 + 环境提示 ──
     auto *topRow = new QHBoxLayout();
@@ -230,6 +276,17 @@ NasPage::NasPage(QWidget *parent)
     m_smbWarn->setTextFormat(Qt::RichText);
     outer->addWidget(m_smbWarn);
 
+    // 「装包补不了的」前置条件：configfs 没挂、内核里没有 target 模块、
+    // nasrs 引擎不在。它们和"缺组件"是两类事，所以不在右上角那条里，
+    // 而是放在真正会被它们挡住的导出页底部，缺了才露出来。
+    m_blockNote = new QLabel();
+    m_blockNote->setObjectName("blockNote");   // 探针按名字找它：它平时是空的
+    m_blockNote->setWordWrap(true);
+    m_blockNote->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_blockNote->setProperty("role", "warn");
+    m_blockNote->setVisible(false);
+    outer->addWidget(m_blockNote);
+
     m_smbBox->setVisible(false);   // 初始 0 个成员，只显示 iSCSI
 
     // 挂载目录不再是独立标签：它和 SMB 一样是"把卷交出去"的一种出口，
@@ -315,23 +372,98 @@ void NasPage::onEngineChanged(int index)
     updateSummary();
 }
 
+// 装包补不了的几样前置条件。每条都带上"那你自己该怎么补"，因为这条链的
+// 尽头没有按钮可点 —— 不给处置办法的红字只会让人去搜错误。
+//
+// 按当前出口过滤：configfs 与内核 target 模块是 LIO/iSCSI 才需要的，
+// 选 SMB 或挂载目录时摆出来就是无关噪音；nasrs 引擎只在选了 nasrs 引擎时相关。
+QStringList NasPage::nonPackageBlockers() const
+{
+    QStringList b;
+    const bool iscsi = !m_modeSmb || m_modeIscsi->isChecked();
+    if (iscsi && !m_env.configfsMounted)
+        b << QString::fromUtf8("configfs 未挂载 —— sudo mount -t configfs configfs /sys/kernel/config");
+    if (iscsi && !m_env.kernelModules)
+        b << QString::fromUtf8("内核目录里没找到 target_core_mod 模块文件"
+                               "（若内核已把 LIO 编进去，这条可以忽略）");
+    if (!m_env.nasrsBinary && m_engine && m_engine->currentIndex() == 1)
+        b << QString::fromUtf8("nasrs 引擎不在程序旁边 —— 它随本程序一起发布，不是发行版的包");
+    return b;
+}
+
+void NasPage::refreshBlockNote()
+{
+    if (!m_blockNote) return;
+    const QStringList b = nonPackageBlockers();
+    if (b.isEmpty()) { m_blockNote->setVisible(false); return; }
+    m_blockNote->setText(QString::fromUtf8
+        ("下面这几项一键安装管不了（不是缺软件包），用到 iSCSI 导出前得先处理：\n· ")
+        + b.join("\n· "));
+    m_blockNote->setVisible(true);
+}
+
+// 把"环境探测结果"翻译成界面上的两处提示：右上角的缺失标签 + 页顶通栏按钮。
+// 单独成函数只为了让它们**必须**同一次算完 —— 这两处说的是同一件事（还缺
+// 什么组件），分两处更新就会出现在中间状态下互相打脸的机会。
+// 探针也走这一条（见 setEnvForTest），线上和测试看到的是同一段代码。
+void NasPage::syncEnvAndInstallUi()
+{
+    // 右上角只说一件事：还缺哪些**组件**（一键安装能装的那种）。
+    // 判据与按钮同源，所以装完必然一起消失。早先这里还混着 configfs 和
+    // 内核模块，结果"包装齐了、按钮没了、红字还挂着"，看着就像程序坏了 ——
+    // 那两类现在归导出页底部那条说明（见 refreshBlockNote）。
+    const QStringList lack = m_env.missingDepLabels;
+    if (lack.isEmpty()) {
+        m_envLabel->setVisible(false);
+    } else {
+        QString hint = "缺少：" + lack.join("、");
+        // 认不出包管理器时通栏按钮不存在（它无能为力），这句"缺什么"就成了
+        // 唯一的信号，得在这里说清"该自己装"，不然用户会以为少了个本该有的按钮。
+        if (m_env.pkg == Nas::Pkg::None)
+            hint += QString::fromUtf8("（系统里没有 dnf / apt-get / pacman，得自己装）");
+        m_envLabel->setText(hint);
+        m_envLabel->setStyleSheet("color:" + Theme::bad().name());
+        m_envLabel->setVisible(true);
+    }
+
+    refreshBlockNote();
+
+    // 通栏按钮：只在该出现的时候出现。装齐了就收起来（用户要的"装好就消失"），
+    // 下次任何一次刷新（页面上的「刷新」、换引擎、重开程序）若又缺了会自己回来，
+    // 所以这不是"永久消失"，只是"没事别占地方"。
+    //
+    // 判据只有"还有没有包可装"，不含 configfs / 内核模块 —— 那两样包管理器
+    // 补不了，按钮对它们无能为力，留着只会让人点了个空。
+    //
+    // 装到一半不许隐藏：进程还活着的时候按钮消失，比留着更让人慌。
+    if (m_installAllBtn) {
+        const bool busy = m_installProc && m_installProc->state() != QProcess::NotRunning;
+        const bool canInstall = m_env.pkg != Nas::Pkg::None && m_env.hasMissingDeps();
+        m_installAllBtn->setVisible(canInstall || busy);
+        if (busy) {
+            m_installAllBtn->setToolTip(QString::fromUtf8("安装进行中，日志在下方…"));
+        } else if (canInstall) {
+            m_installAllBtn->setToolTip(
+                QString::fromUtf8("包管理器：%1\n缺：%2\n"
+                                  "点一下先看确认框（列出会跑哪几条命令），再输 sudo 密码。")
+                    .arg(Nas::pkgManagerName(m_env.pkg),
+                         m_env.missingDepLabels.join(QString::fromUtf8("、"))));
+        }
+    }
+}
+
+// 仅供离线探针：塞进一个假的环境结果，然后走**与线上完全相同**的那段同步
+// 代码。刻意不复用探针自己的判断，否则测的是探针而不是页面。
+void NasPage::setEnvForTest(const NasController::Env &env)
+{
+    m_env = env;
+    syncEnvAndInstallUi();
+}
+
 void NasPage::refresh()
 {
     m_env = m_ctl.probe();
-    QStringList lack;
-    if (!m_env.mdadm)         lack << "mdadm";
-    if (!m_env.targetCli)     lack << "targetcli";
-    if (!m_env.configfsMounted) lack << "configfs 未挂载";
-    if (!m_env.kernelModules) lack << "内核 target 模块";
-    if (!m_env.nasrsBinary && m_engine->currentIndex() == 1) lack << "nasrs 引擎";
-
-    if (lack.isEmpty()) {
-        m_envLabel->setText("环境就绪");
-        m_envLabel->setStyleSheet(QString());
-    } else {
-        m_envLabel->setText("缺少：" + lack.join("、"));
-        m_envLabel->setStyleSheet("color:" + Theme::bad().name());
-    }
+    syncEnvAndInstallUi();
 
     // 分区列表
     const QByteArray js = captureLsblk();
@@ -522,6 +654,9 @@ void NasPage::syncExportMode(int memberCount)
     m_smbBox->setVisible(smb);
     m_smbWarn->setVisible(smb);
     m_fsBox->setVisible(mount);
+    // 那条"装包补不了的"说明按出口过滤（configfs / target 模块只有 iSCSI 用得着），
+    // 所以换出口就要重算一次，不能等下一次整页刷新。
+    refreshBlockNote();
     m_exportBtn->setText(smb   ? "② 导出 SMB 共享"
                          : mount ? "② 挂载到目录"
                                  : "② 导出 iSCSI");
@@ -645,7 +780,17 @@ void NasPage::createArray()
     const Nas::Plan plan = currentPlan();
     if (plan.members.isEmpty()) { setStatus("先拖线加入至少一个成员", true); return; }
     if (plan.volumeName.isEmpty()) { setStatus("先填名称", true); return; }
-    if (!m_env.readyForMdadm()) { setStatus("环境未就绪，见右上角提示", true); return; }
+    // 建阵列要的是**引擎本身**。configfs 和内核 target 模块是导出 iSCSI 才
+    // 需要的，原先一并挡在这里，会出现"两个按钮都点不动，理由却是 iSCSI 的
+    // 前置条件"这种八竿子打不着的提示。
+    if (plan.engine == Nas::Engine::Mdadm && !m_env.mdadm) {
+        setStatus("缺 mdadm，建不了内核阵列（用页顶的一键安装）", true);
+        return;
+    }
+    if (plan.engine == Nas::Engine::Raid0Rs && (!m_env.nasrsBinary || !m_env.losetup)) {
+        setStatus("nasrs 引擎或 losetup 不在 —— 引擎随本程序一起发布，losetup 属 util-linux", true);
+        return;
+    }
 
     m_pendingConfirmName = plan.volumeName;
 
@@ -761,6 +906,16 @@ void NasPage::exportIscsi()
 {
     const Nas::Plan plan = currentPlan();
     if (plan.volumeName.isEmpty()) { setStatus("先填名称", true); return; }
+
+    // targetcli 不在就注定失败（modprobe 那几步倒是能过），在这里说清楚比
+    // 让进程 FailedToStart 好。**不**在这里挡 configfs：python-rtslib 启动时
+    // 会自己把 /sys/kernel/config 挂上，挡在门口反而拦住了一本来能成的导出。
+    // configfs / target 模块的情况由导出页那条说明提示，不挡路。
+    if (!m_env.targetCli) {
+        setStatus("缺 targetcli，导不了 iSCSI（用页顶的一键安装）", true);
+        return;
+    }
+
     const QString iqn = m_iqn->text().trimmed();
     if (iqn.isEmpty()) { setStatus("IQN 不能为空", true); return; }
 
@@ -1064,6 +1219,191 @@ void NasPage::onInstallFuseClicked()
     const auto go = confirmSteps(steps, "安装 fuse3");
     if (go.isEmpty()) return;
     m_ctl.run(go);
+}
+
+// ── 页顶通栏：一键安装依赖的组件（dnf / apt-get / pacman）─────
+//
+// 为什么这一条走 sudo + 密码框，而本页其余 root 步骤走 pkexec：
+// pkexec 只给一个授权对话框，装包那几十行输出（哪个在下、哪个装不上）没有
+// 落点，失败了也只剩"退出码 1"一句。sudo -S 把进程留在我们自己手上，输出能
+// 直接流进页面里的日志框。两条都是提权，没有另起第三套 —— 免密判定与
+// "密码错了再问一次"的判据都复用 AdminHelper。
+void NasPage::onInstallAllDepsClicked()
+{
+    if (m_installProc && m_installProc->state() != QProcess::NotRunning) {
+        setStatus("上一次安装还在跑，等它结束再点", true);
+        return;
+    }
+    // 重探一次再用：从页面刷到现在，用户可能自己装了包，也可能刚接上网络。
+    // 要紧的是「确认框里看到的缺失项」和「真去装的那批」来自同一次探测。
+    refresh();
+
+    if (m_env.pkg == Nas::Pkg::None) {
+        setStatus("系统里没有 dnf / apt-get / pacman，不能一键安装。缺："
+                      + m_env.missingDepLabels.join("、"), true);
+        return;
+    }
+    if (!m_env.hasMissingDeps()) {
+        setStatus("依赖已齐备，不需要装", false);
+        return;
+    }
+
+    const NasController::InstallPlan plan = m_ctl.planInstallDeps(m_env);
+    if (!plan.valid()) {
+        if (!plan.blocked.isEmpty())
+            setStatus(QString("%1 在 %2 的官方仓库里没有对应的包，得手动解决")
+                          .arg(plan.blocked.join("、"), plan.pmName), true);
+        else
+            setStatus("依赖清单没通过包名白名单，已中止（不该发生，请把本页日志发出来）", true);
+        return;
+    }
+    m_installPlan = plan;
+
+    // 确认框：把「缺什么 → 装哪个包」和「会跑哪几条命令」都摊开。
+    // 装包会改整个系统的状态，看过命令再点确认才算真确认。
+    QString text = QString("将用 %1 安装 %2 个组件（需要管理员权限）：\n")
+                       .arg(plan.pmName).arg(plan.packages.size());
+    for (const QString &r : plan.rows)
+        text += "  · " + r + "\n";
+    text += "\n会执行的命令（set -e：任一条失败就停）：\n";
+    for (const QString &c : plan.commands)
+        text += "  # " + c + "\n";
+    if (!plan.blocked.isEmpty())
+        text += "\n这几项它装不了（官方仓库没有对应的包，要自己想办法）：\n  · "
+                + plan.blocked.join("\n  · ") + "\n";
+    text += "\n会改动系统：装上软件包及其依赖。不碰磁盘、不改配置文件、不动已有的共享。";
+    text += "\n装不上时会把包管理器的原话完整贴在页面日志里，不会假装成功。";
+
+    if (QMessageBox::question(this, "一键安装依赖", text,
+                              QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+        != QMessageBox::Yes) {
+        setStatus("已取消，什么都没装", false);
+        return;
+    }
+
+    m_installAttempts = 0;
+    askInstallPassword();
+}
+
+// 取 sudo 密码。免密（sudo -n 直接过）就不问 —— 已经能免密的人还弹框，
+// 只会教会用户"随手回车"，那比不弹更危险。
+void NasPage::askInstallPassword()
+{
+    QString pw;
+    if (!AdminHelper::passwordlessSudoAvailable()) {
+        bool ok = false;
+        const QString prompt = m_installAttempts == 0
+            ? QString("请输入管理员密码（sudo）：")
+            : QString("密码不对，再输一次：");
+        pw = QInputDialog::getText(this, "管理员权限", prompt,
+                                   QLineEdit::Password, QString(), &ok);
+        if (!ok) { setStatus("已取消，什么都没装", false); return; }
+    }
+    startInstall(pw);
+}
+
+void NasPage::startInstall(const QString &password)
+{
+    m_installTimedOut = false;
+    m_installLog->setVisible(true);
+    m_installLog->clear();
+    appendInstallLog(QString("# 用 %1 安装：%2")
+                         .arg(m_installPlan.pmName, m_installPlan.packages.join(" ")));
+    for (const QString &c : m_installPlan.commands)
+        appendInstallLog("$ " + c);
+
+    if (!m_installProc) {
+        m_installProc = new QProcess(this);
+        // 合流：apt/dnf 的进度和报错本来就交错出现，分成两栏就看不出先后。
+        m_installProc->setProcessChannelMode(QProcess::MergedChannels);
+        connect(m_installProc, &QProcess::readyReadStandardOutput,
+                this, &NasPage::onInstallOutput);
+        connect(m_installProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, &NasPage::onInstallFinished);
+        connect(m_installProc, &QProcess::errorOccurred, this, [this](QProcess::ProcessError e) {
+            if (e != QProcess::FailedToStart) return;
+            m_installTimer->stop();
+            m_installAllBtn->setEnabled(true);
+            m_installAllBtn->setText(kInstallBtnText);
+            appendInstallLog("!! 无法启动 sudo —— 系统里可能没装 sudo 命令。");
+            setStatus("无法启动提权进程（sudo 不在？）", true);
+        });
+    }
+
+    // 免密就走 -n：不加 -S，sudo 就不会去读 stdin，也不会等不到密码挂在那儿。
+    if (password.isEmpty()) {
+        m_installProc->start("sudo", { "-n", "bash", "-c", m_installPlan.script });
+    } else {
+        // -p "" 让 sudo 别打印提示语，否则那句"请输入密码"会混进日志第一行，
+        // 看起来像是我们输出给用户的字。
+        m_installProc->start("sudo", { "-S", "-p", "", "bash", "-c", m_installPlan.script });
+        m_installProc->write((password + "\n").toUtf8());
+        // 密码只经这一次 stdin：不落盘、不进日志、不存成成员变量
+    }
+    m_installProc->closeWriteChannel();
+
+    m_installAllBtn->setEnabled(false);
+    m_installAllBtn->setText("安装中…（输出见下方日志）");
+    setStatus("安装中…");
+    m_installTimer->start(kInstallTimeoutMs);
+}
+
+void NasPage::appendInstallLog(const QString &chunk)
+{
+    // \r 也算换行：包管理器用回车刷新同一行进度，不切开的话整个下载过程会
+    // 变成一条几万字符的"单行日志"，在框里根本翻不动。
+    static const QRegularExpression kNewline(QStringLiteral("[\\r\\n]"));
+    const QStringList lines = chunk.split(kNewline, Qt::SkipEmptyParts);
+    for (const QString &l : lines)
+        m_installLog->appendPlainText(l.trimmed());
+    m_installLog->verticalScrollBar()->setValue(m_installLog->verticalScrollBar()->maximum());
+}
+
+void NasPage::onInstallOutput()
+{
+    if (!m_installProc) return;
+    const QString chunk = QString::fromUtf8(m_installProc->readAllStandardOutput());
+    if (chunk.isEmpty()) return;
+    appendInstallLog(chunk);
+    // 状态行报最后一行非空输出：包管理器的进度就靠它说话，
+    // 比"安装中…"三个字有用。
+    static const QRegularExpression kNewline(QStringLiteral("[\\r\\n]"));
+    const QStringList lines = chunk.split(kNewline, Qt::SkipEmptyParts);
+    if (!lines.isEmpty())
+        setStatus(QString("安装中… %1").arg(lines.last().trimmed()));
+}
+
+void NasPage::onInstallFinished(int exitCode, QProcess::ExitStatus status)
+{
+    m_installTimer->stop();
+    m_installAllBtn->setEnabled(true);
+    m_installAllBtn->setText(kInstallBtnText);
+
+    const bool normal = (status == QProcess::NormalExit);
+    if (normal && exitCode == 0) {
+        appendInstallLog("# 完成");
+        refresh();     // 重新探测：装完就该看到缺的少了几项
+        if (m_env.missingDeps.isEmpty())
+            setStatus("依赖已齐备", false);
+        else
+            setStatus("装完了，仍缺：" + m_env.missingDepLabels.join("、") + "（见下方日志）", true);
+        return;
+    }
+
+    if (m_installTimedOut) { setStatus("安装超时，已中止", true); return; }
+
+    // 密码错：只给重来一次的机会。判据是 AdminHelper 那张英文串表 —— sudo
+    // 被本地化成中文时这里认不出来，表现是"不重试、直接报错"，而日志里仍是
+    // sudo 的原话，不会把人引向错误结论。
+    if (m_installAttempts < 1 && AdminHelper::isAuthFailure(m_installLog->toPlainText())) {
+        ++m_installAttempts;
+        setStatus("sudo 密码不对，再输一次", true);
+        askInstallPassword();
+        return;
+    }
+
+    if (!normal) { setStatus("安装进程异常结束（被信号杀死？）", true); return; }
+    setStatus(QString("安装失败（退出码 %1），完整输出见下方日志").arg(exitCode), true);
 }
 
 

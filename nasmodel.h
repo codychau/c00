@@ -3,6 +3,7 @@
 
 #include <QVector>
 #include <QString>
+#include <QStringList>
 
 // ─────────────────────────────────────────────────────────────
 //  NAS 页面的数据模型与**安全过滤**。
@@ -206,6 +207,58 @@ QString currentUserName();
 // 返回 true 只说明"发行版认得 apt"，不代表 apt 一定在 PATH —— 那是
 // 控制器另外查的事，两件事分开，缺一个都不该出现安装按钮。
 bool aptInstallable(const QString &osReleaseText);
+
+// ── 包管理器与依赖清单（NAS 页顶「一键安装」的数据来源）───────
+//
+// 一键安装要同时照顾 dnf / apt / pacman 三家，所以「缺什么」和「装什么包名」
+// 必须分开放：缺什么由探测决定，包名由下面这张常量表决定。两者混着写，迟早
+// 会长出「把探测到的可执行名直接当包名喂给 root」那种代码 —— 那是把注入口
+// 留在最需要 root 的地方。
+enum class Pkg { None, Apt, Dnf, Pacman };
+
+// 一条依赖：探测用的可执行名 + 三家各自的包名。
+// 某一家是空列表 = 那家的官方仓库里没有这个包，界面要如实说出来，而不是摆
+// 一个点了必然失败的按钮（Arch 的 targetcli 只在 AUR，就是这种情况）。
+struct DepSpec
+{
+    QString     label;      // 人话，出现在确认框与 tooltip 里
+    QString     binary;     // 探测用：在 PATH（含 sbin 兜底）里找这个名字
+    QStringList apt;
+    QStringList dnf;
+    QStringList pacman;
+};
+
+// 这张表就是「一键安装」的安装清单。加一行等于给 root 加一条命令，所以每个
+// 包名都必须是那家官方仓库里确实存在的名字（各家叫法不同，见 .cpp 注释）。
+const QVector<DepSpec> &nasDepSpecs();
+
+// 把 os-release 的 ID / ID_LIKE 拆成小写列表。纯函数，两种发行版判定共用
+// 同一份解析，避免两处口径不一致（一处认 debian 一处不认，是最难查的 bug）。
+QStringList osReleaseIds(const QString &osReleaseText);
+
+// 该用哪家包管理器：先看发行版归属，再看工具是不是真在 PATH 里。
+// 两个条件都要，是因为家用机上「装了别家的包管理器」和「os-release 被改写」
+// 都常见；只信一个就会摆出一个必然失败的按钮。认不出来返回 None。
+Pkg detectPkgManager(const QString &osReleaseText, bool haveApt,
+                     bool haveDnf, bool havePacman);
+
+// 界面上显示的名字。写 apt-get 而不是 apt：真正跑起来的程序就叫 apt-get，
+// 确认框里给用户看的必须和实际执行的一致。
+QString pkgManagerName(Pkg pm);
+
+// 缺失依赖 → 该家要装的包名（按清单顺序、去重）。纯表查找，不碰网络不碰磁盘。
+QStringList packagesToInstall(Pkg pm, const QStringList &missingBinaries);
+
+// 缺失依赖里，这家装不了的那些（人话名）。列出来是让用户明白「为什么装完
+// 还缺一项」，而不是以为程序漏装了。
+QStringList packagesUnavailable(Pkg pm, const QStringList &missingBinaries);
+
+// 缺失依赖对应的人话名，顺序与 missingBinaries 一致，给状态栏和确认框用。
+QStringList dependencyLabels(const QStringList &missingBinaries);
+
+// 包名字符白名单。表里写的都是常量，但这条链的终点是 root，所以生成命令前
+// 再过一遍：有名字不在白名单内就整批拒绝，不猜、不转义、不部分执行。
+bool isSafePackageName(const QString &name);
 
 // ── RAID FS：挂载点校验 ──────────────────────────────────
 

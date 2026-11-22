@@ -30,7 +30,7 @@ int main(int argc, char **argv)
     for (int i=0;i<8;++i) QCoreApplication::processEvents(QEventLoop::AllEvents, 60);
     QPushButton *btn=nullptr;
     for (QPushButton *b : page.findChildren<QPushButton *>())
-        if (b->text().contains(QString::fromUtf8("一键安装"))) btn=b;
+        if (b->text().contains(QString::fromUtf8("一键安装 fuse"))) btn=b;   // 精确匹配：页顶还有一句「一键安装依赖的组件」
     check(btn!=nullptr, "找到一键安装按钮控件");
     // 切到挂载出口让它进入可见路径（但 canInstallFuse 为假时仍应隐藏）
     page.setMemberDevicesForTest({ QString::fromUtf8("/dev/sda1"), QString::fromUtf8("/dev/sdb1") });

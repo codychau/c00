@@ -833,12 +833,13 @@ QString mountPointBusy(const QString &path, const QStringList &existingEntries)
            QString(" 项内容，挂载后这些会暂时看不见");
 }
 
-bool aptInstallable(const QString &osReleaseText)
+QStringList osReleaseIds(const QString &osReleaseText)
 {
     // 只认 ID= / ID_LIKE= 两行。os-release 的格式是 KEY=VALUE，值可带引号，
     // ID_LIKE 可含多个空格分隔的父系（如 debian）。用逐行解析而不是整串 find：
     // 整串 find("ubuntu") 会被 PRETTY_NAME="Ubuntu 26.04" 命中，也会把任意
-    // 注释里提到的 ubuntu 当成是 —— 那是把按钮的开关交给了一段自由文本。
+    // 注释里提到的 ubuntu 当成是 —— 那是把安装按钮的开关交给一段自由文本。
+    QStringList ids;
     for (const QString &raw : osReleaseText.split(QChar(10))) {
         const QString line = raw.trimmed();
         if (!(line.startsWith("ID=") || line.startsWith("ID_LIKE="))) continue;
@@ -849,14 +850,151 @@ bool aptInstallable(const QString &osReleaseText)
         // 去掉包裹的双引号
         if (val.startsWith(QChar(34)) && val.endsWith(QChar(34)) && val.size() >= 2)
             val = val.mid(1, val.size() - 2);
-        // 值是空格分隔的列表，逐个比对（大小写不敏感：os-release 约定小写，
-        // 但不依赖它一定遵守）
-        const QStringList parts = val.split(QChar(32), Qt::SkipEmptyParts);
-        for (const QString &p : parts) {
-            const QString lp = p.toLower();
-            if (lp == "ubuntu" || lp == "debian") return true;
-        }
+        // 值是空格分隔的列表（大小写不敏感：os-release 约定小写，但不依赖它）
+        for (const QString &p : val.split(QChar(32), Qt::SkipEmptyParts))
+            ids << p.toLower();
     }
-    return false;
+    return ids;
+}
+
+bool aptInstallable(const QString &osReleaseText)
+{
+    const QStringList ids = osReleaseIds(osReleaseText);
+    return ids.contains(QStringLiteral("ubuntu")) || ids.contains(QStringLiteral("debian"));
+}
+
+// ── 一键安装的清单 ──────────────────────────────────────────
+//
+// 每条都写的是"那家官方仓库里真的存在"的名字，各家叫法不一样的地方标在
+// 注释里。刻意**不放**的两类：
+//   · nasrs 引擎 —— 本项目的自研二进制，只能随程序一起发布，没有包可装；
+//   · 内核 target 模块 / configfs —— 前者随内核版本走（企业系常拆在
+//     kernel-modules-extra 之类的包里，猜错名字就是一条失败的 root 命令），
+//     后者是挂载动作不是包。这两条留给页面用文字提示，不进这条链。
+const QVector<DepSpec> &nasDepSpecs()
+{
+    static const QVector<DepSpec> specs = {
+        // 三家同名，最没悬念的一条
+        { QStringLiteral("mdadm（内核 RAID 工具）"), QStringLiteral("mdadm"),
+          { QStringLiteral("mdadm") },
+          { QStringLiteral("mdadm") },
+          { QStringLiteral("mdadm") } },
+
+        // LIO 配置工具。Debian/Ubuntu 的包叫 targetcli-fb（可执行文件仍是
+        // targetcli）；Fedora/openEuler 起就叫 targetcli；Arch 官方仓库没有，
+        // 只在 AUR —— 空列表，让界面如实说"这家装不了"，而不是点了报错。
+        { QStringLiteral("targetcli（LIO/iSCSI 配置工具）"), QStringLiteral("targetcli"),
+          { QStringLiteral("targetcli-fb") },
+          { QStringLiteral("targetcli") },
+          {} },
+
+        // FUSE 3。装的是挂载助手 fusermount3；/dev/fuse 属内核，不归包管。
+        { QStringLiteral("fuse3（挂载 FUSE 卷的助手）"), QStringLiteral("fusermount3"),
+          { QStringLiteral("fuse3") },
+          { QStringLiteral("fuse3") },
+          { QStringLiteral("fuse3") } },
+
+        // Samba：smbd 与 smbd.service 都在 samba 包里。Debian/Ubuntu 把
+        // testparm（离线校验 smb.conf 的那个）拆进了 samba-common-bin，
+        // 少了它 SMB 页会一直报"无法校验"，所以 apt 这条带两个包；
+        // Fedora 与 Arch 的 testparm 就在 samba 里，一个就够。
+        { QStringLiteral("samba（SMB 文件共享）"), QStringLiteral("smbd"),
+          { QStringLiteral("samba"), QStringLiteral("samba-common-bin") },
+          { QStringLiteral("samba") },
+          { QStringLiteral("samba") } },
+    };
+    return specs;
+}
+
+Pkg detectPkgManager(const QString &osReleaseText, bool haveApt,
+                     bool haveDnf, bool havePacman)
+{
+    const QStringList ids = osReleaseIds(osReleaseText);
+    auto like = [&ids](const char *n) { return ids.contains(QLatin1String(n)); };
+
+    // 归属优先于"PATH 里先找到谁"：Arch 系装 apt 兼容包、Debian 系装 dnf
+    // 的人都见过，按查找顺序选家会给错的那家发命令。
+    if (havePacman && (like("arch") || like("manjaro") || like("endeavouros")
+                    || like("garuda") || like("cachyos")))
+        return Pkg::Pacman;
+    if (haveApt && (like("ubuntu") || like("debian")))
+        return Pkg::Apt;
+    if (haveDnf  && (like("fedora") || like("rhel") || like("centos") || like("openeuler")
+                  || like("almalinux") || like("rocky")  || like("amzn")))
+        return Pkg::Dnf;
+
+    // 归属认不出来（os-release 没有 ID_LIKE，或是一个没登记过的发行版）时，
+    // 退回"哪家在就用哪家"，顺序 dnf → apt-get → pacman。
+    // 注意 openSUSE / Alpine 走不到这里：它们的 zypper / apk 本工具不支持，
+    // 而系统里通常也没有 dnf，于是返回 None，按钮会老实说"认不出包管理器"。
+    if (haveDnf)    return Pkg::Dnf;
+    if (haveApt)    return Pkg::Apt;
+    if (havePacman) return Pkg::Pacman;
+    return Pkg::None;
+}
+
+QString pkgManagerName(Pkg pm)
+{
+    switch (pm) {
+    case Pkg::Apt:    return QStringLiteral("apt-get");
+    case Pkg::Dnf:    return QStringLiteral("dnf");
+    case Pkg::Pacman: return QStringLiteral("pacman");
+    case Pkg::None:   break;
+    }
+    return QString();
+}
+
+namespace {
+// 按缺失项从表里取某一家的包名列表
+const QStringList &familyPackages(const DepSpec &s, Pkg pm)
+{
+    switch (pm) {
+    case Pkg::Apt:    return s.apt;
+    case Pkg::Dnf:    return s.dnf;
+    case Pkg::Pacman: return s.pacman;
+    case Pkg::None:   break;
+    }
+    static const QStringList none;
+    return none;
+}
+} // namespace
+
+QStringList packagesToInstall(Pkg pm, const QStringList &missingBinaries)
+{
+    QStringList out;
+    if (pm == Pkg::None) return out;
+    for (const DepSpec &s : nasDepSpecs()) {
+        if (!missingBinaries.contains(s.binary)) continue;
+        for (const QString &p : familyPackages(s, pm))
+            if (!out.contains(p)) out << p;   // 两个依赖撞同一个包时不重复装
+    }
+    return out;
+}
+
+QStringList packagesUnavailable(Pkg pm, const QStringList &missingBinaries)
+{
+    QStringList out;
+    if (pm == Pkg::None) return out;
+    for (const DepSpec &s : nasDepSpecs())
+        if (missingBinaries.contains(s.binary) && familyPackages(s, pm).isEmpty())
+            out << s.label;
+    return out;
+}
+
+QStringList dependencyLabels(const QStringList &missingBinaries)
+{
+    QStringList out;
+    for (const DepSpec &s : nasDepSpecs())
+        if (missingBinaries.contains(s.binary)) out << s.label;
+    return out;
+}
+
+bool isSafePackageName(const QString &name)
+{
+    // 白名单而不是转义：这条命令的终点是 root，能一眼看懂的字符集比
+    // "什么都能塞但我会转义"好审得多。合法包名（含 epoch/version 里常见的
+    // . + ~ : 与多架构后缀 :amd64）都在这个集合里。
+    static const QRegularExpression re("^[A-Za-z0-9][A-Za-z0-9._+~:-]{0,63}$");
+    return re.match(name).hasMatch();
 }
 } // namespace Nas
