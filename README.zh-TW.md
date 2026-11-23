@@ -237,9 +237,16 @@ AppImage 已內建該字型，不受本節影響。
 VERSION=1.2.0 ./packaging/build-appimage.sh     # 自訂版本號
 ```
 
-打包範圍：程式本體 + `llama-proxy` + **Qt 自己的函式庫與外掛**（core/gui/widgets/network/dbus、
-xcb / wayland 平台外掛、imageformats）。libc、libGL、X11、ICU 等系統函式庫一律不打包進去 —
-AppImage 的通行作法是依賴宿主端既有的系統函式庫，把 glibc 包進去反而會在別的發行版上當掉。
+打包範圍：程式本體 + `llama-proxy` + **`nasrs`（自研引擎）** + **Qt 自己的函式庫與外掛**
+（core/gui/widgets/network/dbus、xcb / wayland 平台外掛、imageformats）。libc、libGL、X11、ICU
+等系統函式庫一律不打包進去 — AppImage 的通行作法是依賴宿主端既有的系統函式庫，把 glibc 包進去
+反而會在別的發行版上當掉。
+
+`nasrs` 少了會**直接終止打包**：少一個引擎屬於「產出一個殘廢包」— 包照常啟動，介面只在選自研
+引擎時說一句「引擎不在程式旁邊」，靠啟動自我檢查是發現不了的。真的要打一個不含自研引擎的包，
+設 `ALLOW_MISSING_NASRS=1`。emoji 字型與授權檔的尋找同時認 Debian 和 RPM 兩種佈局
+（`/usr/share/fonts/truetype/noto/` 與 `/usr/share/fonts/google-noto-emoji/`、
+`/usr/share/licenses/…`），在 openEuler 上打出來的包字型是齊的。
 
 跑之前需要一次 appimagetool：
 

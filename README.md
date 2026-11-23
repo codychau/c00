@@ -219,9 +219,16 @@ RAID0 还停在"算得出布局、导不出去"（`serve` 直接退出码 3）�
 VERSION=1.2.0 ./packaging/build-appimage.sh     # 自定义版本号
 ```
 
-打包范围：程序本体 + `llama-proxy` + **Qt 自己的库和插件**（core/gui/widgets/network/dbus、
-xcb / wayland 平台插件、imageformats）。libc、libGL、X11、ICU 等系统库一律不打进去 ——
-AppImage 的通行做法是依赖宿主已有的系统库，把 glibc 打包反而会在别的发行版上崩。
+打包范围：程序本体 + `llama-proxy` + **`nasrs`（自研引擎）** + **Qt 自己的库和插件**
+（core/gui/widgets/network/dbus、xcb / wayland 平台插件、imageformats）。libc、libGL、X11、
+ICU 等系统库一律不打进去 —— AppImage 的通行做法是依赖宿主已有的系统库，把 glibc 打包反而会在
+别的发行版上崩。
+
+`nasrs` 少了会**直接终止打包**：少一个引擎属于"产出一个残废包"——包照样能启动，界面只在选
+自研引擎时说一句"引擎不在程序旁边"，靠启动自检是发现不了的。确实要打一个不含自研引擎的包，
+设 `ALLOW_MISSING_NASRS=1`。emoji 字体与许可证的查找认 Debian 和 RPM 两种布局
+（`/usr/share/fonts/truetype/noto/` 与 `/usr/share/fonts/google-noto-emoji/`、
+`/usr/share/licenses/…`），在 openEuler 上打出来的包字体是齐的。
 
 跑之前需要 appimagetool 一次：
 

@@ -49,6 +49,24 @@ else
     echo "!! 未找到 llama-proxy，AI 代理功能在 AppImage 里会不可用" >&2
 fi
 
+# nasrs 是自研引擎（RAID0 + 软件镜像 RAID1），NAS 页那两条路线全靠它。
+#
+# 这一步原来**没有**：脚本手工铺 AppDir，只拷了 server-toolbox 和
+# llama-proxy，而 CMakeLists 里的 install(PROGRAMS … nasrs …) 根本不会被这条
+# 路径触发。后果是 AppImage 里点「nasrs 镜像 RAID1」只会得到一句
+# "nasrs 引擎不在程序旁边" —— 功能在包里是死的，而构建日志里一行警告都没有。
+# 所以这里默认**缺了就终止**：少一个引擎属于"产出了一个残废包"，
+# 不该靠有人恰好看见 stderr 那行字来发现。
+if [ -x nasrs/target/release/nasrs ]; then
+    cp nasrs/target/release/nasrs "$APPDIR/usr/bin/"
+elif [ "${ALLOW_MISSING_NASRS:-0}" = "1" ]; then
+    echo "!! 未找到 nasrs，NAS 页两个自研引擎在 AppImage 里都不可用（ALLOW_MISSING_NASRS=1 已确认）" >&2
+else
+    echo "!! 未找到 nasrs/target/release/nasrs —— 先跑 cargo build --release --manifest-path nasrs/Cargo.toml" >&2
+    echo "   确实要打一个不含自研引擎的包，就设 ALLOW_MISSING_NASRS=1 再来" >&2
+    exit 1
+fi
+
 cp packaging/$APP.desktop "$APPDIR/$APP.desktop"
 cp packaging/$APP.svg     "$APPDIR/$APP.svg"
 # AppImage 规范允许根目录放 .DirIcon 作为文件管理器图标
@@ -147,6 +165,18 @@ if [ "$EMOJI_FONT" != "none" ]; then
             build/fonts/$FONT_NAME; do
             [ -f "$c" ] && src="$c" && break
         done
+        # RPM 系（openEuler / Fedora / RHEL）字体目录布局与 Debian 完全不同：
+        # 装在 /usr/share/fonts/google-noto-emoji/ 下。原来只写死 Debian 那条
+        # 路径，于是在这类机器上"找不到 emoji 字体"，打出来的包图标全是 □，
+        # 而打包机（容器）里明明装着字体 —— 不是缺字体，是找字体的写法只认一家。
+        if [ -z "$src" ]; then
+            src="$(find /usr/share/fonts -iname "$FONT_NAME" 2>/dev/null | head -1 || true)"
+        fi
+        # 最后交给 fontconfig 自己回答（别名不只有 NotoColorEmoji 一种写法）
+        if [ -z "$src" ] && command -v fc-list >/dev/null 2>&1; then
+            src="$(fc-list : file family | grep -iE 'emoji|NotoColorEmoji' \
+                   | head -1 | cut -d: -f1 || true)"
+        fi
         # 都没有就从 deb 里取（apt 的国内镜像比 GitHub 快得多）
         if [ -z "$src" ] && command -v apt-get >/dev/null 2>&1; then
             echo "    本机无 emoji 字体，尝试用 apt 取 fonts-noto-color-emoji"
@@ -203,18 +233,32 @@ FCONF
                 || echo "    （fc-cache 预热未成功，首次启动会现场扫描）"
         fi
         echo "    + 字体 $(basename "$src") ($(du -h "$FONTDIR/$FONT_NAME" | cut -f1))"
-        # SIL OFL 1.1 允许再分发，但要求随附许可证文本
+        # 许可证文本必须随附字体一起走（OFL 与 Apache-2.0 都这么要求）。
+        # 踩过的两个坑，都是"只认 Debian 布局"：
+        #  - RPM 系把许可证放在 /usr/share/licenses/<包名>/LICENSE，不是
+        #    /usr/share/doc/…/copyright，写死 Debian 路径就永远找不到。
+        #  - apt 分支把 deb 解到 build/fonts/x，而这里原来找的是 build/fontpkg —
+        #    那个目录从来不创建，于是 Debian 上"字体找到了、许可证没找到"，
+        #    自检必然失败（表现是每次打包都报缺许可证，没人看出根因是路径写错）。
         lic=""
         for c in \
             /usr/share/doc/fonts-noto-color-emoji/copyright \
-            build/fontpkg/usr/share/doc/fonts-noto-color-emoji/copyright; do
+            /usr/share/licenses/google-noto-emoji-fonts/LICENSE \
+            /usr/share/licenses/google-noto-emoji-color-fonts/LICENSE; do
             [ -f "$c" ] && lic="$c" && break
         done
+        if [ -z "$lic" ]; then
+            lic="$(find build/fonts/x /usr/share/licenses -maxdepth 3 \
+                   \( -iname 'LICENSE' -o -iname 'copyright' -o -iname 'OFL*' \) \
+                   -path '*emoji*' 2>/dev/null | head -1 || true)"
+        fi
         if [ -n "$lic" ]; then
             cp "$lic" "$FONT_LIC"
-            echo "    + 许可证 (SIL OFL 1.1)"
+            # 不写死"SIL OFL 1.1"：openEuler 随包的是 Apache-2.0（Noto Color Emoji
+            # 早期是 Apache，后来才改 OFL），写死等于把打包机上真实的许可证说成别的
+            echo "    + 许可证文本随附 ($(basename "$lic"))"
         else
-            echo "!! 未找到字体许可证文本，OFL 要求随附，自检会失败" >&2
+            echo "!! 未找到字体许可证文本，再分发字体要求随附，自检会失败" >&2
         fi
         FONT_OK=1
     else
@@ -309,9 +353,13 @@ if [ ! -f "$APPDIR/usr/plugins/platforms/libqxcb.so" ] &&
 fi
 if [ "$EMOJI_FONT" != "none" ]; then
     [ "$FONT_OK" = 1 ]                     || fail "emoji 字体没能打包进去"
-    [ -f "$FONT_LIC" ]                     || fail "缺字体许可证文本（SIL OFL 要求随附）"
+    [ -f "$FONT_LIC" ]                     || fail "缺字体许可证文本（再分发字体要求随附）"
 fi
-echo "    ✅ AppDir 结构完整（AppRun / desktop / 图标 / Qt 库 / 平台插件 / emoji 字体）"
+# 自研引擎：NAS 页的 RAID0 与软件镜像两条路线全用它。少了它包照样能起来，
+# 界面只在选那两条时说一句"引擎不在程序旁边"—— 一个能启动的残废包，
+# 靠"启动自检通过"是发现不了的，所以这里点名查。
+[ -x "$APPDIR/usr/bin/nasrs" ]           || fail "缺 nasrs 引擎（NAS 页两条自研路线全不可用）"
+echo "    ✅ AppDir 结构完整（AppRun / desktop / 图标 / Qt 库 / 平台插件 / emoji 字体 / nasrs）"
 
 # 6b. 真跑一次，确认能起来且不立刻退出
 export APPIMAGE_EXTRACT_AND_RUN=1   # 无 FUSE 的环境（容器/CI）需要

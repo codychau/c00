@@ -268,10 +268,18 @@ it directly):
 VERSION=1.2.0 ./packaging/build-appimage.sh     # custom version
 ```
 
-What gets packaged: the program itself + `llama-proxy` + **Qt's own libraries and plugins**
-(core/gui/widgets/network/dbus, the xcb / wayland platform plugins, imageformats). libc, libGL,
-X11, ICU and other system libraries are never included — the normal AppImage practice is to rely on
-the host's system libraries, and bundling glibc instead tends to crash on other distributions.
+What gets packaged: the program itself + `llama-proxy` + **`nasrs` (the in-house engine)** +
+**Qt's own libraries and plugins** (core/gui/widgets/network/dbus, the xcb / wayland platform
+plugins, imageformats). libc, libGL, X11, ICU and other system libraries are never included — the
+normal AppImage practice is to rely on the host's system libraries, and bundling glibc instead
+tends to crash on other distributions.
+
+A missing `nasrs` **stops the build**: losing one engine means shipping a crippled package — it
+starts fine, the UI only says "the nasrs engine is not next to the program" when you pick the
+in-house engine, and a startup self-check cannot catch that. To really build a package without the
+in-house engine, set `ALLOW_MISSING_NASRS=1`. Emoji font and license lookup handle both Debian and
+RPM layouts (`/usr/share/fonts/truetype/noto/` vs `/usr/share/fonts/google-noto-emoji/`,
+`/usr/share/licenses/…`), so a package built on openEuler ships the font too.
 
 You need appimagetool once before the first run:
 
