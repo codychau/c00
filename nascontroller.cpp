@@ -8,6 +8,10 @@
 #include <QDir>
 #include <QCoreApplication>
 #include <QRegularExpression>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <unistd.h>      // getuid/getgid：建副本目录时要按当前用户的属主建
 
 // ─────────────────────────────────────────────────────────────
 //  已在本机实证的 LIO 事实（解析 /lib/modules/.../*.ko 的 modinfo 与
@@ -699,6 +703,170 @@ NasController::planRaidfsUnmount(const QString &mountPoint) const
     steps.append(um);
     return steps;
 }
+// ── 软件镜像（nasrs RAID1）──────────────────────────────────
+//
+// 这条路线是"能真跑通"的那一条：普通用户权限、无内核模块、无 targetcli。
+// 所以这里的注释重点不在"还没做什么"（raidfs 那两条写的是那个），而在
+// "路径与属主为什么必须这么定"。
+//
+// 目录形状由模型层的 Nas::validateMirrorDir 把关（纯字符串判断，可离线测）；
+// 这里再加一条只有拿着卷名才能判的规矩：目录必须叫 <卷名>.nas-mirror。
+// 那条规矩顺手挡掉了最贵的一种填错 —— 把镜像目录写成挂载点本身，
+// 也就是"镜像整个分区"，一旦带上删除多余文件，副本分区上原有的东西全没。
+QVector<NasController::Step>
+NasController::planMirrorCreate(const Nas::Plan &plan) const
+{
+    QVector<Step> steps;
+    if (!safeVolumeName(plan.volumeName)) return steps;
+    if (plan.engine != Nas::Engine::MirrorRs) return steps;
+    if (plan.members.size() != Nas::kMirrorMembers) return steps;
+
+    // 叶子目录名必须正好是 <卷名>.nas-mirror，逐段比而不是 endsWith。
+    // 这条守卫挡的是最贵的一种填错：把镜像目录写成挂载点本身（/mnt/d1），
+    // 形状校验过得去，一旦勾上"删除多余文件"，删的就是那个分区上原有的东西。
+    // 用 endsWith 也不行：写成 "." + 卷名 + ".nas-mirror" 会把正确的
+    // /mnt/d1/nas.nas-mirror 判成非法（探针就是这么抓出来的 —— 当时两个合法
+    // 目录一条命令都生成不出来，界面上表现为"点了创建阵列什么也没发生"）；
+    // 写成不带点又会放行 /mnt/d1/xnas.nas-mirror 这种粘在前缀上的名字。
+    const QString leafWant = plan.volumeName + ".nas-mirror";
+    QStringList dirs;
+    for (const Nas::Member &m : plan.members) {
+        if (Nas::validateMirrorDir(m.filePath).isEmpty() == false) return steps;
+        if (m.filePath.section('/', -1) != leafWant) return steps;
+        dirs << m.filePath;
+    }
+    // 两个目录重了必须拒：nasrs 自己也会拒，但那要等到用户点下确认之后。
+    if (dirs.at(0) == dirs.at(1)) return steps;
+
+    const QString uid = QString::number(::getuid());
+    const QString gid = QString::number(::getgid());
+
+    for (int i = 0; i < dirs.size(); ++i) {
+        Step s;
+        s.program = "pkexec";
+        // -o/-g 给当前用户：挂载点十有八九是 root:root 0755，
+        // 建出来的目录若还是 root 所有，后面 nasrs（普通用户）一个文件都写不进去，
+        // 而它报的是 EACCES，看不出根因在目录属主上。
+        s.args = { "install", "-d", "-m", "0775", "-o", uid, "-g", gid, dirs.at(i) };
+        s.describe = QString::fromUtf8("%1 建副本目录 %2（属主给当前用户，后续同步不再要 root）")
+                        .arg(i == 0 ? "主网" : "副本", dirs.at(i));
+        // install -d 对已存在的目录是幂等的，也不碰里面已有的文件 → 非破坏
+        s.destructive = false;
+        steps.append(s);
+    }
+    return steps;
+}
+
+QVector<NasController::Step>
+NasController::planMirrorSync(const QString &primaryDir, const QString &secondaryDir,
+                              bool deleteExtras) const
+{
+    QVector<Step> steps;
+    if (!Nas::validateMirrorDir(primaryDir).isEmpty()) return steps;
+    if (!Nas::validateMirrorDir(secondaryDir).isEmpty()) return steps;
+    if (primaryDir == secondaryDir) return steps;   // 自己拷自己：nasrs 也会拒，这里先挡
+    const QString bin = nasrsBinaryPath();
+    if (bin.isEmpty()) return steps;
+
+    Step s;
+    s.program = bin;                       // 没有 pkexec，见头部注释
+    s.args = { "mirror", "--primary", primaryDir,
+               "--secondary", secondaryDir, "--once" };
+    if (deleteExtras) s.args << "--delete-extras";
+    s.describe = deleteExtras
+        ? QString::fromUtf8("同步到副本 %1，并删除副本上主网没有的文件").arg(secondaryDir)
+        : QString::fromUtf8("同步到副本 %1（只增不删）").arg(secondaryDir);
+    // 勾了删除就是破坏性操作：二次确认 + 手输卷名，和建阵列同一档。
+    s.destructive = deleteExtras;
+    steps.append(s);
+    return steps;
+}
+
+NasController::MirrorStatus
+NasController::parseMirrorStatus(const QByteArray &json)
+{
+    MirrorStatus st;
+    const QJsonDocument doc = QJsonDocument::fromJson(json, nullptr);
+    if (!doc.isObject()) return st;          // parsed 保持 false：调用方据此说"读不出来"
+    const QJsonObject o = doc.object();
+    st.parsed = true;
+    st.ok           = o.value("ok").toBool(false);
+    st.srcFiles     = quint64(o.value("src_files").toDouble());
+    st.dstFiles     = quint64(o.value("dst_files").toDouble());
+    st.lagFiles     = quint64(o.value("lag_files").toDouble());
+    st.lagBytes     = quint64(o.value("lag_bytes").toDouble());
+    st.extraFiles   = quint64(o.value("extra_files").toDouble());
+    st.extraBytes   = quint64(o.value("extra_bytes").toDouble());
+    st.copiedFiles  = quint64(o.value("copied_files").toDouble());
+    st.copiedBytes  = quint64(o.value("copied_bytes").toDouble());
+    st.deleted      = quint64(o.value("deleted").toDouble());
+    st.failed       = quint64(o.value("failed").toDouble());
+    st.torn         = quint64(o.value("torn").toDouble());
+    st.remainingFiles = quint64(o.value("remaining_files").toDouble());
+    st.remainingBytes = quint64(o.value("remaining_bytes").toDouble());
+    for (const QJsonValue &v : o.value("errors").toArray())
+        st.messages << v.toString();
+    return st;
+}
+
+QString NasController::MirrorStatus::summaryLine() const
+{
+    if (!parsed)
+        return error.isEmpty() ? QString::fromUtf8("读不到同步状态") : error;
+    QStringList parts;
+    parts << (lagFiles == 0
+                ? QString::fromUtf8("副本与主网一致（%1 个文件）").arg(srcFiles)
+                : QString::fromUtf8("副本落后 %1 个文件 / %2")
+                      .arg(lagFiles).arg(Nas::humanSize(qint64(lagBytes))));
+    if (extraFiles > 0)
+        // 说清"没删"是默认行为，否则这句看起来像漏了功能
+        parts << QString::fromUtf8("副本上多 %1 个文件（默认不删）").arg(extraFiles);
+    if (failed > 0)
+        parts << QString::fromUtf8("%1 个文件同步失败").arg(failed);
+    if (torn > 0)
+        parts << QString::fromUtf8("%1 个文件当时还在被写，下轮重拷").arg(torn);
+    return parts.join("；");
+}
+
+NasController::MirrorStatus
+NasController::queryMirrorStatus(const QString &primaryDir, const QString &secondaryDir,
+                                 int timeoutMs) const
+{
+    MirrorStatus st;
+    const QString bin = nasrsBinaryPath();
+    if (bin.isEmpty()) {
+        st.error = QString::fromUtf8("nasrs 引擎不在程序旁边，查不了同步状态");
+        return st;
+    }
+    if (!Nas::validateMirrorDir(primaryDir).isEmpty()
+        || !Nas::validateMirrorDir(secondaryDir).isEmpty()) {
+        st.error = QString::fromUtf8("副本目录不合法");
+        return st;
+    }
+
+    QProcess p;
+    p.start(bin, { "mirror", "--primary", primaryDir,
+                   "--secondary", secondaryDir, "--report", "--json" });
+    // 扫一棵大树要真的遍历磁盘。这里同步等待，所以必须有超时：没有它，
+    // 一次 NFS 卡住或几十万个文件就能把界面整个冻死。
+    if (!p.waitForFinished(timeoutMs)) {
+        p.kill();
+        p.waitForFinished(1000);
+        st.error = QString::fromUtf8("扫描副本超过 %1 秒，已中止（文件太多或磁盘正忙）")
+                       .arg(timeoutMs / 1000);
+        return st;
+    }
+    st = parseMirrorStatus(p.readAllStandardOutput());
+    if (!st.parsed) {
+        // 引擎在 JSON 之外把原因写在 stderr（比如副本目录还没建）
+        const QString err = QString::fromUtf8(p.readAllStandardError()).trimmed();
+        st.error = err.isEmpty()
+            ? QString::fromUtf8("引擎退出码 %1，没有给出结果").arg(p.exitCode())
+            : err.split('\n').first();
+    }
+    return st;
+}
+
 // 一键装 fuse3。条件已由调用方（Env::canInstallFuse）把过：apt 系 + apt 在
 // + fusermount3 缺。这里只负责生成那条命令，不再重复判定 —— 判定和生成
 // 分开放，按钮该不该出现的逻辑只有一处。

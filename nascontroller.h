@@ -133,6 +133,49 @@ bool smbService = false;      // systemd 是否有 smbd.service
 QVector<Step> planRaidfsMount(const Nas::Plan &plan, const QString &mountPoint) const;
 // 卸载。umount 对未挂载目标会失败，这一步本身就是那道检查。
 QVector<Step> planRaidfsUnmount(const QString &mountPoint) const;
+
+    // ── 软件镜像（nasrs RAID1）───────────────────────────────
+    //
+    // 与上面两条路线最要紧的差别：**除了建目录，全程不需要 root**。
+    // 没有内核模块、没有 targetcli、没有 nbd，所以这条链是能真跑通的，
+    // 不像 raidfs 那样只是把"引擎实现之后"的命令先摆在这儿。
+
+    // ① 建两个副本目录：<挂载点>/<卷名>.nas-mirror，一主一备。
+    // 提权只到 install -d 为止，并把属主给当前用户（-o/-g）：分区挂载点通常
+    // 是 root 所有，不 chown 的话后面以普通用户同步时会撞上 EACCES，
+    // 而那句报错看不出根因在目录属主上。
+    QVector<Step> planMirrorCreate(const Nas::Plan &plan) const;
+
+    // 一轮同步。**故意不套 pkexec**：镜像写的就是用户自己的目录，
+    // 用 root 跑会把副本里的文件全变成 root 所有，回头 Samba 写不进去，
+    // 还得再补一轮 chown —— 为省事提权，最后往往更麻烦。
+    QVector<Step> planMirrorSync(const QString &primaryDir,
+                                 const QString &secondaryDir,
+                                 bool deleteExtras) const;
+
+    // 状态查询（只读，与 existingArrays() 同类：不提权、不改任何东西）。
+    struct MirrorStatus
+    {
+        bool parsed = false;        // JSON 是否读出来了（≠ 同步成功）
+        bool ok = false;            // 引擎自己说这一轮没有失败
+        quint64 srcFiles = 0, dstFiles = 0;
+        quint64 lagFiles = 0, lagBytes = 0;         // 副本还差多少
+        quint64 extraFiles = 0, extraBytes = 0;     // 副本上多出来的
+        quint64 copiedFiles = 0, copiedBytes = 0;   // 本轮做了什么
+        quint64 deleted = 0, failed = 0, torn = 0;  // torn = 拷贝期间源文件还在写
+        quint64 remainingFiles = 0, remainingBytes = 0;
+        QStringList messages;                        // 引擎带回来的逐条说明
+        QString error;                               // 进程层/解析层的错，人话
+        bool inSync() const { return parsed && lagFiles == 0; }
+        QString summaryLine() const;                 // 一行话，界面直接显示
+    };
+    // 真跑一次 `nasrs mirror --report --json`。同步阻塞，最多 timeoutMs 毫秒 ——
+    // 大目录树要扫盘，没有这道闸界面就会整个冻住（这是本类里唯一的阻塞调用）。
+    MirrorStatus queryMirrorStatus(const QString &primaryDir,
+                                   const QString &secondaryDir,
+                                   int timeoutMs = 15000) const;
+    // 解析单独抽出来当纯函数：探针可以不起进程、直接喂一段 JSON 验字段映射。
+    static MirrorStatus parseMirrorStatus(const QByteArray &json);
     // 一键装 fuse3：仅在 Env::canInstallFuse() 为真时由页面调用。
     QVector<Step> planInstallFuse() const;
 

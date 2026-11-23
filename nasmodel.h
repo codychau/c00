@@ -43,10 +43,11 @@ enum class Risk {
     LoopOrRom,     // 回环设备、光驱等，不是真实磁盘
 };
 
-// 两种实现路线
+// 三种实现路线
 enum class Engine {
     Mdadm,       // mdadm 建 /dev/mdN
-    Raid0Rs,     // 自研 nasrs（RAID0 over 文件）
+    Raid0Rs,     // 自研 nasrs（RAID0 over 文件）—— 导出层尚未接入，现在还跑不通
+    MirrorRs,    // 自研 nasrs（软件 RAID1：主网目录 → 副本目录）—— 现在就能跑
 };
 
 // 不可选的原因；Safe 时为 QString()
@@ -88,7 +89,12 @@ Verdict judge(const Block &b, const QVector<QString> &systemDisks, Engine engine
 enum class MemberKind {
     Partition,   // mdadm：直接用分区
     BackingFile, // 自研引擎：分区上放一个大文件
+    MirrorDir,   // 自研镜像：分区上放一个目录，文件在这里存一份完整的
 };
+
+// 镜像阵列的成员数固定为 2：一主一备。多于 2 个在语义上是"多份备份"，
+// 那是另一件事（要选谁是主、坏了顶哪一份），不在这一版里偷偷扩。
+constexpr int kMirrorMembers = 2;
 
 struct Member
 {
@@ -133,6 +139,43 @@ ArrayInfo evaluateArray(const Plan &plan);
 // 大的那个写不进去就会让阵列写成"半条带"—— 直接算成失败。
 qint64 suggestBackingSize(const QVector<qint64> &partitionFreeBytes,
                           double safetyRatio = 0.95);
+
+// ── 软件镜像（nasrs RAID1）──────────────────────────────────
+//
+// 与上面两条路线的差别不是"又一个 RAID 级别"，而是**今天就能用**：
+// 镜像只要求两个普通目录 + 普通用户权限，不需要 root、不需要 nbd/loop/LIO。
+// 用户要的就是这个 —— 勾两个分区，文件完整地存两份，访问者读其中一份；
+// 坏了一块盘，另一份还在，把共享指过去就行。
+//
+// 三条语义（改界面前先读，UI 的每一句话都出自这里）：
+//   · 单向：主副本可写，副本网只接受同步。两侧不一致时**一律以主网为准**。
+//   · 可用容量 = 一份，不是两份之和。另一份是保险，不是空间。
+//   · 两份必须在**不同的物理盘**上，否则盘坏两份一起没，镜像意义为零。
+
+// 副本目录 = <挂载点>/<卷名>.nas-mirror
+// 挂载点为空（分区没挂载）就返回空串：没有落脚处时不该猜一个路径出来。
+QString mirrorDirPath(const QString &mountpoint, const QString &volumeName);
+
+// 镜像目录合法性。比 SMB 的共享路径严：这个值会进 `nasrs mirror --secondary`，
+// 而那条命令带 --delete-extras 时是**会删文件的**。喂进去一个 /mnt 或 /etc
+// 之类的，删的就是别人的东西。所以要求绝对、规范、至少两层、每段字符集最小。
+QString validateMirrorDir(const QString &path);
+
+// 镜像目录与"已有挂载点"的关系，返回空 = 没有冲突。
+// 只有一条规则但它是致命的：镜像目录**不能正好等于某个挂载点**。
+// 等于挂载点就意味着镜像的对象是整个分区，而 --delete-extras 会删掉
+// 主网上没有的一切 —— 副本分区上原有的那些目录全部蒸发。
+// 这个判断必须拿真实挂载表来比，validateMirrorDir 看不出"路径恰好是个挂载点"。
+QString mirrorDirConflict(const QString &path, const QStringList &mountPoints);
+
+// 成员组合的问题，返回空 = 没问题。两类必须挡：
+//   · 数量不是 2（一主一备是这个功能的定义，不是参数）
+//   · 两个分区在同一块物理盘上 —— 这条最要紧：它给的是**零**冗余，
+//     而用户以为自己有了冗余。这种"看起来安全其实没有"比直接失败更坏。
+QString mirrorMembersWarning(const QVector<QString> &devicePaths);
+
+// 主/副本网的分工说明，给界面直接显示的一句话（primaryIsAccess 决定措辞）。
+QString mirrorRoleNote(bool primaryIsAccess);
 
 // IQN：遵循 ietf.2007-06 规范，反序域名 + 日期 + 序号
 // 例：iqn.2026-11.com.example:servertoolbox-01

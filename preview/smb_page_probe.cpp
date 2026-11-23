@@ -47,6 +47,27 @@ static NasBoardWidget *boardOf(NasPage *p)
 }
 
 // 找一个「可选」的盘位设备名，用来模拟点击
+static QRadioButton *mountRadio(NasPage *p)
+{
+    for (QRadioButton *r : p->findChildren<QRadioButton *>())
+        if (r->text().contains(QString::fromUtf8("挂载"))) return r;
+    return nullptr;
+}
+
+// 固定一块"挂在 /mnt/x 上的分区"。用真机布局做断言的探针不可移植，见 main 里那段。
+static NasBoardWidget::Disk mkDisk(const QString &dev, const QString &mp)
+{
+    NasBoardWidget::Disk d;
+    d.device = dev;
+    d.label = dev.section('/', -1);
+    d.mountpoint = mp;
+    d.fstype = "ext4";
+    d.bytes = 2LL << 40;
+    d.freeBytes = 1LL << 40;
+    d.selectable = true;
+    return d;
+}
+
 static QString pickableDevice(NasPage *p, NasBoardWidget *board)
 {
     // 用 tooltip 里带设备名的槽位；不可用的槽位 isBlocked，点击会被拒
@@ -92,10 +113,20 @@ int main(int argc, char **argv)
     check(iqn->isChecked(),  "默认停在 iSCSI（不擅自改默认）");
     check(!smb->isEnabled(), "0 个成员时 SMB 禁用");
 
+    // 灌进固定的两块盘。原来这个探针直接用真机 lsblk 的结果，断言里写死了
+    // "/dev/sdb1 挂 /mnt/d" —— 换台机器（本沙箱只有 sda1..sda6）预填断言就必然红，
+    // 红了之后整条探针长期挂红，真正回归反而看不见。盘固定下来，断言才是断言。
+    page.setDisksForTest({ mkDisk("/dev/sda1", "/mnt/e"), mkDisk("/dev/sdb1", "/mnt/d") });
+
     printf("\n=== 2 个成员 ===\n");
     page.setMemberDevicesForTest({ "/dev/sda1", "/dev/sdb1" });
     check(!smb->isEnabled(), "2 个成员：SMB 仍禁用（多盘只能 iSCSI）");
-    check(iqn->isChecked(),  "2 个成员：模式是 iSCSI");
+    // 这里原来断言「模式是 iSCSI」。它后来被"≥2 盘自动建议挂载目录"那条
+    // 正常行为做废了，却一直没人改，于是这条探针长期是红的。真正要守的规矩是
+    // 「SMB 不可选时，落在选中的必须是 ≥2 成员合法的出口（iSCSI 或挂载目录）」，
+    // 而不是具体哪一个 —— 写死哪一个都会让下一次加出口时又红一次。
+    check(iqn->isChecked() || mountRadio(&page)->isChecked(),
+          "2 个成员：落在 iSCSI 或挂载目录之一（SMB 不可选时不许停在 SMB 上）");
 
     printf("\n=== 关键：2 减到 1 → 自动切 SMB ===\n");
     page.setMemberDevicesForTest({ "/dev/sda1" });

@@ -57,6 +57,13 @@ public:
     // 东西，靠真机状态去断言等于让探针看机器脸色。
     void setEnvForTest(const NasController::Env &env);
 
+    // 同样是探针专用：塞进一组假的盘，绕开 lsblk。
+    // 没有这个钩子，镜像那几条断言就得看跑探针这台机器的磁盘布局脸色 ——
+    // 本机所有分区都在同一块系统盘上，"两份在不同盘"这条正常路径根本无法出现。
+    // 刻意与 setMemberDevicesForTest 分开：先灌盘、再灌成员，顺序反了会被
+    // refresh() 用真 lsblk 覆盖掉。
+    void setDisksForTest(const QVector<NasBoardWidget::Disk> &disks);
+
 private slots:
     void refresh();                       // 重新枚举分区与环境
     void onSlotClicked(const QString &device, int slotIndex);
@@ -98,6 +105,23 @@ private:
     void onMountFsClicked();
     void onUmountFsClicked();
     void onInstallFuseClicked();
+
+    // ── 软件镜像（nasrs RAID1）──
+    // 与 raidfs 那个框的区别：这里的每条命令都真能跑，所以徽标写的是
+    // "落后多少"，而不是"引擎未实现"。两者共用一个位置（都是第三个出口），
+    // 但语义完全不同，别把它们的状态合并成一套。
+    QWidget *buildMirrorBox();
+    void refreshMirrorBox();              // 路径预填 + 成员组合告警 + 按钮可用性
+    void onMirrorSyncClicked();           // 「同步一次」
+    void onMirrorCheckClicked();          // 「查副本落后多少」
+    void onMirrorAccessChanged(int idx);  // 访问主副本 / 副本网
+    void applyMirrorStatus(const NasController::MirrorStatus &st);
+    void onMirrorAutoToggled(bool on);    // 定时同步开关
+    void setMirrorPill(const QString &text, const char *role);
+    // 算出并校验两个副本目录（同步 / 查询 / 定时器三个入口共用同一套守卫）。
+    // 返回 false 时 *why 里一定是要显示给用户看的那句话 —— 失败却不说话，
+    // 按钮就成了哑弹，而这正是本页最不想要的那种"点了没反应"。
+    bool mirrorDirs(QString *primary, QString *secondary, QString *why) const;
     void appendInstallLog(const QString &chunk);  // 写日志框（\r 也算换行）
     // 把 m_env 翻译成右上角缺失提示 + 页顶按钮显隐。两处必须同一次算完，
     // 否则会在中间状态下互相打脸（按钮说"齐了"、红字还说"缺"）。
@@ -150,6 +174,11 @@ private:
 
     NasController m_ctl;
     NasController::Env m_env;
+    // 刚跑完的是哪一类队列。镜像同步跑完要顺手回查一次副本状态（"现在真的
+    // 一致了么"），而别的队列跑完不该触发这个 —— 建阵列、导 SMB 之后去扫两遍
+    // 目录既慢又莫名其妙。
+    enum class RunKind { None, MirrorSync };
+    RunKind m_pendingRun = RunKind::None;
     QVector<NasBoardWidget::Disk> m_disks;
     QStringList m_sysMounts;           // 刷新时算好的系统挂载点，SMB 护栏用
     QString m_pendingConfirmName;      // 需要手输核对的卷名
@@ -186,6 +215,24 @@ private:
     QLabel    *m_fsNote = nullptr;
     QPushButton *m_umountBtn = nullptr;  // 撤销挂载
     QPushButton *m_installFuseBtn = nullptr; // 一键装 fuse3（仅 apt 系且缺时出现）
+
+    // ── 软件镜像（nasrs RAID1）──
+    // 两个副本路径刻意用 QLabel 而不是 QLineEdit：这个值必须等于
+    // "<挂载点>/<卷名>.nas-mirror"，而镜像的执行命令带删除能力。
+    // 给它一个输入框就等于允许用户把它改成 /mnt 或某个挂载点本身，
+    // 那时"同步"删掉的就是别人的文件。路径由程序算，用户只负责看。
+    QWidget *m_mirrorBox = nullptr;
+    QLabel  *m_mirrorPrimary = nullptr;
+    QLabel  *m_mirrorSecondary = nullptr;
+    QComboBox *m_mirrorAccess = nullptr;   // 访问者读哪一份（决定 SMB 指向）
+    QLabel  *m_mirrorPill = nullptr;       // 未同步 / 已一致 / 读不到
+    QLabel  *m_mirrorState = nullptr;      // 最近一次同步或查询的结果，一行话
+    QLabel  *m_mirrorWarn = nullptr;       // 成员组合的问题（同盘 = 零冗余）
+    QPushButton *m_mirrorSyncBtn = nullptr;
+    QPushButton *m_mirrorCheckBtn = nullptr;
+    QCheckBox *m_mirrorDeleteExtras = nullptr;  // 同步时删副本上多余的
+    QCheckBox *m_mirrorAuto = nullptr;          // 定时同步
+    QTimer  *m_mirrorTimer = nullptr;
 
     // ── 页顶通栏「一键安装依赖的组件」──
     // 这一组的状态只有"在装 / 没在装"两种，全部围绕 m_installProc 转。

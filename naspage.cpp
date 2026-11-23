@@ -42,6 +42,7 @@
 #include <QScrollBar>
 #include <QTextCursor>
 #include <QTimer>
+#include <QStyle>
 #include <algorithm>
 
 static constexpr int kTopbarInset = 52;   // 与 MainWindow 顶栏一致，正文自行让出
@@ -52,6 +53,35 @@ static const QString kInstallBtnText = QString::fromUtf8("点击此按钮一键�
 // 装包的兜底超时。取 20 分钟：镜像慢时 apt 装 samba 能到十几分钟，
 // 再长就属于"网络或仓库出问题了"，继续挂着只会让人以为程序死了。
 static constexpr int kInstallTimeoutMs = 20 * 60 * 1000;
+
+// 镜像的定时同步节拍。5 分钟是权衡后的值：再短就会和用户正在做的拷贝抢盘，
+// 再长就失去"副本基本是新的"这个意义。写死不做参数：可调就多一个要解释的东西。
+static constexpr int kMirrorAutoMs = 5 * 60 * 1000;
+
+// 下拉框下标 → 引擎。三处要用（判定分区可选性、组 Plan、算"还缺什么"），
+// 抽成函数而不是每处各写一个三元：漏一处就会出现"分区按镜像的规则挑好了、
+// 建阵列时却按 RAID0 生成命令"——两套判据各说各话，是最难查的那类错。
+static Nas::Engine engineFromIndex(int i)
+{
+    switch (i) {
+    case 1:  return Nas::Engine::Raid0Rs;
+    case 2:  return Nas::Engine::MirrorRs;
+    default: return Nas::Engine::Mdadm;
+    }
+}
+
+// 换 role 属性后必须重新 polish。QSS 只在 style 感知到属性变化时才重算配色，
+// 光 setProperty 会让控件留着旧配色 —— 表现是"徽标文字变成'已一致'了，
+// 颜色还红着"。本页别处的 role 都是构造时设一次，所以没碰到这个问题。
+static void setRole(QWidget *w, const char *role)
+{
+    if (!w) return;
+    if (w->property("role").toByteArray() == role) return;   // 没变就别白折腾一遍 polish
+    w->setProperty("role", role);
+    w->style()->unpolish(w);
+    w->style()->polish(w);
+    w->update();
+}
 
 // ── 小工具 ──────────────────────────────────────────────────
 static QString runCapture(const QString &prog, const QStringList &args)
@@ -121,6 +151,14 @@ NasPage::NasPage(QWidget *parent)
     m_engine = new QComboBox();
     m_engine->addItem("mdadm（内核 RAID，稳）");
     m_engine->addItem("nasrs RAID0（条带 over 文件，不占分区）");
+    m_engine->addItem("nasrs 镜像 RAID1（文件存两份，读其中一份）");
+    // 三条路线的可用性差别很大，下拉框里就要说清：RAID0 那条缺导出通路（现在
+    // 只能算布局），镜像这条普通权限就能跑通。把两条并列成"看着都能用"是骗人。
+    m_engine->setItemData(0, "内核 mdadm 建阵列，稳，但要 root 与 mdadm 包。", Qt::ToolTipRole);
+    m_engine->setItemData(1, "自研引擎把两个大文件拼成块设备。"
+                             "导出层（loop/NBD + LIO）尚未实现，现在只能算布局。", Qt::ToolTipRole);
+    m_engine->setItemData(2, "自研引擎把主目录完整拷到副本目录，访问者读其中一份。"
+                             "不要 root、不要内核模块，现在就能用；可用容量是一份。", Qt::ToolTipRole);
     connect(m_engine, &QComboBox::currentIndexChanged, this, &NasPage::onEngineChanged);
     topRow->addWidget(m_engine);
     topRow->addStretch(1);
@@ -197,6 +235,11 @@ NasPage::NasPage(QWidget *parent)
     m_volName = new QLineEdit();
     m_volName->setPlaceholderText("nas-data（创建时要手输核对）");
     form->addRow("名称", m_volName);
+    // 副本目录名是由卷名推的，所以名字一改，镜像格与共享路径就得跟着重算。
+    // 少了这条，"先点分区、后填名字"这个最常见的顺序会让两条路径标签一直停在
+    // 「（先在上方点选第一个分区）」不动 —— 页面显示的路径和真去建的那个不是
+    // 同一个东西，比不显示更糟。（镜像页探针抓的就是它）
+    connect(m_volName, &QLineEdit::textChanged, this, [this]() { refreshMirrorBox(); });
 
     m_chunk = new QSpinBox();
     m_chunk->setRange(4, 16384);
@@ -270,6 +313,14 @@ NasPage::NasPage(QWidget *parent)
     m_fsBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     outer->addWidget(m_fsBox);
     m_fsBox->setVisible(false);   // 默认 iSCSI，挂载框先藏起来
+
+    // 软件镜像出口：只在选了镜像引擎时出现。它和 m_fsBox 是同一层级的位置，
+    // 但状态语义完全不同（那边写"引擎未实现"，这边写"副本落后多少"），
+    // 所以是两个框而不是一处显隐。
+    m_mirrorBox = buildMirrorBox();
+    m_mirrorBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    outer->addWidget(m_mirrorBox);
+    m_mirrorBox->setVisible(false);
 
     m_smbWarn = new QLabel();
     m_smbWarn->setWordWrap(true);
@@ -360,15 +411,16 @@ NasPage::NasPage(QWidget *parent)
 
 void NasPage::onEngineChanged(int index)
 {
-    const Nas::Engine e = (index == 1) ? Nas::Engine::Raid0Rs : Nas::Engine::Mdadm;
+    const Nas::Engine e = engineFromIndex(index);
     m_board->setEngine(e);
     // 换引擎 = 换"能不能用"的判据，必须重新判定，
     // 否则界面上还停留在上一个引擎的可选性
     refresh();
-    // 两条路线的危险程度不同，这里只切视图：
+    // 三条路线的危险程度不同，这里只切视图：
     //  mdadm  会抹掉所选分区的文件系统（mdadm --create 写 superblock）
-    //  nasrs  只在分区已有的文件系统里放一个大文件，不碰分区本身
-    // 卡口数量两者目前都按 RAID0 给（至少 2 个才有意义）。
+    //  nasrs  只在分区已有的文件系统里放东西（RAID0 放一个大文件，镜像放一个目录），
+    //         不碰分区本身
+    // 卡口数量：RAID0 至少 2 个成员才有意义，镜像必须正好 2 个（一主一备）。
     updateSummary();
 }
 
@@ -386,7 +438,7 @@ QStringList NasPage::nonPackageBlockers() const
     if (iscsi && !m_env.kernelModules)
         b << QString::fromUtf8("内核目录里没找到 target_core_mod 模块文件"
                                "（若内核已把 LIO 编进去，这条可以忽略）");
-    if (!m_env.nasrsBinary && m_engine && m_engine->currentIndex() == 1)
+    if (!m_env.nasrsBinary && m_engine && engineFromIndex(m_engine->currentIndex()) != Nas::Engine::Mdadm)
         b << QString::fromUtf8("nasrs 引擎不在程序旁边 —— 它随本程序一起发布，不是发行版的包");
     return b;
 }
@@ -460,6 +512,19 @@ void NasPage::setEnvForTest(const NasController::Env &env)
     syncEnvAndInstallUi();
 }
 
+// 仅供离线探针：见 naspage.h 上的说明。这里不调 refresh()，因为 refresh 会
+// 重跑 lsblk 把灌进去的盘覆盖掉；要重算的只有画板与出口区这两件事。
+void NasPage::setDisksForTest(const QVector<NasBoardWidget::Disk> &disks)
+{
+    m_disks = disks;
+    m_sysMounts.clear();
+    for (const NasBoardWidget::Disk &d : disks)
+        if (!d.mountpoint.isEmpty()) m_sysMounts << d.mountpoint;
+    m_board->setDisks(m_disks);
+    updateSummary();
+    syncExportMode(m_board->members().size());
+}
+
 void NasPage::refresh()
 {
     m_env = m_ctl.probe();
@@ -486,8 +551,7 @@ void NasPage::refresh()
         if (b.type == "part") parentWithPart.insert(Nas::parentDiskOf(b.name));
 
     for (const Nas::Block &b : all) {
-        const Nas::Engine eng = (m_engine->currentIndex() == 1)
-                                  ? Nas::Engine::Raid0Rs : Nas::Engine::Mdadm;
+        const Nas::Engine eng = engineFromIndex(m_engine->currentIndex());
         const Nas::Verdict v = Nas::judge(b, sysDisks, eng);
         if (b.type != "part" && b.type != "disk") continue;   // loop/rom 由 judge 拒
         if (b.type == "disk" && parentWithPart.contains(b.name)) continue;
@@ -569,7 +633,7 @@ void NasPage::onSlotRejected(const QString &device, int slotIndex, const QString
 Nas::Plan NasPage::currentPlan() const
 {
     Nas::Plan plan;
-    plan.engine = (m_engine->currentIndex() == 1) ? Nas::Engine::Raid0Rs : Nas::Engine::Mdadm;
+    plan.engine = engineFromIndex(m_engine->currentIndex());
     plan.stripeChunkKiB = m_chunk->value();
     plan.volumeName = m_volName->text().trimmed();
 
@@ -590,6 +654,13 @@ Nas::Plan NasPage::currentPlan() const
             // 这也是"nasrs 不占分区"的代价：必须有个可用的文件系统。
             for (const NasBoardWidget::Disk &d : m_disks)
                 if (d.device == dev) m.filePath = d.mountpoint + "/" + plan.volumeName + ".nas.img";
+        } else if (plan.engine == Nas::Engine::MirrorRs) {
+            // 镜像目录同样落在挂载点里，由模型层拼（它顺手处理了卷名清洗与
+            // "挂载点为空就返回空串"）。这里不自己拼字符串：拼法有两份，
+            // 迟早和创建/同步那两处对不上，而对不上的表现是"同步的是另一个目录"。
+            m.kind = Nas::MemberKind::MirrorDir;
+            for (const NasBoardWidget::Disk &d : m_disks)
+                if (d.device == dev) m.filePath = Nas::mirrorDirPath(d.mountpoint, plan.volumeName);
         } else {
             m.kind = Nas::MemberKind::Partition;
         }
@@ -609,37 +680,56 @@ void NasPage::syncExportMode(int memberCount)
     if (m_syncingExportMode) return;
     m_syncingExportMode = true;
     struct G { bool &f; ~G(){ f = false; } } guard{ m_syncingExportMode };
+
+    // 镜像引擎先单独算：它给的是**目录**，不是块设备，所以三条出口里只剩
+    // SMB 一条是说得通的（iSCSI 没有块设备可导，"挂载目录"那条是给 nasrs
+    // RAID0 卷的）。放在成员数规则之前，是为了让下面那几条规则保持原样 ——
+    // 它们说的是"条带/SMB 不跨盘"这套 RAID0 的事实，混进镜像就全变了味。
+    const bool mirror = engineFromIndex(m_engine->currentIndex()) == Nas::Engine::MirrorRs;
+
     // 三个出口的合法成员数各不相同，这是本函数唯一真正的规则来源：
     //   iSCSI  ≥1 —— 块级，单盘也能导（只是没条带）
     //   SMB    =1 —— 文件级，Samba 不跨盘条带
     //   挂载   ≥2 —— 这条出口的卖点就是"多盘 RAID0 挂成一个目录"，
     //                少于 2 个成员 nasrs 自己会拒，这里先挡下来
-    const bool smbAllowed   = (memberCount == 1);
-    const bool mountAllowed = (memberCount >= 2);
+    const bool smbAllowed   = mirror ? true : (memberCount == 1);
+    const bool mountAllowed = mirror ? false : (memberCount >= 2);
     const bool wasMount = m_modeMount->isChecked();
 
+    m_modeIscsi->setEnabled(!mirror);
     m_modeSmb->setEnabled(smbAllowed);
     m_modeMount->setEnabled(mountAllowed);
 
-    // 成员数变化可能让当前选中的出口失效，此时回落到 iSCSI（总是合法）。
-    if (!smbAllowed && m_modeSmb->isChecked())   m_modeIscsi->setChecked(true);
-    if (!mountAllowed && m_modeMount->isChecked()) m_modeIscsi->setChecked(true);
+    // 成员数变化可能让当前选中的出口失效，此时回落到本引擎下总是合法的那条：
+    // 镜像回 SMB（唯一出口），其余回 iSCSI。
+    const auto fallback = [this, mirror] {
+        if (mirror) m_modeSmb->setChecked(true);
+        else        m_modeIscsi->setChecked(true);
+    };
+    if (mirror && !m_modeSmb->isChecked()) fallback();
+    if (!smbAllowed && m_modeSmb->isChecked())   fallback();
+    if (!mountAllowed && m_modeMount->isChecked()) fallback();
 
     // 只有"刚刚才允许"时主动切过去，不做每敲一下都跳：
     //   掉到 1 盘 -> 建议 SMB；升到 ≥2 盘且原本是 iSCSI -> 建议挂载。
-    // 用户手动选过别的就不抢（droppedToOne 那套同理）。
+    // 用户手动选过别的就不抢（droppedToOne 那套同理）。镜像不参与这套
+    // 建议：它没有得选，抢着切只会把用户刚看懂的界面搬走。
     const bool roseToMulti = (memberCount >= 2 && m_lastMemberCount < 2);
     const bool droppedToOne = (memberCount == 1 && m_lastMemberCount > 1);
-    if (smbAllowed && droppedToOne && !m_modeSmb->isChecked()) {
+    if (!mirror && smbAllowed && droppedToOne && !m_modeSmb->isChecked()) {
         m_modeSmb->setChecked(true);
         setStatus("只剩 1 个分区，已切到 SMB 文件共享（可手动切回 iSCSI）");
-    } else if (mountAllowed && roseToMulti && !wasMount && m_modeIscsi->isChecked()) {
+    } else if (!mirror && mountAllowed && roseToMulti && !wasMount && m_modeIscsi->isChecked()) {
         m_modeMount->setChecked(true);
         setStatus("已选多个分区，可挂成一个目录给影视服务扫（可切回 iSCSI）");
     }
 
     // 提示语按当前成员数说明"还能选哪些"，而不是只说选中的那个
-    if (memberCount == 0)
+    if (mirror)
+        m_modeHint->setText(QString::fromUtf8(
+            "镜像引擎：出口只有 SMB —— 它给的是目录，不是块设备。"
+            "对外读哪一份，在下面「访问哪一份」里选"));
+    else if (memberCount == 0)
         m_modeHint->setText("先在上方点选分区：1 个可走 SMB，≥2 个可做 RAID（iSCSI 或挂目录）");
     else if (memberCount == 1)
         m_modeHint->setText("单个分区：SMB（文件级，最常用）或 iSCSI（块级）；挂载目录需 ≥2 盘");
@@ -650,7 +740,15 @@ void NasPage::syncExportMode(int memberCount)
     // 三选一显隐 + 按钮文案
     const bool smb   = m_modeSmb->isChecked();
     const bool mount = m_modeMount->isChecked();
-    m_iscsiBox->setVisible(!smb && !mount);
+    m_mirrorBox->setVisible(mirror);
+    // 「名称」那一行长在 m_iscsiBox 里，而三条路线都要给它起名（镜像的副本
+    // 目录名就是由卷名推的），所以镜像模式下这个框仍要显示，只把 iSCSI 专属
+    // 的几行收掉。整框藏起来的后果是"选了镜像就没地方填名字"。
+    m_iscsiBox->setVisible((!smb && !mount) || mirror);
+    if (auto *fl = qobject_cast<QFormLayout *>(m_iscsiBox->layout())) {
+        // 行 0 是「名称」，其余（条带粒度 / IQN / 监听地址 / 说明 / 匿名）iSCSI 专属
+        for (int r = 1; r < fl->rowCount(); ++r) fl->setRowVisible(r, !mirror);
+    }
     m_smbBox->setVisible(smb);
     m_smbWarn->setVisible(smb);
     m_fsBox->setVisible(mount);
@@ -660,9 +758,14 @@ void NasPage::syncExportMode(int memberCount)
     m_exportBtn->setText(smb   ? "② 导出 SMB 共享"
                          : mount ? "② 挂载到目录"
                                  : "② 导出 iSCSI");
+    // 「②」的可用条件：有成员就允许点。之前唯一的开关藏在 onAllFinished 里、
+    // 判据是"已经成功导过 iSCSI"，于是纯 SMB 与纯镜像的用法永远点不动它 ——
+    // 那两个出口连 IQN 都没有。缺什么（Samba 没装、目录不存在、IQN 非法）
+    // 由各自的出口给出具体错误，比把按钮一直灰着说得更清楚。
+    m_exportBtn->setEnabled(memberCount >= 1);
 
     // SMB 表单预填：只在没被用户改过时填默认值，别覆盖用户输入
-    if (smb) {
+    if (smb && !mirror) {
         const QString dev = m_board->members().value(0);
         for (const NasBoardWidget::Disk &d : m_disks) {
             if (d.device != dev) continue;
@@ -681,6 +784,7 @@ void NasPage::syncExportMode(int memberCount)
     }
     refreshSmbWarning();
     refreshRaidFsStatus();
+    refreshMirrorBox();
     m_lastMemberCount = memberCount;
 }
 
@@ -727,7 +831,14 @@ void NasPage::updateSummary()
     const Nas::ArrayInfo info = Nas::evaluateArray(plan);
     // 容量与告警由画板底部的汇总条显示（drawSummary 里同样调 evaluateArray），
     // 这里不再放第二个 QLabel —— 曾经两个都显示 info.note，同样的话出现两遍。
-    m_createBtn->setEnabled(info.members >= 1 && !plan.volumeName.isEmpty());
+    //
+    // 镜像的成员数是定义的一部分（一主一备），不是偏好：1 个没有副本、
+    // 3 个以上语义未定（谁是主、坏了顶哪份），所以按钮在这里就卡住，
+    // 而不是等用户填完名字、按过确认之后才告诉他数量不对。
+    bool canCreate = info.members >= 1 && !plan.volumeName.isEmpty();
+    if (plan.engine == Nas::Engine::MirrorRs)
+        canCreate = info.members == Nas::kMirrorMembers && !plan.volumeName.isEmpty();
+    m_createBtn->setEnabled(canCreate);
 }
 
 QVector<NasController::Step>
@@ -749,7 +860,9 @@ NasPage::confirmSteps(const QVector<NasController::Step> &steps, const QString &
         if (s.destructive) hasDestructive = true;
 
     if (hasDestructive) {
-        text += "\n\n其中含**破坏性**操作，可能不可逆。";
+        // 这里进的是 QMessageBox 的纯文本，写 **加粗** 只会让用户看见两颗星，
+        // 反而把这句最要紧的话弄脏了。
+        text += "\n\n其中含「破坏性」操作，可能不可逆。";
         const auto ret = QMessageBox::warning(this, "确认执行", text,
                                               QMessageBox::Yes | QMessageBox::No,
                                               QMessageBox::No);
@@ -795,6 +908,24 @@ void NasPage::createArray()
     m_pendingConfirmName = plan.volumeName;
 
     QVector<NasController::Step> steps;
+    if (plan.engine == Nas::Engine::MirrorRs) {
+        // 镜像这条路在这里只做一件事：建两个目录。它不抹任何东西，所以
+        // 上面那些"会抹分区"的守卫一条都不适用（mdadm 的、losetup 的都不是）。
+        // 守卫用的是 mirrorDirs —— 和「同步」「查询」同一套，三处不会各说各话。
+        QString p, s, why;
+        if (!mirrorDirs(&p, &s, &why)) { setStatus(why, true); return; }
+        steps = m_ctl.planMirrorCreate(plan);
+        if (steps.isEmpty()) {
+            setStatus("生成建目录命令失败（卷名或路径不合法）", true);
+            return;
+        }
+        const QVector<NasController::Step> go =
+            confirmSteps(steps, QString::fromUtf8("创建镜像阵列（建两个副本目录）"));
+        if (go.isEmpty()) return;
+        m_ctl.run(go);
+        return;
+    }
+
     if (plan.engine == Nas::Engine::Mdadm)
         steps = m_ctl.planMdadmCreate(plan, plan.volumeName);
     else
@@ -994,11 +1125,34 @@ void NasPage::showStepLog(int index, bool ok, const QString &output)
 
 void NasPage::onAllFinished(bool success)
 {
+    const RunKind kind = m_pendingRun;
+    m_pendingRun = RunKind::None;
+
     if (success && !m_currentIqn.isEmpty())
         m_teardownBtn->setEnabled(true);
-    // 创建成功后才允许导出
+    // 注意这里**不再**是「②」的唯一开关：判据是 m_currentIqn 非空，而 SMB
+    // 与镜像这条流压根没有 IQN，于是原来的写法让 ② 在纯 SMB 用法下永远是灰的
+    // —— 只有先成功导一次 iSCSI，② 才会亮。真正的开关在 syncExportMode：
+    // 有成员就允许点，具体缺什么由 exportSmb / exportIscsi 自己给出逐条错误。
     if (m_createBtn && !m_currentIqn.isEmpty())
         m_exportBtn->setEnabled(true);
+
+    if (kind == RunKind::MirrorSync) {
+        if (success) {
+            // 同步进程自己说"拷完了"不算数，回查一次两份的差值再说"已一致"。
+            // 多扫一遍目录的代价换来的是：这句话不是承诺，是实测。
+            setMirrorPill(QString::fromUtf8("核对中…"), "pill-warn");
+            m_mirrorState->setText(QString::fromUtf8("同步进程已结束，正在回查两份是否一致…"));
+            QString p, s, why;
+            if (mirrorDirs(&p, &s, &why))
+                QTimer::singleShot(0, this, [this, p, s]() {
+                    applyMirrorStatus(m_ctl.queryMirrorStatus(p, s));
+                });
+        } else {
+            setMirrorPill(QString::fromUtf8("同步失败"), "pill-warn");
+            m_mirrorState->setText(QString::fromUtf8("同步没有跑完，副本还是旧的"));
+        }
+    }
 
     setStatus(success ? "完成" : "中途失败，后面的步骤已跳过", !success);
     refresh();
@@ -1219,6 +1373,349 @@ void NasPage::onInstallFuseClicked()
     const auto go = confirmSteps(steps, "安装 fuse3");
     if (go.isEmpty()) return;
     m_ctl.run(go);
+}
+
+// ── 软件镜像（nasrs RAID1）──────────────────────────────────
+//
+// 这一格是本页少数"点下去真的会动数据、但不要 root"的地方。措辞因此全部
+// 围绕两个数字：差几个文件、差多少字节。不写"已实现/未实现"那种工程话
+// （raidfs 那格才需要写那个），也不写"同步成功"这种还没跑就先承诺的话。
+//
+// 三个决定，改界面之前先看：
+//   · 路径只显示不给输入：这个值会进 nasrs 的 argv，而那条命令带删除能力。
+//   · 顺序 = 用户在面板上点分区的先后：先点的是主副本（可写），后点的是副本。
+//     不提供"交换"按钮，因为重排成员会影响 RAID0 的条带序号，一个控件两件事。
+//   · 访问副本网时共享强制只读：副本会被下一次同步覆盖，访客写进去的东西
+//     会在下一轮消失 —— 那比不给写危险得多。
+
+QWidget *NasPage::buildMirrorBox()
+{
+    auto *box = new QWidget();
+    auto *v = new QVBoxLayout(box);
+    v->setContentsMargins(0, 8, 0, 0);
+
+    auto *form = new QFormLayout();
+    form->setContentsMargins(0, 0, 0, 0);
+
+    m_mirrorPrimary = new QLabel();
+    m_mirrorPrimary->setObjectName("mirrorPrimary");   // 探针按名字找它
+    m_mirrorPrimary->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_mirrorSecondary = new QLabel();
+    m_mirrorSecondary->setObjectName("mirrorSecondary");
+    m_mirrorSecondary->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    form->addRow(QString::fromUtf8("主副本（写这里）"), m_mirrorPrimary);
+    form->addRow(QString::fromUtf8("副本（同步过去）"), m_mirrorSecondary);
+
+    m_mirrorAccess = new QComboBox();
+    m_mirrorAccess->setObjectName("mirrorAccess");
+    m_mirrorAccess->addItem(QString::fromUtf8("主副本 —— 默认，读写都在它上面"), 0);
+    m_mirrorAccess->addItem(QString::fromUtf8("副本网 —— 主盘故障时切过来顶住"), 1);
+    m_mirrorAccess->setToolTip(QString::fromUtf8(
+        "这一项决定 SMB 共享把哪个目录交给访问者。\n"
+        "副本网是上一次同步时的快照：切过去之后，这期间主副本上的新写入看不见。"));
+    connect(m_mirrorAccess, &QComboBox::currentIndexChanged,
+            this, &NasPage::onMirrorAccessChanged);
+    form->addRow(QString::fromUtf8("访问哪一份"), m_mirrorAccess);
+
+    m_mirrorPill = new QLabel(QString::fromUtf8("没查过"));
+    m_mirrorPill->setObjectName("mirrorPill");
+    m_mirrorPill->setProperty("role", "pill-warn");
+    m_mirrorState = new QLabel(QString::fromUtf8("点右边那个按钮，看看两份差多少"));
+    m_mirrorState->setObjectName("mirrorState");
+    m_mirrorState->setWordWrap(true);
+    m_mirrorState->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_mirrorState->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_mirrorCheckBtn = new QPushButton(QString::fromUtf8("查副本落后多少"));
+    m_mirrorCheckBtn->setObjectName("mirrorCheckBtn");
+    m_mirrorCheckBtn->setToolTip(QString::fromUtf8(
+        "遍历两个目录逐项比对（nasrs mirror --report）。只读，不写任何文件；"
+        "文件很多时要几十秒。"));
+    connect(m_mirrorCheckBtn, &QPushButton::clicked, this, &NasPage::onMirrorCheckClicked);
+    auto *stateRow = new QHBoxLayout();
+    stateRow->setContentsMargins(0, 0, 0, 0);
+    stateRow->addWidget(m_mirrorPill);
+    stateRow->addWidget(m_mirrorState, 1);
+    stateRow->addWidget(m_mirrorCheckBtn);
+    form->addRow(QString::fromUtf8("同步状态"), stateRow);
+
+    m_mirrorDeleteExtras = new QCheckBox(
+        QString::fromUtf8("同步时删掉副本上「主网没有」的文件（默认不删）"));
+    m_mirrorDeleteExtras->setToolTip(QString::fromUtf8(
+        "默认关：主网误删的东西一旦同步过去，两份就都没了。\n"
+        "保持关闭，多出来的旧文件只占空间，不伤人。"));
+    // 勾了删除就顺手关掉定时：没人盯着的时候让机器自动删文件，
+    // 出事的时候你不会知道，等知道的时候已经找不回来了。
+    connect(m_mirrorDeleteExtras, &QCheckBox::toggled, this, [this](bool on) {
+        if (on && m_mirrorAuto && m_mirrorAuto->isChecked()) {
+            m_mirrorAuto->setChecked(false);
+            setStatus("已关掉每 5 分钟自动同步：定时同步不做删除", true);
+        }
+    });
+
+    m_mirrorAuto = new QCheckBox(QString::fromUtf8("每 5 分钟自动同步一次（只增不删）"));
+    m_mirrorAuto->setToolTip(QString::fromUtf8(
+        "到点就跑一轮同步，只拷新增与改过的文件，绝不删副本上的东西。\n"
+        "上一轮没跑完会跳过本次，不会排第二个进程。"));
+    connect(m_mirrorAuto, &QCheckBox::toggled, this, &NasPage::onMirrorAutoToggled);
+
+    form->addRow(QString(), m_mirrorDeleteExtras);
+    form->addRow(QString(), m_mirrorAuto);
+    v->addLayout(form);
+
+    // 成员组合的问题（不是 2 个、或两块盘是同一块）用红字，且只在有问题时出现。
+    // 常驻说明走 setStatus，不占这条 —— 常驻的红字看两天就不看了。
+    m_mirrorWarn = new QLabel();
+    m_mirrorWarn->setObjectName("mirrorWarn");
+    m_mirrorWarn->setWordWrap(true);
+    m_mirrorWarn->setTextFormat(Qt::RichText);
+    m_mirrorWarn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_mirrorWarn->setProperty("role", "bad");
+    m_mirrorWarn->setVisible(false);
+    v->addWidget(m_mirrorWarn);
+
+    // 同步按钮排最后：它是"上面都填好之后"才成立的动作，和 SMB 那格里的
+    // 「卸载该目录」同一层级，不放进底部的 ①/② 主流程行。
+    auto *row = new QHBoxLayout();
+    row->setContentsMargins(0, 0, 0, 0);
+    row->addStretch(1);
+    m_mirrorSyncBtn = new QPushButton(QString::fromUtf8("同步到副本"));
+    m_mirrorSyncBtn->setObjectName("mirrorSyncBtn");
+    m_mirrorSyncBtn->setToolTip(QString::fromUtf8(
+        "把主副本完整拷到副本目录（只增不删，除非勾了上面那项）。\n"
+        "普通用户权限就够，不要 root。"));
+    connect(m_mirrorSyncBtn, &QPushButton::clicked, this, &NasPage::onMirrorSyncClicked);
+    row->addWidget(m_mirrorSyncBtn);
+    v->addLayout(row);
+
+    m_mirrorTimer = new QTimer(this);
+    m_mirrorTimer->setInterval(kMirrorAutoMs);
+    connect(m_mirrorTimer, &QTimer::timeout, this, [this]() {
+        // 上一轮还在跑就跳过这一次，而不是再排一个进程：两个 nasrs 同时往
+        // 同一个副本目录写，会互相把对方正在写的临时文件当成陌生文件。
+        if (m_ctl.busy()) return;
+        QString p, s, why;
+        if (!mirrorDirs(&p, &s, &why)) {
+            m_mirrorTimer->stop();
+            setStatus("定时同步已停：" + why, true);
+            return;
+        }
+        const auto steps = m_ctl.planMirrorSync(p, s, false);   // 定时：永远只增不删
+        if (steps.isEmpty()) {
+            m_mirrorTimer->stop();
+            setStatus("定时同步已停：生成命令失败（目录或引擎路径不合法）", true);
+            return;
+        }
+        setMirrorPill(QString::fromUtf8("同步中…"), "pill-warn");
+        m_pendingRun = RunKind::MirrorSync;
+        m_ctl.run(steps);
+    });
+
+    refreshMirrorBox();
+    return box;
+}
+
+void NasPage::setMirrorPill(const QString &text, const char *role)
+{
+    if (!m_mirrorPill) return;
+    m_mirrorPill->setText(text);
+    ::setRole(m_mirrorPill, role);
+}
+
+// 算出并校验两个副本目录。三个入口（同步、查询、定时器）共用同一套守卫，
+// 免得其中一处漏了"目录正好等于挂载点"这种检查，另两处挡住了。
+// why 一定带回给用户看的那句话 —— 返回 false 却不说话，按钮就成了哑弹。
+bool NasPage::mirrorDirs(QString *primary, QString *secondary, QString *why) const
+{
+    const Nas::Plan plan = currentPlan();
+    if (plan.engine != Nas::Engine::MirrorRs) {
+        *why = QString::fromUtf8("当前不是镜像引擎");
+        return false;
+    }
+    QVector<QString> devs;
+    for (const Nas::Member &m : plan.members) devs << m.device;
+
+    const QString warn = Nas::mirrorMembersWarning(devs);
+    if (!warn.isEmpty()) { *why = warn; return false; }
+
+    const QString p = plan.members.at(0).filePath;
+    const QString s = plan.members.at(1).filePath;
+    if (p.isEmpty() || s.isEmpty()) {
+        *why = QString::fromUtf8("有成员所在分区没有挂载点：副本目录没有落脚处。"
+                                 "先把它挂载上再刷新。");
+        return false;
+    }
+    const QString pErr = Nas::validateMirrorDir(p);
+    if (!pErr.isEmpty()) { *why = QString::fromUtf8("主副本目录：%1").arg(pErr); return false; }
+    const QString sErr = Nas::validateMirrorDir(s);
+    if (!sErr.isEmpty()) { *why = QString::fromUtf8("副本目录：%1").arg(sErr); return false; }
+
+    // 与真实挂载表比一次。validateMirrorDir 只看形状，看不出
+    // "这个路径恰好就是某个分区的挂载点" —— 而那种情况下删除多余文件
+    // 清掉的是整个副本分区上原有的东西。
+    QStringList mounts;
+    for (const NasBoardWidget::Disk &d : m_disks)
+        if (!d.mountpoint.isEmpty()) mounts << d.mountpoint;
+    const QString pc = Nas::mirrorDirConflict(p, mounts);
+    if (!pc.isEmpty()) { *why = QString::fromUtf8("主副本目录：%1").arg(pc); return false; }
+    const QString sc = Nas::mirrorDirConflict(s, mounts);
+    if (!sc.isEmpty()) { *why = QString::fromUtf8("副本目录：%1").arg(sc); return false; }
+
+    if (!m_env.nasrsBinary) {
+        *why = QString::fromUtf8("nasrs 引擎不在程序旁边 —— 它随本程序一起发布，不是发行版的包");
+        return false;
+    }
+    *primary = p;
+    *secondary = s;
+    return true;
+}
+
+void NasPage::refreshMirrorBox()
+{
+    if (!m_mirrorPrimary) return;
+    const bool mirror = engineFromIndex(m_engine->currentIndex()) == Nas::Engine::MirrorRs;
+    if (!mirror) {
+        // 换走引擎就把定时器关掉：一个看不见的进程还在往目录里写东西，
+        // 是这一页最不该出现的事。
+        if (m_mirrorAuto && m_mirrorAuto->isChecked()) m_mirrorAuto->setChecked(false);
+        m_smbPath->setReadOnly(false);
+        m_smbWrite->setEnabled(true);
+        return;
+    }
+
+    const Nas::Plan plan = currentPlan();
+    QString devs;
+    auto labelFor = [&plan](int i) -> QString {
+        if (i >= plan.members.size()) return QString();
+        return plan.members.at(i).device;
+    };
+    const QString p = plan.members.size() > 0 ? plan.members.at(0).filePath : QString();
+    const QString s = plan.members.size() > 1 ? plan.members.at(1).filePath : QString();
+
+    // 两条路径长得几乎一样（都是 …/<卷名>.nas-mirror），只报路径分不清谁是谁，
+    // 所以各自带上它所在的那个分区名。
+    m_mirrorPrimary->setText(p.isEmpty()
+        ? QString::fromUtf8("（先在上方点选第一个分区）") : p + "　· " + labelFor(0));
+    m_mirrorSecondary->setText(s.isEmpty()
+        ? QString::fromUtf8("（再点选第二个分区）") : s + "　· " + labelFor(1));
+    Q_UNUSED(devs);
+
+    QVector<QString> devList;
+    for (const Nas::Member &m : plan.members) devList << m.device;
+    const QString warn = Nas::mirrorMembersWarning(devList);
+    m_mirrorWarn->setText(warn);
+    m_mirrorWarn->setVisible(!warn.isEmpty());
+
+    m_mirrorSyncBtn->setEnabled(warn.isEmpty() && !m_ctl.busy());
+    m_mirrorCheckBtn->setEnabled(warn.isEmpty() && !m_ctl.busy());
+
+    // 访问哪一份 → 决定共享路径。这里覆盖 m_smbPath 是有意的：镜像模式下
+    // 那个框是只读的，被覆盖的只能是程序自己填的值，不会盖掉用户的手输。
+    const bool accessSecondary = (m_mirrorAccess->currentIndex() == 1);
+    const QString acc = accessSecondary ? s : p;
+    m_smbPath->setReadOnly(true);
+    if (!acc.isEmpty() && m_smbPath->text() != acc) m_smbPath->setText(acc);
+    // 副本网强制只读：下一次同步会把主副本整份盖回来，
+    // 访客写进去的东西会在下一轮无声消失 —— 那比根本不给写更危险。
+    if (accessSecondary) {
+        if (m_smbWrite->isChecked()) m_smbWrite->setChecked(false);
+        m_smbWrite->setEnabled(false);
+    } else {
+        m_smbWrite->setEnabled(true);
+    }
+}
+
+void NasPage::onMirrorAccessChanged(int idx)
+{
+    Q_UNUSED(idx)
+    refreshMirrorBox();
+    // 这句话就是"访问哪一份"这个下拉框的全部后果，放在这里说而不是写进
+    // tooltip：tooltip 要鼠标停上去才看得到，而这里选错一次的代价是
+    // "别人读到的是昨天的文件"，得让他当场看见。
+    setStatus(Nas::mirrorRoleNote(m_mirrorAccess->currentIndex() == 0));
+}
+
+void NasPage::onMirrorAutoToggled(bool on)
+{
+    if (!m_mirrorTimer) return;
+    if (on) {
+        if (m_mirrorDeleteExtras->isChecked()) {
+            // 这里拒绝而不是默默改成"不删"：勾了删除又开定时，说明用户想要的
+            // 是"自动镜像站"，而那个组合本页面不提供给任何人自动执行。
+            setStatus("定时同步不做删除。要用定时同步请先取消上面那个删除选项", true);
+            m_mirrorAuto->setChecked(false);
+            return;
+        }
+        m_mirrorTimer->start();
+        setStatus(QString::fromUtf8("每 5 分钟自动同步一次（只增不删）已开启"));
+    } else {
+        m_mirrorTimer->stop();
+        setStatus("定时同步已关闭");
+    }
+}
+
+void NasPage::onMirrorSyncClicked()
+{
+    QString p, s, why;
+    if (!mirrorDirs(&p, &s, &why)) { setStatus(why, true); return; }
+
+    const bool del = m_mirrorDeleteExtras->isChecked();
+    const auto steps = m_ctl.planMirrorSync(p, s, del);
+    if (steps.isEmpty()) {
+        setStatus("生成同步命令失败（目录名不合法，或引擎不在程序旁边）", true);
+        return;
+    }
+
+    QVector<NasController::Step> go;
+    if (del) {
+        // 会删文件 → 走完整确认（逐条列命令 + 手输卷名），和建阵列同一档。
+        m_pendingConfirmName = m_volName->text().trimmed();
+        go = confirmSteps(steps, QString::fromUtf8("同步到副本（含删除多余文件）"));
+    } else {
+        // 只增不删不弹框：这一步不会让任何文件消失。每次同步都弹一框，
+        // 用户学会的唯一一件事就是看都不看按回车 —— 那会把真要他看的那几次也一起废掉。
+        go = steps;
+    }
+    if (go.isEmpty()) return;
+
+    setMirrorPill(QString::fromUtf8("同步中…"), "pill-warn");
+    m_mirrorState->setText(QString::fromUtf8("正在拷贝…文件多时要等一会儿，别关页面"));
+    m_pendingRun = RunKind::MirrorSync;
+    m_ctl.run(go);
+}
+
+void NasPage::onMirrorCheckClicked()
+{
+    QString p, s, why;
+    if (!mirrorDirs(&p, &s, &why)) { setStatus(why, true); return; }
+
+    setMirrorPill(QString::fromUtf8("查询中…"), "pill-warn");
+    m_mirrorState->setText(QString::fromUtf8("正在遍历两个目录…文件多时要几十秒"));
+    // 用 singleShot(0) 而不是就地查询：状态文字得先画出来，界面才有反应。
+    // 查询本身是同步遍历磁盘的（见 queryMirrorStatus 的超时说明），
+    // 就地跑的话这两句永远看不到 —— 用户只会觉得按钮点了没动静。
+    QTimer::singleShot(0, this, [this, p, s]() {
+        applyMirrorStatus(m_ctl.queryMirrorStatus(p, s));
+    });
+}
+
+void NasPage::applyMirrorStatus(const NasController::MirrorStatus &st)
+{
+    m_mirrorState->setText(st.summaryLine());
+    if (!st.parsed) {
+        setMirrorPill(QString::fromUtf8("读不到"), "pill-warn");
+        setStatus(st.error.isEmpty() ? QString::fromUtf8("读不到副本状态") : st.error, true);
+        return;
+    }
+    if (!st.ok) {
+        setMirrorPill(QString::fromUtf8("%1 个文件失败").arg(st.failed), "pill-warn");
+    } else if (st.inSync()) {
+        setMirrorPill(QString::fromUtf8("已一致"), "pill-ok");
+    } else {
+        setMirrorPill(QString::fromUtf8("落后 %1 个").arg(st.lagFiles), "pill-warn");
+    }
+    setStatus(st.summaryLine(), !st.ok);
+    if (!st.messages.isEmpty())
+        m_mirrorState->setText(st.summaryLine() + "\n· " + st.messages.join("\n· "));
 }
 
 // ── 页顶通栏：一键安装依赖的组件（dnf / apt-get / pacman）─────

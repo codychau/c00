@@ -134,6 +134,17 @@ static bool looksLikeRaidMember(const QString &fstype)
 // 最小可用容量：2 GiB。RAID0 至少两个成员，太小没意义。
 static constexpr qint64 kMinBytes = 2LL * 1024 * 1024 * 1024;
 
+// 该引擎是否要求分区**已有可写的文件系统**。
+//
+// mdadm 直接拿分区当成员（会抹掉上面的文件系统），所以"已挂载"是障碍、
+// "空分区"正合适。两条自研路线相反：它们只在已有的文件系统里放东西
+// （RAID0 放一个大文件，镜像放一个目录），所以"已挂载"是前提、"空分区"用不了。
+//
+// 写成 `!= Mdadm` 而不是枚举两个自研值：将来再加第三条不碰分区的路线时，
+// 枚举的写法会静默走回 mdadm 的判定 —— 那意味着界面会把"已挂载的分区"标成
+// 不可选，或者更糟：把空分区标成可选，然后 nasrs 在用户点创建时才开始报错。
+static bool needsExistingFileSystem(Engine e) { return e != Engine::Mdadm; }
+
 Verdict judge(const Block &b, const QVector<QString> &systemDisks, Engine engine)
 {
     Verdict v;
@@ -174,8 +185,8 @@ Verdict judge(const Block &b, const QVector<QString> &systemDisks, Engine engine
 
     // 已挂载：两条路线结论**相反**，这是本文件最容易被"顺手统一掉"的地方
     if (!b.mountpoint.isEmpty()) {
-        if (engine == Engine::Raid0Rs) {
-            // 自研引擎要在它已有的文件系统里放 backing 文件，挂载着是前提而非障碍
+        if (needsExistingFileSystem(engine)) {
+            // 自研引擎要在它已有的文件系统里放东西（文件或目录），挂载着是前提而非障碍
             if (b.fstype.isEmpty()) {
                 v.risk = Risk::HasFilesystem;
                 v.reason = "已挂载但文件系统类型未知，无法确认能否放文件";
@@ -226,11 +237,13 @@ Verdict judge(const Block &b, const QVector<QString> &systemDisks, Engine engine
 
     // 空分区（无文件系统）：
     //   mdadm    正合适 —— 直接当成员
-    //   自研引擎  用不了 —— 没文件系统就放不下 backing 文件，
+    //   自研引擎  用不了 —— 没文件系统就放不下 backing 文件或镜像目录，
     //             而本工具不会替你 mkfs（那是更大的破坏）
-    if (engine == Engine::Raid0Rs) {
+    if (needsExistingFileSystem(engine)) {
         v.risk = Risk::HasFilesystem;
-        v.reason = "没有文件系统，自研引擎无法在其上建 backing 文件";
+        v.reason = (engine == Engine::MirrorRs)
+                     ? "没有文件系统，自研镜像无法在其上建副本目录"
+                     : "没有文件系统，自研引擎无法在其上建 backing 文件";
         v.selectable = false;
         return v;
     }
@@ -245,6 +258,15 @@ Verdict judge(const Block &b, const QVector<QString> &systemDisks, Engine engine
 // 这是 RAID0 最反直觉也最容易出事的地方：100G + 500G 只有 200G 可用，
 // 多出来的 300G 永远用不上。用户挑分区时多半以为能得 600G，
 // 所以这里把浪费量算出来、在 UI 上明说。
+// 成员的分区路径列表。镜像那几条判定按父盘名算，得先从 Member 里把 device 掏出来。
+static QVector<QString> devicesOf(const Plan &plan)
+{
+    QVector<QString> v;
+    v.reserve(plan.members.size());
+    for (const Member &m : plan.members) v << m.device;
+    return v;
+}
+
 ArrayInfo evaluateArray(const Plan &plan)
 {
     ArrayInfo info;
@@ -273,6 +295,29 @@ ArrayInfo evaluateArray(const Plan &plan)
         info.health = ArrayHealth::Single;
         info.usable = minCap;
         info.note = "只有一个成员，等同直连单盘，没有条带加速。";
+        return info;
+    }
+
+    // ── 镜像：可用容量 = 最小的那个成员，不是各成员之和 ──
+    // 与 RAID0 的账**正好相反**，所以这条必须走在通用算法前面：
+    // RAID0 是 min×N（100G+100G 得 200G），镜像是 min×1（100G+100G 还是 100G，
+    // 另一份是保险）。用通用算法报出来的数字会让用户以为镜像能多倍扩容，
+    // 而真实能写进去的只有最小的那块盘的量 —— 写满才发现是"半份副本"。
+    if (plan.engine == Engine::MirrorRs) {
+        info.usable = minCap;
+        info.wasted = info.totalRaw - minCap;   // 副本那份 + 容量差的零头
+
+        const QString memberWarn = mirrorMembersWarning(devicesOf(plan));
+        if (!memberWarn.isEmpty()) {
+            // 一主一备凑不齐、或两份在同一块盘上：这里就把话说明白，
+            // 不放到"点创建之后"才报错 —— 那时用户已经填完名字、按过确认了。
+            info.health = ArrayHealth::Single;
+            info.note = memberWarn;
+            return info;
+        }
+        info.health = ArrayHealth::Ok;
+        info.note = QString("镜像：可用 %1，另有 %2 作为副本（不计容量）。写满 %1 就真满了。")
+                        .arg(humanSize(info.usable), humanSize(minCap));
         return info;
     }
 
@@ -311,6 +356,108 @@ qint64 suggestBackingSize(const QVector<qint64> &partitionFreeBytes,
     const double v = double(minFree) * safetyRatio;
     return qint64(v / (1024 * 1024)) * (1024 * 1024);
 }
+
+// ── 软件镜像（nasrs RAID1）──────────────────────────────────
+
+QString mirrorDirPath(const QString &mountpoint, const QString &volumeName)
+{
+    if (mountpoint.isEmpty() || volumeName.isEmpty()) return QString();
+    if (!mountpoint.startsWith('/')) return QString();
+
+    // 卷名洗一遍：它会变成目录名，而目录名之后会进 nasrs 的 argv。
+    // 清洗后为空就返回空串，不猜一个 "unnamed.nas-mirror" ——
+    // 那会把"你还没填名字"这件事伪装成"程序建了个怪名字的目录"。
+    QString n = volumeName;
+    n.replace(QRegularExpression("[^A-Za-z0-9._-]"), "_");
+    n = n.remove(QRegularExpression("^[._-]+"));
+    if (n.isEmpty()) return QString();
+
+    const QString base = QDir::cleanPath(mountpoint);
+    // 挂载点若是 "/" 就不该在它下面建卷目录：那是系统根，
+    // 在里面凭空多出一个目录，和"数据都在数据盘上"这个前提对不上。
+    if (base == "/" || base == "/mnt" || base == "/media") return QString();
+    return base + "/" + n + ".nas-mirror";
+}
+
+QString validateMirrorDir(const QString &path)
+{
+    if (path.isEmpty()) return QString::fromUtf8("镜像目录不能为空");
+    if (!path.startsWith('/')) return QString::fromUtf8("镜像目录必须是绝对路径");
+    const QString clean = QDir::cleanPath(path);
+    if (clean != path)
+        return QString::fromUtf8("镜像目录要写成规范路径（不要含 .. 或 //）：") + clean;
+
+    const QStringList parts = clean.mid(1).split('/', Qt::SkipEmptyParts);
+    // 至少两层：一层意味着它要么是两个副本的公共父目录（/mnt），
+    // 要么是一个分区挂载点本身（/data）—— 后者在 --delete-extras 下会清空整个分区。
+    if (parts.size() < 2)
+        return QString::fromUtf8("镜像目录要在挂载点之下，例如 /mnt/d1/nas.nas-mirror");
+
+    static const QRegularExpression ok("^[A-Za-z0-9][A-Za-z0-9._-]*$");
+    for (const QString &p : parts)
+        if (!ok.match(p).hasMatch())
+            return QString::fromUtf8("目录名只能用字母、数字、点、下划线、短横，且以字母数字开头：") + p;
+
+    // 系统目录一律不许。这一条不是装饰：镜像的执行命令带删除能力，
+    // 而"填错一个目录"和"删掉系统里的东西"之间只差一次回车。
+    static const QSet<QString> deny = {
+        "bin", "boot", "dev", "etc", "lib", "lib32", "lib64",
+        "proc", "root", "run", "sbin", "srv", "sys", "usr", "var"
+    };
+    if (deny.contains(parts.first()))
+        return QString::fromUtf8("镜像目录不能在系统目录 %1 下面").arg(parts.first());
+    return QString();
+}
+
+QString mirrorDirConflict(const QString &path, const QStringList &mountPoints)
+{
+    const QString clean = QDir::cleanPath(path);
+    for (const QString &m : mountPoints) {
+        const QString mm = QDir::cleanPath(m);
+        if (mm.isEmpty()) continue;
+        // 只判"正好等于挂载点"这一种。判"在挂载点之内"是错的：
+        // 镜像目录本来就该在某个挂载点之内，那正是它的定义。
+        if (clean == mm)
+            return QString::fromUtf8(
+                "镜像目录正好等于挂载点 %1：那意味着镜像对象是整个分区，"
+                "而删除多余文件那一步会把该分区上原有的内容全部删掉。"
+                "请在它下面再指一层子目录。").arg(mm);
+    }
+    return QString();
+}
+
+QString mirrorMembersWarning(const QVector<QString> &devicePaths)
+{
+    if (devicePaths.size() != kMirrorMembers)
+        return QString::fromUtf8("镜像阵列要正好 %1 个成员（一主一备），当前 %2 个。")
+                    .arg(kMirrorMembers).arg(devicePaths.size());
+
+    QSet<QString> parents;
+    for (const QString &p : devicePaths) {
+        const QString name = p.section('/', -1);   // /dev/sdb1 → sdb1
+        if (name.isEmpty()) return QString::fromUtf8("成员设备名不完整：%1").arg(p);
+        parents.insert(parentDiskOf(name));
+    }
+    if (parents.size() == 1)
+        return QString::fromUtf8(
+            "两个分区都在 %1 上：这块盘一坏，两份副本一起没 —— 那等于没有镜像。"
+            "请换不同盘上的两个分区。").arg(*parents.constBegin());
+    return QString();
+}
+
+QString mirrorRoleNote(bool primaryIsAccess)
+{
+    // 这句是下拉框唯一的后果说明，所以写在状态栏里而不是 tooltip：tooltip 要
+    // 鼠标停上去才看得见，而这里选错一次的代价是"别人读到昨天的文件"。
+    // 刻意不用 **加粗** 这类标记 —— 状态栏是纯文本，星号会原样显示出来。
+    return primaryIsAccess
+        ? QString::fromUtf8("访问走主副本：写入也在主副本，副本是它的完整拷贝。"
+                            "主盘坏了把这里切到「副本网」，共享立刻还能读到文件。")
+        : QString::fromUtf8("访问暂时走副本网：读到的是上一次同步时的内容，"
+                            "这期间主副本上的新写入看不见；共享同时被强制只读 —— "
+                            "访客写进来的东西会在下一轮同步被盖掉。切回主副本即可恢复。");
+}
+
 
 // ── IQN ────────────────────────────────────────────────────
 // iSCSI Qualified Name 规范：iqn.<年份>-<月份>.<反序域名>:<自定义>

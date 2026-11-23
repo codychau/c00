@@ -166,6 +166,7 @@ add_custom_target(build-nasrs
     COMMAND ${CMAKE_COMMAND} -E create_symlink
         ${CMAKE_CURRENT_SOURCE_DIR}/nasrs/target/release/nasrs ${CMAKE_BINARY_DIR}/nasrs
     DEPENDS nasrs/Cargo.toml nasrs/src/main.rs nasrs/src/raid.rs nasrs/src/nbd.rs nasrs/src/lib.rs
+          nasrs/src/mirror.rs nasrs/src/sync.rs
 )
 
 # 条带映射与 NBD 编解码是纯函数，单测不需要 root、不需要设备、

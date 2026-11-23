@@ -56,6 +56,20 @@ A Qt6 desktop tool for Linux, for driving the various jobs a home server has to 
   - Package names follow each distribution's naming (Debian/Ubuntu use `targetcli-fb` and
     `samba-common-bin`; Arch's official repositories have no targetcli at all, so no AUR package is
     slipped in to make the UI look complete)
+  - **Software mirror RAID1 (`nasrs mirror`)** — pick exactly two partitions: both end up holding a
+    complete copy of the directory, and visitors read one of them. It is the only one of the three
+    engines that works **end to end today** — no root, no kernel modules, no NBD/LIO, and the sync
+    itself does not even go through pkexec
+    - Usable capacity is **one copy**, not the sum of the two. The two copies must sit on two
+      different physical disks: two partitions on the same disk are rejected in red on the spot,
+      because that is not redundancy, it is the same data stored twice
+    - Sync **only adds, never deletes**: something you delete by mistake on the primary does not
+      follow it over. Clearing extra files off the copy needs its own checkbox and, like array
+      creation, typing the volume name to confirm
+    - The only export path is SMB (what it hands out is a directory, not a block device). You can
+      choose whether visitors read the primary or the secondary; while reading the secondary the
+      share is **forced read-only** — writes by visitors would be silently overwritten by the next
+      sync, which is worse than never allowing them
 
 ## Dependencies
 
@@ -231,6 +245,14 @@ the targetcli gives you no automatic restore.
 The in-house engine v1 goes `nasrs → loop → LIO block`, and deliberately **does not use TCMU**:
 `tcmu`, `libtcmu` and `tcmu-rs` do not exist on crates.io, GitHub has only two experimental
 repositories untouched for years, and writing raw uio + netlink yourself is a multi-week job.
+
+The mirror route is a different thing and goes `nasrs mirror`: a purely user-space **one-way**
+copy — write to a temporary file, `sync_all`, then `rename`, with mtimes preserved via
+`utimensat`, so the second round only copies what actually changed. Any difference is resolved in
+favour of the primary and **never by comparing timestamps** (clocks are not trustworthy). It
+touches neither NBD nor LIO, so none of the export-layer problems above are on its path: RAID0 is
+still stuck at "can compute the layout, cannot export it" (`serve` exits with code 3) while the
+mirror is usable day to day.
 
 ## Packaging an AppImage
 
