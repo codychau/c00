@@ -219,10 +219,23 @@ RAID0 还停在"算得出布局、导不出去"（`serve` 直接退出码 3）�
 VERSION=1.2.0 ./packaging/build-appimage.sh     # 自定义版本号
 ```
 
+适用面是**有 X / GL 的桌面机器**，不是无头服务器：libGL、libEGL、X11 按通行做法留给宿主，
+所以在一台没装 GL 的服务器（本机 openEuler 26.09 就是）上跑会停在
+`libEGL.so.1: cannot open shared object file`。要在这类机器上跑，用容器镜像
+（`Containerfile`，里面带 mesa 与 libglvnd）。
+
 打包范围：程序本体 + `llama-proxy` + **`nasrs`（自研引擎）** + **Qt 自己的库和插件**
-（core/gui/widgets/network/dbus、xcb / wayland 平台插件、imageformats）。libc、libGL、X11、
+（core/gui/widgets/network/dbus、xcb / wayland 平台插件、imageformats），外加
+**`libproxy`**（QtGui 的直接依赖，14 KB，服务器发行版常不装）。libc、libGL、X11、
 ICU 等系统库一律不打进去 —— AppImage 的通行做法是依赖宿主已有的系统库，把 glibc 打包反而会在
 别的发行版上崩。
+
+自检做三件事，不是"打包机上能跑"那种：
+1. AppDir 结构（AppRun / desktop / 图标 / Qt 库 / 平台插件 / emoji 字体 / nasrs）；
+2. **依赖闭合**：把包内 `usr/lib` 当成唯一库路径，看谁还 `not found`（白名单里的系统库
+   过滤掉，剩下的就是真缺口）；
+3. AppRun 必须把包内 `usr/lib` 写进 `LD_LIBRARY_PATH` —— 少了这条，在装了 Qt 的机器上
+   照样起（用的是系统 Qt，捆绑那份白打了），到没装 Qt 的机器上才炸。
 
 `nasrs` 少了会**直接终止打包**：少一个引擎属于"产出一个残废包"——包照样能启动，界面只在选
 自研引擎时说一句"引擎不在程序旁边"，靠启动自检是发现不了的。确实要打一个不含自研引擎的包，

@@ -87,7 +87,12 @@ SYSTEM_PREFIXES=(
     "libicu" "libb2" "liblzma" "libbz2" "libevent" "libgomp" "libatomic"
     "libasound" "libpulse" "libspeechd" "libatspi" "libatk" "libcairo"
     "libpango" "libgdib" "libjpeg" "libtiff" "libwebp" "libopenjp2"
-    "libcups" "libproxy" "libdconf" "libapparmor" "libseccomp"
+    # libproxy **不**列在这里 —— 它是 QtGui 的直接依赖（QNetworkProxyFactory），
+    # 14 KB，而服务器发行版常常不装：本机（openEuler 26.09）就没有，
+    # 白名单里留它的后果是 AppImage 在打包机上启动自检全绿，拿到没装 libproxy
+    # 的机器上第一句就是 "libproxy.so.1: cannot open shared object file"。
+    # 它自己的依赖（libduktape、libcurl）本来就会被递归收集，所以这条是完整的。
+    "libcups" "libdconf" "libapparmor" "libseccomp"
 )
 
 is_system() {
@@ -273,6 +278,13 @@ cat > "$APPDIR/AppRun" <<'APPRUN'
 #!/usr/bin/env bash
 # AppImage 挂载点在 SELF（旧版为 APPDIR）
 here="$(dirname "$(readlink -f "$0")")"
+# 这一条是 AppImage 能不能"换机器跑"的关键，少了它整个 Qt 捆绑是白打的：
+# 库文件在 usr/lib 里躺着，但加载器不会自己去那儿找。在装了 Qt 的机器上
+# 照样能起（用的是系统 Qt，捆绑的那份根本没被用上），所以"启动自检通过"
+# 完全掩盖不了这个洞 —— 拿到没装 Qt 的机器上才炸：
+# error while loading shared libraries: libQt6Widgets.so.6。
+# 放最前：包内的 Qt 优先于系统 Qt（版本要求严格，见脚本头部）。
+export LD_LIBRARY_PATH="$here/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export QT_PLUGIN_PATH="$here/usr/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
 # 用自带的 Qt 翻译，找不到就退回系统
 export QT_TRANSLATION_PATH="$here/usr/translations"
@@ -341,6 +353,11 @@ fail() { echo "!! 自检失败: $1" >&2; [ -f "$LOG" ] && sed -n '1,6p' "$LOG" >
 
 # 6a. AppDir 结构完整性（这是 AppImage 能不能自足的关键）
 [ -x "$APPDIR/AppRun" ]                              || fail "缺 AppRun"
+# AppRun 必须把包内 usr/lib 放进 LD_LIBRARY_PATH。这条看着像"当然会有"，
+# 实际缺过：在装了 Qt 的打包机上启动自检通过（用的是系统 Qt），到没装 Qt 的
+# 机器上才炸。启动自检证明不了"用的是包里的库"，所以要直接看 AppRun 文本。
+grep -q 'LD_LIBRARY_PATH="$here/usr/lib' "$APPDIR/AppRun" \
+    || fail "AppRun 没有把包内 usr/lib 加进 LD_LIBRARY_PATH（换台没装 Qt 的机器必炸）"
 [ -f "$APPDIR/$APP.desktop" ]                        || fail "缺 .desktop（桌面环境不会认它）"
 [ -f "$APPDIR/$APP.svg" ]                            || fail "缺图标"
 for lib in libQt6Core.so.6 libQt6Gui.so.6 libQt6Widgets.so.6; do
@@ -359,7 +376,30 @@ fi
 # 界面只在选那两条时说一句"引擎不在程序旁边"—— 一个能启动的残废包，
 # 靠"启动自检通过"是发现不了的，所以这里点名查。
 [ -x "$APPDIR/usr/bin/nasrs" ]           || fail "缺 nasrs 引擎（NAS 页两条自研路线全不可用）"
+
+# 依赖闭合检查：把包内 usr/lib 当成**唯一**的库路径，看谁还 "not found"。
+# 白名单里的系统库（libc / libGL / X11 / ICU…）本来就留给宿主，所以过滤掉；
+# 剩下的 "not found" 就是真缺口。这类洞在打包机上永远看不出来 —— 打包机上装了，
+# 启动自检于是全绿，到目标机第一句就是 cannot open shared object file。
+# 这条断言的是"包能不能换机器跑"，不是"打包机上能不能跑"。
+missing=""
+for lib in "$APPDIR/usr/bin/server-toolbox" "$APPDIR/usr/lib"/libQt6*.so.6 \
+           "$APPDIR/usr/plugins/platforms"/libqxcb.so; do
+    [ -f "$lib" ] || continue
+    line="$(LD_LIBRARY_PATH="$APPDIR/usr/lib" ldd "$lib" 2>/dev/null \
+            | grep 'not found' | awk '{print $1}' || true)"
+    for dep in $line; do
+        skip=0
+        for p in "${SYSTEM_PREFIXES[@]}"; do
+            case "$dep" in "${p}"*) skip=1 ;; esac
+        done
+        case "$dep" in linux-vdso*|ld-linux*) skip=1 ;; esac
+        [ "$skip" = 0 ] && missing="$missing $dep"
+    done
+done
+[ -z "$missing" ] || fail "包内还缺这些依赖（目标机没装就起不来）:$missing"
 echo "    ✅ AppDir 结构完整（AppRun / desktop / 图标 / Qt 库 / 平台插件 / emoji 字体 / nasrs）"
+echo "    ✅ 依赖闭合：除留给宿主的系统库，包内没有 second-need 缺口"
 
 # 6b. 真跑一次，确认能起来且不立刻退出
 export APPIMAGE_EXTRACT_AND_RUN=1   # 无 FUSE 的环境（容器/CI）需要

@@ -268,11 +268,25 @@ it directly):
 VERSION=1.2.0 ./packaging/build-appimage.sh     # custom version
 ```
 
+Scope: machines **with X / GL** (desktops), not headless servers. libGL, libEGL and X11 are left to
+the host, as AppImage practice dictates, so on a server with no GL (this host, openEuler 26.09, is
+one) the AppImage stops at `libEGL.so.1: cannot open shared object file`. To run on such a machine,
+use the container image (`Containerfile`, which ships mesa and libglvnd).
+
 What gets packaged: the program itself + `llama-proxy` + **`nasrs` (the in-house engine)** +
 **Qt's own libraries and plugins** (core/gui/widgets/network/dbus, the xcb / wayland platform
-plugins, imageformats). libc, libGL, X11, ICU and other system libraries are never included — the
-normal AppImage practice is to rely on the host's system libraries, and bundling glibc instead
-tends to crash on other distributions.
+plugins, imageformats), plus **`libproxy`** (a direct dependency of QtGui, 14 KB, and server
+distributions often do not install it). libc, libGL, X11, ICU and other system libraries are never
+included — the normal AppImage practice is to rely on the host's system libraries, and bundling
+glibc instead tends to crash on other distributions.
+
+The self-check does three things, none of which is "it runs on the build machine":
+1. AppDir structure (AppRun / desktop / icon / Qt libs / platform plugins / emoji font / nasrs);
+2. **dependency closure**: treat the bundled `usr/lib` as the only library path and see who is still
+   `not found` (whitelisted system libraries are filtered out, so anything left is a real hole);
+3. AppRun must put the bundled `usr/lib` into `LD_LIBRARY_PATH` — without that line the package
+   starts fine on a machine that has Qt (using the system Qt, the bundled copy unused) and blows up
+   on a machine that does not.
 
 A missing `nasrs` **stops the build**: losing one engine means shipping a crippled package — it
 starts fine, the UI only says "the nasrs engine is not next to the program" when you pick the
