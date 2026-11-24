@@ -61,33 +61,25 @@ demo 里这几类效果在 Qt 中的对应做法：
 
 ## 自检
 
-改完配色后编译并检查生成的 QSS：
+改完配色后看生成的 QSS：`theme.cpp` 在 debug 构建下有 `Q_ASSERT` —— 模板里残留
+未替换的 `@令牌@`、花括号不配平，会在启动时当场断言。
 
-```sh
-cmake -S . -B build -DENABLE_THEME_SHOT=ON && cmake --build build -t board_shot
-```
+> **样式表的注释必须写成 C 样式（`/* */`）**。整份 QSS 是一坨 raw string，
+> 里面写 `//` **不是注释**：Qt 的解析器会把那一条规则整条丢掉，不报错、不崩溃，
+> 界面只是"看起来没生效"。这类问题只能靠像素断言发现，grep CSS 文本会给出假绿。
 
-`theme.cpp` 在 debug 构建下有 `Q_ASSERT`：模板残留未替换的 `@令牌@`
-或花括号不配平会当场断言。
+## 截图脚手架（已移除）
 
-## 截图脚手架
+`preview/` 下的无头截图工具（`app_shot`、`board_shot`）与全部界面探针已整体删除，
+CMake 里那个 `-DENABLE_THEME_SHOT=ON` 也拆掉了。所以配色改动只能在真实桌面上看。
 
-`preview/board_shot.cpp` 只画主板（不跑外部命令，秒级出图）：
-
-```sh
-QT_QPA_PLATFORM=offscreen ./build/board_shot
-```
-
-> 截图工具：`preview/app_shot.cpp` 渲染整个主窗口，`argv[1]` 传标签序号可截指定页
-> （`./build/app_shot 2` → `build/tab_2.png`）；`preview/board_shot.cpp` 只截主板画板。
->
-> **踩过的坑（重要）**：页面在启动路径上同步弹模态框会让截图（和用户）永远等不到——
+> **写页面时请遵守：构造函数与 showEvent 里不得弹模态框、不得同步等待外部命令。**
+> 这条是踩过的坑留下的，与截图工具无关，所以留在这儿。
 > `StatusPage::fetchAllTemps()` 原本在 `showEvent → refresh()` 里直接
-> `QInputDialog::getText()` 索要 root 密码，等于"软件刚打开就先要密码"。
-> 现已改为 `QTimer::singleShot(0)` 延迟到界面渲染之后再弹。
-> 写页面时请遵守：**构造函数与 showEvent 里不得弹模态框、不得同步等待外部命令**。
-> `lspci` / `smartctl` 等外部命令。想快速截图请只实例化目标页面或单个控件，
-> 不要整窗渲染。
+> `QInputDialog::getText()` 索要 root 密码，等于"软件刚打开就先要密码"；
+> 现已改为 `QTimer::singleShot(0)`，延迟到界面渲染之后再弹。
+> `lspci` / `smartctl` 这类外部命令一律走异步，想快速看单个控件的渲染，
+> 只实例化那个页面，不要整窗渲染。
 
 
 ## 侧栏导航（对应 demo 01 的 .sidebar）

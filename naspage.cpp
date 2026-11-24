@@ -1512,7 +1512,26 @@ QWidget *NasPage::buildMirrorBox()
     m_mirrorWarn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     m_mirrorWarn->setProperty("role", "bad");
     m_mirrorWarn->setVisible(false);
-    v->addWidget(m_mirrorWarn);
+
+    // 同盘那条红字右边一个「知道了」：它把"零冗余"从硬性拦截变成**用户显式接受**。
+    // 这条不是结构问题（数据是好的），是安全告警 —— 拿两个分区当同一块盘上的
+    // 备份目录是正当用法，防误删有用、防坏盘没用。硬性挡死等于替用户决定他
+    // 不需要这个用法，而他只是想要一份拷贝。
+    // 数量不是 2 那条**不给**「知道了」：谁是主、坏了顶哪份都没定义，
+    // 点一下不会让语义变清楚。
+    m_mirrorAckBtn = new QPushButton(QString::fromUtf8("知道了"));
+    m_mirrorAckBtn->setObjectName("mirrorAckBtn");
+    m_mirrorAckBtn->setToolTip(QString::fromUtf8(
+        "把「同一块盘 = 零冗余」确认下来，同步与查副本随之放行。\n"
+        "记住的是这一对分区 —— 换了分区组合就要重新确认，不是一次性设置。"));
+    m_mirrorAckBtn->setVisible(false);
+
+    auto *warnRow = new QHBoxLayout();
+    warnRow->setContentsMargins(0, 0, 0, 0);
+    warnRow->addWidget(m_mirrorWarn, 1);
+    warnRow->addWidget(m_mirrorAckBtn);
+    v->addLayout(warnRow);
+    connect(m_mirrorAckBtn, &QPushButton::clicked, this, &NasPage::onMirrorAckSameDisk);
 
     // 同步按钮排最后：它是"上面都填好之后"才成立的动作，和 SMB 那格里的
     // 「卸载该目录」同一层级，不放进底部的 ①/② 主流程行。
@@ -1534,6 +1553,22 @@ QWidget *NasPage::buildMirrorBox()
         // 上一轮还在跑就跳过这一次，而不是再排一个进程：两个 nasrs 同时往
         // 同一个副本目录写，会互相把对方正在写的临时文件当成陌生文件。
         if (m_ctl.busy()) return;
+        // 定时这条也要过同一道闸。只查按钮可用性不够：定时器是"没人盯着"
+        // 时跑的，那时用户不会看到红字 —— 换分区把确认失效之后，让一个
+        // 看不见的进程继续往零冗余的副本写，是这一页最不该出现的事。
+        const Nas::Plan gatePlan = currentPlan();
+        QVector<QString> devs;
+        for (const Nas::Member &m : gatePlan.members) devs << m.device;
+        if (!mirrorGateOpen(devs)) {
+            m_mirrorTimer->stop();
+            // 用模型层那句话，不在这里另写一套：同盘的情况它带着「点右边的
+            // 知道了」，数量的情况它说的是"要正好 2 个" —— 在这儿硬写一句
+            // 关于确认的话，遇到数量问题就是答非所问（定时器在 3 个成员时
+            // 停，用户看到的却是"确认已失效"）。
+            setStatus(QString::fromUtf8("定时同步已停：")
+                      + Nas::mirrorMembersWarning(devs), true);
+            return;
+        }
         QString p, s, why;
         if (!mirrorDirs(&p, &s, &why)) {
             m_mirrorTimer->stop();
@@ -1562,6 +1597,18 @@ void NasPage::setMirrorPill(const QString &text, const char *role)
     ::setRole(m_mirrorPill, role);
 }
 
+// 放行条件只写一份：**按钮可用性、mirrorDirs、定时器**三处都问它。
+// 分开写必然漂 —— 漂出来的样子就是这次探针抓到的：按钮亮了、定时器过了确认
+// 这道闸，然后 mirrorDirs 照旧把同盘当硬拒绝，用户看到"同步已放行"却停不下来。
+// 数量不是 2 永远挡（语义未定，确认帮不上）；同盘在**这一对分区**被显式接受后放行。
+bool NasPage::mirrorGateOpen(const QVector<QString> &devices) const
+{
+    const auto iss = Nas::mirrorMembersIssue(devices);
+    return iss == Nas::MirrorMembersIssue::None
+           || (iss == Nas::MirrorMembersIssue::SameDisk
+               && devices.join(QLatin1Char(',')) == m_sameDiskAckKey);
+}
+
 // 算出并校验两个副本目录。三个入口（同步、查询、定时器）共用同一套守卫，
 // 免得其中一处漏了"目录正好等于挂载点"这种检查，另两处挡住了。
 // why 一定带回给用户看的那句话 —— 返回 false 却不说话，按钮就成了哑弹。
@@ -1575,8 +1622,9 @@ bool NasPage::mirrorDirs(QString *primary, QString *secondary, QString *why) con
     QVector<QString> devs;
     for (const Nas::Member &m : plan.members) devs << m.device;
 
-    const QString warn = Nas::mirrorMembersWarning(devs);
-    if (!warn.isEmpty()) { *why = warn; return false; }
+    // 这里用放行判据，不是"有没有警告"：确认过的那对分区就是要让它过。
+    // 判据与确认记的是同一对分区，所以换组合自动失效（见 naspage.h 注释）。
+    if (!mirrorGateOpen(devs)) { *why = Nas::mirrorMembersWarning(devs); return false; }
 
     const QString p = plan.members.at(0).filePath;
     const QString s = plan.members.at(1).filePath;
@@ -1643,11 +1691,25 @@ void NasPage::refreshMirrorBox()
     QVector<QString> devList;
     for (const Nas::Member &m : plan.members) devList << m.device;
     const QString warn = Nas::mirrorMembersWarning(devList);
+    const auto issue = Nas::mirrorMembersIssue(devList);
+    // 确认记的是这一对分区，不是"点过知道了"这个事实（见 naspage.h 的注释）。
+    const QString pairKey = devList.join(QLatin1Char(','));
+    const bool acked = (issue == Nas::MirrorMembersIssue::SameDisk
+                        && pairKey == m_sameDiskAckKey);
+
     m_mirrorWarn->setText(warn);
     m_mirrorWarn->setVisible(!warn.isEmpty());
+    m_mirrorAckBtn->setVisible(issue == Nas::MirrorMembersIssue::SameDisk);
+    // 已确认的按钮变成"回执"而不是消失：红字还在，用户能看到放行这件事仍然
+    // 生效。让它消失的话，页面看着像"问题自己好了"。
+    m_mirrorAckBtn->setText(acked ? QString::fromUtf8("已确认：零冗余")
+                                  : QString::fromUtf8("知道了"));
+    m_mirrorAckBtn->setEnabled(!acked);
 
-    m_mirrorSyncBtn->setEnabled(warn.isEmpty() && !m_ctl.busy());
-    m_mirrorCheckBtn->setEnabled(warn.isEmpty() && !m_ctl.busy());
+    // 放行条件与 mirrorDirs、定时器同一个判据（mirrorGateOpen），三处不会各说各话
+    const bool gateOpen = mirrorGateOpen(devList);
+    m_mirrorSyncBtn->setEnabled(gateOpen && !m_ctl.busy());
+    m_mirrorCheckBtn->setEnabled(gateOpen && !m_ctl.busy());
 
     // 访问哪一份 → 决定共享路径。这里覆盖 m_smbPath 是有意的：镜像模式下
     // 那个框是只读的，被覆盖的只能是程序自己填的值，不会盖掉用户的手输。
@@ -1663,6 +1725,23 @@ void NasPage::refreshMirrorBox()
     } else {
         m_smbWrite->setEnabled(true);
     }
+}
+
+void NasPage::onMirrorAckSameDisk()
+{
+    const Nas::Plan plan = currentPlan();
+    QVector<QString> devList;
+    for (const Nas::Member &m : plan.members) devList << m.device;
+    // 只接受同盘这一条。数量不对时按钮本来就不出现，这里再挡一次：
+    // 万一将来某个调用路径让按钮在数量不对时可见，确认也不该放行"一主一备
+    // 凑不齐"这种语义未定的组合。
+    if (Nas::mirrorMembersIssue(devList) != Nas::MirrorMembersIssue::SameDisk) return;
+    m_sameDiskAckKey = devList.join(QLatin1Char(','));
+    refreshMirrorBox();
+    setStatus(QString::fromUtf8(
+        "已确认：两份在同一块盘上，同步与查副本放行。"
+        "副本照做（防误删、防手滑覆盖），坏盘时两份一起没 —— 这条不会因为确认而变。"),
+        true);
 }
 
 void NasPage::onMirrorAccessChanged(int idx)

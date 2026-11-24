@@ -174,6 +174,16 @@ QString mirrorDirConflict(const QString &path, const QStringList &mountPoints);
 //     而用户以为自己有了冗余。这种"看起来安全其实没有"比直接失败更坏。
 QString mirrorMembersWarning(const QVector<QString> &devicePaths);
 
+// 上面那两类**处理方式不该一样**，所以把类别也暴露出来：
+//   Count    —— 数量不是 2。这条不能被"知道了"绕过：谁是主、坏了顶哪份
+//               都没定义，绕过得到的是一个语义未明的东西。
+//   SameDisk —— 两份落在同一块盘上。这是安全告警，不是结构问题：数据本身
+//               是好的，只是那块盘一坏两份一起没。用户要拿它当"同一盘上的
+//               备份目录"用是正当的，界面应当放行 —— 前提是把话说清、
+//               由他显式确认，而不是硬性挡死。
+enum class MirrorMembersIssue { None, Count, SameDisk };
+MirrorMembersIssue mirrorMembersIssue(const QVector<QString> &devicePaths);
+
 // 主/副本网的分工说明，给界面直接显示的一句话（primaryIsAccess 决定措辞）。
 QString mirrorRoleNote(bool primaryIsAccess);
 

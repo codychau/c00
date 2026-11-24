@@ -9,6 +9,7 @@
 #include <QJsonValue>
 #include <QStringList>
 #include <QSet>
+#include <QPair>
 #include <QDir>
 #include <QRegularExpression>
 
@@ -426,23 +427,45 @@ QString mirrorDirConflict(const QString &path, const QStringList &mountPoints)
     return QString();
 }
 
-QString mirrorMembersWarning(const QVector<QString> &devicePaths)
+// 判据只写一份，文案也只写一份：两个 API（issue / warning）都从这条内部函数
+// 出来，且**文案在这里就格式化好**。分开写会漂 —— 漂出来的结果是"界面放行了，
+// 模型层还在拒绝"，或者反过来：红字说明与放行条件对不上。
+// （上一版在这里留了 %1 让调用方填，两种 issue 的 %1 是不同东西：Count 填的
+// 是成员数、SameDisk 填的是盘名，而"设备名不完整"那条要填的是路径 ——
+// 让调用方填等于三处各填各的，必然漏。）
+static QPair<MirrorMembersIssue, QString> mirrorMembersCheck(
+    const QVector<QString> &devicePaths)
 {
     if (devicePaths.size() != kMirrorMembers)
-        return QString::fromUtf8("镜像阵列要正好 %1 个成员（一主一备），当前 %2 个。")
-                    .arg(kMirrorMembers).arg(devicePaths.size());
+        return { MirrorMembersIssue::Count,
+                 QString::fromUtf8("镜像阵列要正好 %1 个成员（一主一备），当前 %2 个。")
+                     .arg(kMirrorMembers).arg(devicePaths.size()) };
 
     QSet<QString> parents;
     for (const QString &p : devicePaths) {
         const QString name = p.section('/', -1);   // /dev/sdb1 → sdb1
-        if (name.isEmpty()) return QString::fromUtf8("成员设备名不完整：%1").arg(p);
+        if (name.isEmpty())
+            return { MirrorMembersIssue::Count,
+                     QString::fromUtf8("成员设备名不完整：%1").arg(p) };
         parents.insert(parentDiskOf(name));
     }
     if (parents.size() == 1)
-        return QString::fromUtf8(
-            "两个分区都在 %1 上：这块盘一坏，两份副本一起没 —— 那等于没有镜像。"
-            "请换不同盘上的两个分区。").arg(*parents.constBegin());
-    return QString();
+        return { MirrorMembersIssue::SameDisk,
+                 QString::fromUtf8("两个分区都在 %1 上：这块盘一坏，两份副本一起没 —— "
+                                   "那等于没有镜像。要就用也行（同一块盘上的备份目录，"
+                                   "防误删有用、防坏盘没用），点右边的「知道了」就放行。")
+                     .arg(*parents.constBegin()) };
+    return { MirrorMembersIssue::None, QString() };
+}
+
+MirrorMembersIssue mirrorMembersIssue(const QVector<QString> &devicePaths)
+{
+    return mirrorMembersCheck(devicePaths).first;
+}
+
+QString mirrorMembersWarning(const QVector<QString> &devicePaths)
+{
+    return mirrorMembersCheck(devicePaths).second;
 }
 
 QString mirrorRoleNote(bool primaryIsAccess)

@@ -110,45 +110,11 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/nasrs/target/release/nasrs)
     install(PROGRAMS nasrs/target/release/nasrs DESTINATION bin)
 endif()
 
-# ── 界面自检脚手架（可选，默认关闭，不影响正常构建）──────────
-# cmake -S . -B build -DENABLE_THEME_SHOT=ON
-#   board_shot  只渲染主板画板：不跑外部命令，秒级出图
-#   app_shot    渲染整个窗口：会触发各页面首轮刷新（含 lspci/smartctl 等），慢一些
-# 用法：QT_QPA_PLATFORM=offscreen ./build/board_shot
-option(ENABLE_THEME_SHOT "Build UI screenshot helpers" OFF)
-if(ENABLE_THEME_SHOT)
-    # 截图脚手架的源码在 preview/ 下，而 preview/ 被 .gitignore 排除（本地产物目录）。
-    # 所以脚手架只在本地可用；别人克隆后要开启会得到下面这句，
-    # 而不是一堆难懂的 "Cannot find source file"。
-    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/preview/app_shot.cpp")
-        message(FATAL_ERROR
-            "ENABLE_THEME_SHOT=ON 需要 preview/ 下的截图脚手架源码，"
-            "但该目录被 .gitignore 排除、不在版本库中。\n"
-            "正常构建本程序不需要它 —— 去掉 -DENABLE_THEME_SHOT=ON 即可。")
-    endif()
-
-    add_executable(board_shot
-        preview/board_shot.cpp
-        theme.cpp                   theme.h
-        motherboardwidget.cpp       motherboardwidget.h
-    )
-    target_link_libraries(board_shot PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets)
-    target_include_directories(board_shot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-    add_executable(app_shot
-        preview/app_shot.cpp
-        ${APP_SOURCES}
-    )
-    target_link_libraries(app_shot PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
-    target_include_directories(app_shot PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
-    add_executable(page_probe
-        preview/page_probe.cpp
-        ${APP_SOURCES}
-    )
-    target_link_libraries(page_probe PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Network)
-    target_include_directories(page_probe PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-endif()
+# 界面自检脚手架（preview/ 下的探针与截图工具）已整体移除。
+# 原本它挂在 -DENABLE_THEME_SHOT=ON 上，源码在 preview/ 里、被 .gitignore 排除，
+# 所以克隆的人拿到的是"开关在、源码没有"。现在删干净：构建本程序不需要它，
+# 少一个会让人 FATAL_ERROR 的开关，也比留一堆"只有作者机器上能跑"的源码好。
+# 界面改动由使用者在真实桌面上验收。
 
 # Build Rust proxy subproject
 add_custom_target(build-proxy-rs

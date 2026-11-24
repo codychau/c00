@@ -60,9 +60,17 @@ A Qt6 desktop tool for Linux, for driving the various jobs a home server has to 
     complete copy of the directory, and visitors read one of them. It is the only one of the three
     engines that works **end to end today** — no root, no kernel modules, no NBD/LIO, and the sync
     itself does not even go through pkexec
-    - Usable capacity is **one copy**, not the sum of the two. The two copies must sit on two
-      different physical disks: two partitions on the same disk are rejected in red on the spot,
-      because that is not redundancy, it is the same data stored twice
+    - Usable capacity is **one copy**, not the sum of the two. When both copies sit on the same
+      physical disk, red text states the consequence (that disk dies, both copies die = zero
+      redundancy) and a **“Got it”** button sits on the right: clicking it lets sync and the
+      check run. **It does not hard-block** — using it as a backup directory on the same disk is a
+      legitimate thing to want (it guards against accidental deletion, not against disk failure),
+      and the UI should not decide for the user that they do not want a copy. The acknowledgement
+      is keyed to **this pair of partitions**: change the pair and you have to acknowledge again
+      (with a boolean, one unrelated acknowledgement would permanently clear the rule that most
+      needs blocking). The 5-minute auto-sync goes through the same gate. A member count that is
+      not 2 **gets no** “Got it” button: who is primary and which copy takes over after a failure
+      are undefined there, so one click cannot make the semantics clear.
     - Sync **only adds, never deletes**: something you delete by mistake on the primary does not
       follow it over. Clearing extra files off the copy needs its own checkbox and, like array
       creation, typing the volume name to confirm
@@ -306,21 +314,13 @@ chmod +x build/appimagetool
 To run the AppImage or appimagetool in an environment **without FUSE** (containers, CI), add
 `export APPIMAGE_EXTRACT_AND_RUN=1` to bypass mounting.
 
-## Updating the header screenshot
+## The header screenshot
 
-The image at the top is rendered by `app_shot` in a headless environment. After changing the UI,
-regenerate it like this:
-
-```bash
-cmake -S . -B build -DENABLE_THEME_SHOT=ON && cmake --build build -j
-QT_QPA_PLATFORM=offscreen ./build/app_shot          # → build/app_main.png
-cp build/app_main.png doc/img/screenshot.png        # this is the one the header uses
-```
-
-`app_shot <n>` renders the nth navigation page (e.g. `./build/app_shot 2` gives Storage); the third
-argument is scroll pixels — `./build/app_shot - 230` is how you look at the frosted-glass top bar,
-because with a static first screen there is only page margin behind the glass and you cannot see
-the blur until something scrolls underneath.
+The image at the top is `doc/img/screenshot.png` (a static file in the repo). The headless
+screenshot scaffolding — `app_shot`, `board_shot` and every UI probe under `preview/` — has been
+**removed**, so there is no one-command way to regenerate that image after a UI change: verify UI
+changes on a real desktop. To replace the image, take a desktop screenshot and overwrite
+`doc/img/screenshot.png`.
 
 Before taking a screenshot, make sure an emoji font is available, otherwise every icon will be a
 `□` — see the section above.

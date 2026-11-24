@@ -118,11 +118,14 @@ private:
     void onMirrorAccessChanged(int idx);  // 访问主副本 / 副本网
     void applyMirrorStatus(const NasController::MirrorStatus &st);
     void onMirrorAutoToggled(bool on);    // 定时同步开关
+    void onMirrorAckSameDisk();          // 「知道了」：显式接受"同一块盘 = 零冗余"，放行同步/查副本
     void setMirrorPill(const QString &text, const char *role);
     // 算出并校验两个副本目录（同步 / 查询 / 定时器三个入口共用同一套守卫）。
     // 返回 false 时 *why 里一定是要显示给用户看的那句话 —— 失败却不说话，
     // 按钮就成了哑弹，而这正是本页最不想要的那种"点了没反应"。
     bool mirrorDirs(QString *primary, QString *secondary, QString *why) const;
+    // 放行判据只写一份：按钮可用性、mirrorDirs、定时器三处都问它（分开写必漂）
+    bool mirrorGateOpen(const QVector<QString> &devices) const;
     void appendInstallLog(const QString &chunk);  // 写日志框（\r 也算换行）
     // 把 m_env 翻译成右上角缺失提示 + 页顶按钮显隐。两处必须同一次算完，
     // 否则会在中间状态下互相打脸（按钮说"齐了"、红字还说"缺"）。
@@ -235,6 +238,11 @@ private:
     QLabel  *m_mirrorPill = nullptr;       // 未同步 / 已一致 / 读不到
     QLabel  *m_mirrorState = nullptr;      // 最近一次同步或查询的结果，一行话
     QLabel  *m_mirrorWarn = nullptr;       // 成员组合的问题（同盘 = 零冗余）
+    QPushButton *m_mirrorAckBtn = nullptr; // 「知道了」：显式接受零冗余，放行同步/查副本
+    // 记住的是**这一对分区**（dev 列表 join），不是"用户点过知道了"这个事实：
+    // 换组合就要重新确认。用布尔记的写法会让一次确认永远有效 —— 用户先拿
+    // 两块好盘确认过一次，之后换成同一块盘上的两个分区，界面上就再没有障碍了。
+    QString m_sameDiskAckKey;
     QPushButton *m_mirrorSyncBtn = nullptr;
     QPushButton *m_mirrorCheckBtn = nullptr;
     QCheckBox *m_mirrorDeleteExtras = nullptr;  // 同步时删副本上多余的
