@@ -181,6 +181,26 @@ NasPage::NasPage(QWidget *parent)
     connect(m_board, &NasBoardWidget::slotClicked, this, &NasPage::onSlotClicked);
     connect(m_board, &NasBoardWidget::slotRejected, this, &NasPage::onSlotRejected);
 
+    // ── 阵列参数区：这一格说的是"盘怎么拼"，不是"卷怎么交出去" ──
+    // 位置紧贴画板，因为它的输入就是画板上点的那几个盘位。
+    // 以前「名称」「条带粒度」住在 m_iscsiBox 里（那个框是为 iSCSI 整组显隐
+    // 造的），三条路线却都要用「名称」（镜像的副本目录名由它推），于是选镜像
+    // 时只能"整框显示 + 逐行藏"，导出页于是亮着一个满是 iSCSI 字样的框，
+    // 而 SMB 的共享名/共享路径就在它下面 —— 看着就像 RAID 的参数属于 SMB 配置。
+    // 框先占位，内容按各自的初始化顺序在后面填进来（m_mirrorBox 要比
+    // m_smbPath 晚建，见 refreshMirrorBox）。
+    m_arrayBox = new QWidget();
+    m_arrayBox->setObjectName("arrayBox");        // 探针按名字找它
+    // 只是容器，不给它吸收页面富余高度（画板和标签页都栽过这个坑）。
+    m_arrayBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    auto *arrayV = new QVBoxLayout(m_arrayBox);
+    arrayV->setContentsMargins(0, 8, 0, 0);
+    m_arrayForm = new QFormLayout();
+    m_arrayForm->setContentsMargins(0, 0, 0, 0);
+    arrayV->addLayout(m_arrayForm);
+    layout->addWidget(m_arrayBox);
+    m_arrayBox->setVisible(false);   // 0 个成员，还没到拼阵列的时候
+
     // ── 参数区：导出服务 / 扩展服务 两个标签页 ──
     // 刻意分成两页而不是堆在一起：扩展服务（影视索引）失败或还没装
     // 依赖时，不该连带让人以为导出也用不了。两页失败域隔离。
@@ -234,7 +254,7 @@ NasPage::NasPage(QWidget *parent)
     form->setContentsMargins(0, 0, 0, 0);
     m_volName = new QLineEdit();
     m_volName->setPlaceholderText("nas-data（创建时要手输核对）");
-    form->addRow("名称", m_volName);
+    m_arrayForm->addRow("名称", m_volName);
     // 副本目录名是由卷名推的，所以名字一改，镜像格与共享路径就得跟着重算。
     // 少了这条，"先点分区、后填名字"这个最常见的顺序会让两条路径标签一直停在
     // 「（先在上方点选第一个分区）」不动 —— 页面显示的路径和真去建的那个不是
@@ -246,7 +266,7 @@ NasPage::NasPage(QWidget *parent)
     m_chunk->setValue(512);
     m_chunk->setSuffix(" KiB");
     m_chunk->setToolTip("条带粒度。大文件顺序读：越大越好；小块随机写：越小越好。");
-    form->addRow("条带粒度", m_chunk);
+    m_arrayForm->addRow("条带粒度", m_chunk);   // 镜像不条带，整行在 syncExportMode 里收掉
 
     m_iqn = new QLineEdit(Nas::makeIqn("local", "26-11", "01"));
     m_iqn->setToolTip("iqn.<YY-MM>.<反序域名>:<名字>。域名乱填可能与别的 target 撞名。");
@@ -314,12 +334,13 @@ NasPage::NasPage(QWidget *parent)
     outer->addWidget(m_fsBox);
     m_fsBox->setVisible(false);   // 默认 iSCSI，挂载框先藏起来
 
-    // 软件镜像出口：只在选了镜像引擎时出现。它和 m_fsBox 是同一层级的位置，
-    // 但状态语义完全不同（那边写"引擎未实现"，这边写"副本落后多少"），
-    // 所以是两个框而不是一处显隐。
+    // 软件镜像（自研 RAID1）的参数：两份目录、读哪一份、同步状态、定时器。
+    // 这些全是"盘怎么拼"的事，归上方阵列区，不进导出页 —— 导出页只留共享名、
+    // 共享路径、可写这三样共享自己的事。它和 m_fsBox 的语义完全不同
+    //（那边写"引擎未实现"，这边写"副本落后多少"），所以仍是两个框。
     m_mirrorBox = buildMirrorBox();
     m_mirrorBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
-    outer->addWidget(m_mirrorBox);
+    arrayV->addWidget(m_mirrorBox);
     m_mirrorBox->setVisible(false);
 
     m_smbWarn = new QLabel();
@@ -728,7 +749,7 @@ void NasPage::syncExportMode(int memberCount)
     if (mirror)
         m_modeHint->setText(QString::fromUtf8(
             "镜像引擎：出口只有 SMB —— 它给的是目录，不是块设备。"
-            "对外读哪一份，在下面「访问哪一份」里选"));
+            "两份目录与「访问哪一份」在上方阵列区"));
     else if (memberCount == 0)
         m_modeHint->setText("先在上方点选分区：1 个可走 SMB，≥2 个可做 RAID（iSCSI 或挂目录）");
     else if (memberCount == 1)
@@ -741,14 +762,16 @@ void NasPage::syncExportMode(int memberCount)
     const bool smb   = m_modeSmb->isChecked();
     const bool mount = m_modeMount->isChecked();
     m_mirrorBox->setVisible(mirror);
-    // 「名称」那一行长在 m_iscsiBox 里，而三条路线都要给它起名（镜像的副本
-    // 目录名就是由卷名推的），所以镜像模式下这个框仍要显示，只把 iSCSI 专属
-    // 的几行收掉。整框藏起来的后果是"选了镜像就没地方填名字"。
-    m_iscsiBox->setVisible((!smb && !mount) || mirror);
-    if (auto *fl = qobject_cast<QFormLayout *>(m_iscsiBox->layout())) {
-        // 行 0 是「名称」，其余（条带粒度 / IQN / 监听地址 / 说明 / 匿名）iSCSI 专属
-        for (int r = 1; r < fl->rowCount(); ++r) fl->setRowVisible(r, !mirror);
-    }
+    // 阵列区（名称 / 条带 / 镜像那两目录与同步）：真在拼阵列时才出现。
+    // 镜像永远要（两份目录和名字是它的定义）；其余引擎只有 ≥2 个成员才有
+    // 阵列 —— 单分区是直接导出那个分区，没有"拼"这一步，就不该有名字栏。
+    m_arrayBox->setVisible(mirror || memberCount >= 2);
+    // 条带粒度对镜像没有意义：它不条带，可用容量就是一份。
+    m_arrayForm->setRowVisible(1, !mirror);
+    // iSCSI 框现在真的只有 iSCSI 的事了（IQN / 监听地址 / 匿名 ACL）。
+    // 这里不再需要那个 "|| mirror" 的例外和逐行藏：例外存在的唯一理由
+    //（要给它留个填名字的地方）已经跟着「名称」搬走了。
+    m_iscsiBox->setVisible(!smb && !mount && !mirror);
     m_smbBox->setVisible(smb);
     m_smbWarn->setVisible(smb);
     m_fsBox->setVisible(mount);

@@ -23,6 +23,8 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QRadioButton>
+#include <QSpinBox>
+#include <QWidget>
 #include <QEventLoop>
 #include <cstdlib>
 #include <cstdio>
@@ -198,6 +200,58 @@ int main(int argc, char **argv)
     pump();
     check(smbPath->isReadOnly() == false, "换回 mdadm 后共享路径恢复可编辑");
     check(primary->isVisible() == false, "换回 mdadm 后镜像格收起");
+
+    // ── 参数归属：阵列的事在阵列区，导出页只剩共享的事 ──
+    // 「名称」原先长在 m_iscsiBox 里，三条路线都要用它，于是镜像模式下导出页
+    // 得靠 `(!smb && !mount) || mirror` + 逐行藏 撑着一个 iSCSI 框 —— 用户看到
+    // 的就是"RAID 的参数在 SMB 共享页里"。所以这里断言的是**归属**（父链），
+    // 光断言可见性测不出这个：逐行藏也能让可见性全对，页面照样语义错乱。
+    QWidget *arrayBox = page.findChild<QWidget *>("arrayBox");
+    check(arrayBox != nullptr, "阵列参数框在（objectName=arrayBox）");
+    auto inBox = [](QWidget *w, QWidget *box) {
+        for (QWidget *p = w; p; p = p->parentWidget())
+            if (p == box) return true;
+        return false;
+    };
+    QLineEdit *nameEdit = nullptr;
+    QLineEdit *iqnEdit = nullptr;
+    for (QLineEdit *e : page.findChildren<QLineEdit *>()) {
+        if (e->placeholderText().contains(QString::fromUtf8("nas-data"))) nameEdit = e;
+        if (e->text().startsWith(QLatin1String("iqn."))) iqnEdit = e;
+    }
+    check(nameEdit && arrayBox && inBox(nameEdit, arrayBox),
+          "「名称」归阵列区（不在 iSCSI 框里）");
+    check(primary && arrayBox && inBox(primary, arrayBox),
+          "镜像的两份目录归阵列区");
+    check(iqnEdit && !inBox(iqnEdit, arrayBox), "IQN 没被顺手搬进阵列区");
+
+    // 镜像态（eng 现在是 0，切回镜像）：导出页不该露出任何 iSCSI 参数
+    eng->setCurrentIndex(2);
+    pump();
+    check(iqnEdit && !iqnEdit->isVisible(), "选镜像后 IQN 不出现（导出页只剩共享）");
+    check(nameEdit && nameEdit->isVisible(), "选镜像后「名称」仍可填（副本目录名靠它推）");
+    QSpinBox *chunk = page.findChildren<QSpinBox *>().value(0, nullptr);
+    check(chunk && !chunk->isVisible(), "镜像下条带粒度收掉（它不条带）");
+
+    // 父链对了还不够 —— 用户看到的是**画出来的位置**。阵列区在画板和标签页
+    // 之间，所以镜像那两份目录必须画在"导出方式"那一行的上方，
+    // 而 IQN 必须还在导出页里（别跟着搬上来变成另一种错位）。
+    const auto pageY = [&page](QWidget *w) { return w->mapTo(&page, QPoint(0, 0)).y(); };
+    QRadioButton *smbRadio = radio(&page, QStringLiteral("SMB 文件共享"));
+    check(primary && smbRadio && pageY(primary) < pageY(smbRadio),
+          "镜像的两份目录画在导出页上方（阵列区贴着画板）");
+    check(iqnEdit && smbRadio && pageY(iqnEdit) > pageY(smbRadio),
+          "IQN 仍在导出页内（没跟着搬进阵列区）");
+    page.grab().save("build/nas_mirror_state.png");
+
+    // 只剩 1 个成员 + mdadm：没有"拼阵列"这一步，就不该有名称栏
+    eng->setCurrentIndex(0);
+    page.setMemberDevicesForTest({ "/dev/vdb1" });
+    pump();
+    check(nameEdit && !nameEdit->isVisible(), "1 个成员：没有阵列可拼，就不摆名称栏");
+    page.setMemberDevicesForTest({ "/dev/vdb1", "/dev/vdc1" });
+    pump();
+    check(nameEdit && nameEdit->isVisible(), "2 个成员：名称栏回来（① 创建阵列要它）");
 
     fprintf(stderr, "\n通过 %d，失败 %d\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

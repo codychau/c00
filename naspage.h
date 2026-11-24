@@ -19,6 +19,7 @@ class QCheckBox;
 class QLabel;
 class QButtonGroup;
 class QTabWidget;
+class QFormLayout;
 class QTableWidget;
 class QPushButton;
 class QRadioButton;
@@ -150,6 +151,12 @@ private:
     QLineEdit *m_portal = nullptr;     // portal 监听地址（**不是**网段白名单）
     QLabel *m_portalNote = nullptr;
     QCheckBox *m_anonAcl = nullptr;    // 允许匿名 initiator（默认关）
+
+    // ── 阵列参数（"怎么把盘拼起来"，和"怎么交出去"分开放）──
+    // 名称/条带粒度以前长在 m_iscsiBox 里，镜像引擎也要用名称，于是导出页
+    // 会为一个只为 iSCSI 显隐而存在的框亮着 —— 见 syncExportMode 的注释。
+    QWidget *m_arrayBox = nullptr;
+    QFormLayout *m_arrayForm = nullptr;
 
     // ── iSCSI 参数（原「参数」组改名而来）──
     QWidget *m_iscsiBox = nullptr;     // 打包 iSCSI 各行，便于整体显隐
