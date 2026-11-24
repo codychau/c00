@@ -720,6 +720,24 @@ void NasPage::syncExportMode(int memberCount)
     m_modeIscsi->setEnabled(!mirror);
     m_modeSmb->setEnabled(smbAllowed);
     m_modeMount->setEnabled(mountAllowed);
+    // **点不动的那一格必须自己说为什么**。光置灰不够：主题的置灰只是文字淡一档、
+    // 指示圈几乎没变，用户分不清自己在跟规则较劲还是界面坏了 —— 报上来的原话
+    // 就是"选了两个分区，只能到 SMB，点了 RAID 挂载没有反应"。真相是那时选着
+    // 镜像引擎（它给的是目录，出口只有 SMB），可界面一个字都没说。
+    m_modeIscsi->setToolTip(mirror
+        ? QString::fromUtf8("点不动：镜像给的是目录，不是块设备，没有 LUN 可导。")
+        : QString::fromUtf8("导出为 iSCSI LUN，发起端拿到的是裸块设备，自己格式化。"));
+    m_modeSmb->setToolTip(smbAllowed
+        ? QString::fromUtf8("用 Samba 把该分区的挂载点作为共享目录导出。只读文件，不碰分区数据。")
+        : QString::fromUtf8("点不动：Samba 不跨盘条带，SMB 只在正好 1 个分区时可用（现在 %1 个）。"
+                            "多盘请走 iSCSI 或挂载目录。").arg(memberCount));
+    m_modeMount->setToolTip(mirror
+        ? QString::fromUtf8("点不动：这条是给 nasrs RAID0 卷的。镜像两条读的都是目录本身，"
+                            "出口只有 SMB。")
+        : mountAllowed
+            ? QString::fromUtf8("nasrs 做 RAID0 后挂成 /mnt 下的目录，影视服务能直接扫。不导 iSCSI。")
+            : QString::fromUtf8("点不动：这条的卖点就是多盘条带，少于 2 个成员 nasrs 自己会拒"
+                                "（现在 %1 个）。").arg(memberCount));
 
     // 成员数变化可能让当前选中的出口失效，此时回落到本引擎下总是合法的那条：
     // 镜像回 SMB（唯一出口），其余回 iSCSI。

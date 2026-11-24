@@ -255,6 +255,20 @@ QRadioButton::indicator { border-radius: 9px; }
 QCheckBox::indicator:checked, QRadioButton::indicator:checked {
     background: @accent@; border-color: @accent@;
 }
+/* 禁用的单选/勾选框得**一眼看出来点不动**。缺这段时 indicator 的边框和底色
+   与可点状态一模一样（只有文字被调色板淡了一档），于是"这条出口在当前引擎
+   下不适用"表现成"界面坏了" —— 报上来的原话是"点了单选框没有反应"。
+   注释必须写成 C 样式：整张样式表在一个原始串里，里面的 // 不是注释而是
+   样式表内容，Qt 的解析器认不出来就把这条规则丢掉（"文件里明明写着这句话"
+   那次就是这么骗过去的，export_mode_probe 比像素才抓到）。
+   另外这个原始串里**别写它的定界符原文**，写了就地提前结束，编译才炸。 */
+QCheckBox:disabled, QRadioButton:disabled { color: @mute@; }
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    background: @surface@; border-color: @border@;
+}
+QCheckBox::indicator:checked:disabled, QRadioButton::indicator:checked:disabled {
+    background: @surface3@; border-color: @border@;
+}
 QSlider::groove:horizontal { height: 6px; background: @surface@; border-radius: 3px; }
 QSlider::sub-page:horizontal { background: @accent@; border-radius: 3px; }
 QSlider::handle:horizontal {
