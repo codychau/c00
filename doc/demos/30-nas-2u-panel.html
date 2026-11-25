@@ -256,7 +256,7 @@ h1{font-size:16px;font-weight:700;margin-bottom:4px}
     <div style="flex:1;display:flex;flex-direction:column;gap:10px">
       <div style="display:flex;gap:8px;align-items:center">
         <button class="eng" id="engMdadm">mdadm（内核 RAID，会抹分区）</button>
-        <button class="eng" id="engNasrs">nasrs（自家 RAID0，只写文件）</button>
+        <button class="eng" id="engNasrs">mergerfs（第三方 FUSE，合并目录）</button>
         <span style="color:var(--mute);font-size:11px;margin-left:auto" id="engNote"></span>
       </div>
       <div class="bays" id="bays"></div>
@@ -384,10 +384,16 @@ function render(){
     cap.className = "val warn";
     show("hint","单盘不算 RAID，等同直连", true); return;
   }
-  // RAID0 可用 = 最小成员 × 成员数（不是求和！）
+  // 这两条路线的容量算法**正好相反**，草图里必须分开写：
+  //   mdadm RAID0 可用 = 最小成员 × 成员数（不是求和！）
+  //   mergerfs   可用 = 各成员之和（求和，浪费为 0 —— 它不要求成员等大）
+  // 这段原来只有 RAID0 一条：自研 RAID0 已整条删除，那一格换成 mergerfs，
+  // 留着 min×N 会让看草图的人以为界面会报「200G + 500G = 200G」。
   const sizes = picked.map(i=>DISKS[i].size);
   const min = Math.min(...sizes);
-  const usable = min*picked.length, waste = sizes.reduce((a,b)=>a+b,0)-usable;
+  const sum = sizes.reduce((a,b)=>a+b,0);
+  const usable = engine==="nasrs" ? sum : min*picked.length;
+  const waste = sum - usable;
   cap.textContent = fmt(usable);
   cap.className = "val " + (waste > 0.01 ? "warn" : "good");
   show("hint", waste > 0.01
@@ -399,7 +405,8 @@ function setEngine(e){
   document.getElementById("engMdadm").classList.toggle("on", e==="mdadm");
   document.getElementById("engNasrs").classList.toggle("on", e==="nasrs");
   document.getElementById("engNote").textContent = e==="mdadm"
-    ? "抹分区 → 已挂载的盘不可选" : "写文件 → 已挂载的盘才可用";
+    ? "抹分区 → 已挂载的盘不可选"
+     : "用分区已有的挂载点当 source → 已挂载的盘才可用；没有条带、没有冗余";
   // 换引擎后原选中盘可能变不可用，必须清掉，否则会生成非法方案
   picked = picked.filter(i => {
     const s = DISKS[i].st;

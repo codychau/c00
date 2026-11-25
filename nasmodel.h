@@ -46,7 +46,7 @@ enum class Risk {
 // 三种实现路线
 enum class Engine {
     Mdadm,       // mdadm 建 /dev/mdN
-    Raid0Rs,     // 自研 nasrs（RAID0 over 文件）—— 导出层尚未接入，现在还跑不通
+    MergerFs,    // 第三方 mergerfs：把几个分区的挂载点并成一个目录（FUSE）
     MirrorRs,    // 自研 nasrs（软件 RAID1：主网目录 → 副本目录）—— 现在就能跑
 };
 
@@ -74,12 +74,13 @@ QString parentDiskOf(const QString &name);
 QVector<QString> systemDiskNames(const QString &procMounts);
 
 // 综合判定某个条目能否用。
-// engine 很关键，因为两条路线对"能不能用"的定义**不同**：
-//   Mdadm    直接拿分区当成员，会抹掉分区上的文件系统，
-//            所以"已挂载"必须拒绝（正在用的东西不能抹）
-//   Raid0Rs  在分区**已有的文件系统里**放一个大文件，不碰分区本身，
-//            所以"已挂载且可写"不但不是障碍，反而是**前提** ——
-//            没挂载就没地方放文件。
+// engine 很关键，因为各条路线对"能不能用"的定义**不同**：
+//   Mdadm     直接拿分区当成员，会抹掉分区上的文件系统，
+//             所以"已挂载"必须拒绝（正在用的东西不能抹）
+//   MergerFs  source 就是分区**已有的挂载点**，不碰分区本身，
+//             所以"已挂载且可写"不但不是障碍，反而是**前提** ——
+//             没挂载就没有 source。
+//   MirrorRs  同理：副本目录建在已有文件系统里。
 // 早期版本只有 judge(b, systemDisks) 一个签名，一律拒绝已挂载分区，
 // 结果本机 7 个设备里 0 个可选，自研引擎更是永远无盘可选。
 Verdict judge(const Block &b, const QVector<QString> &systemDisks, Engine engine);
@@ -88,7 +89,7 @@ Verdict judge(const Block &b, const QVector<QString> &systemDisks, Engine engine
 // 成员在阵列里的角色
 enum class MemberKind {
     Partition,   // mdadm：直接用分区
-    BackingFile, // 自研引擎：分区上放一个大文件
+    SourceDir,   // mergerfs：分区的挂载点直接当 source（不建文件、不碰分区）
     MirrorDir,   // 自研镜像：分区上放一个目录，文件在这里存一份完整的
 };
 
@@ -100,15 +101,32 @@ struct Member
 {
     MemberKind kind = MemberKind::Partition;
     QString device;          // /dev/sdb1
-    QString filePath;        // 自研引擎用：<mount>/<name>.nas0.img
-    qint64  capacity = 0;    // 该成员贡献的字节数（自研引擎=文件大小）
+    QString filePath;        // mergerfs=挂载点；镜像=<挂载点>/<卷名>.nas-mirror
+    qint64  capacity = 0;    // 该成员贡献的字节数（mergerfs=该分区当前空闲）
 };
+
+// mergerfs 的写入策略 —— 它决定**新文件落到哪个分区**，这是 mergerfs 唯一
+// 真正需要你选的参数。原来的「条带粒度」对它没有意义：mergerfs 不条带，
+// 一个文件整个落在一个分区上，不会被切成条带撒到多盘。
+//   Mfs —— 最空闲优先：写到当前最空的分区。最接近"摊写"，各盘使用率均衡。
+//   Eol —— 顺序填满：写满第一个分区才写第二个。账最好算，但第一块盘承担了
+//          全部写入，它坏掉丢的东西最多。
+//   Lfs —— 最紧优先：写到当前最空的**对面**（最紧的那个分区）。少用，
+//          留给"我知道我在干嘛"的人。
+enum class MergerPolicy { Mfs, Eol, Lfs };
+
+// mergerfs 认的选项值（进 argv 的那三个字），与人话标签分开
+QString mergerPolicyOption(MergerPolicy p);
+QString mergerPolicyLabel(MergerPolicy p);
+// 选完策略之后必须让用户看见的那句后果（一个文件整个落在一个分区上……）
+QString mergerPolicyNote(MergerPolicy p);
 
 struct Plan
 {
     Engine engine = Engine::Mdadm;
     QVector<Member> members;
-    int stripeChunkKiB = 512;
+    int stripeChunkKiB = 512;         // 只对 mdadm 有意义
+    MergerPolicy mergerPolicy = MergerPolicy::Mfs;
     QString volumeName;
 };
 
@@ -134,11 +152,8 @@ struct ArrayInfo
 // 计算阵列可用容量与告警。纯函数，不碰设备。
 ArrayInfo evaluateArray(const Plan &plan);
 
-// 自研引擎的文件大小建议：取最小成员分区的可用空间，留出安全余量。
-// 留余量是因为 RAID0 必须两个文件等大，若某个分区被别的程序填满，
-// 大的那个写不进去就会让阵列写成"半条带"—— 直接算成失败。
-qint64 suggestBackingSize(const QVector<qint64> &partitionFreeBytes,
-                          double safetyRatio = 0.95);
+// 自研引擎的 backing 文件建议已随 RAID0 路线一起删除：mergerfs 的 source
+// 就是分区自己的挂载点，不建大文件，也就没有"两个文件必须等大"这条约束。
 
 // ── 软件镜像（nasrs RAID1）──────────────────────────────────
 //
@@ -169,23 +184,58 @@ QString validateMirrorDir(const QString &path);
 QString mirrorDirConflict(const QString &path, const QStringList &mountPoints);
 
 // 成员组合的问题，返回空 = 没问题。两类必须挡：
-//   · 数量不是 2（一主一备是这个功能的定义，不是参数）
-//   · 两个分区在同一块物理盘上 —— 这条最要紧：它给的是**零**冗余，
+//   · 数量不对（镜像要正好 2 个：一主一备是它的定义；mergerfs 至少 2 个才有意义）
+//   · 分区在同一块物理盘上 —— 这条最要紧：它给的是**零**冗余，
 //     而用户以为自己有了冗余。这种"看起来安全其实没有"比直接失败更坏。
 QString mirrorMembersWarning(const QVector<QString> &devicePaths);
 
 // 上面那两类**处理方式不该一样**，所以把类别也暴露出来：
-//   Count    —— 数量不是 2。这条不能被"知道了"绕过：谁是主、坏了顶哪份
+//   Count    —— 数量不对。这条不能被"知道了"绕过：谁是主、坏了顶哪份
 //               都没定义，绕过得到的是一个语义未明的东西。
-//   SameDisk —— 两份落在同一块盘上。这是安全告警，不是结构问题：数据本身
-//               是好的，只是那块盘一坏两份一起没。用户要拿它当"同一盘上的
-//               备份目录"用是正当的，界面应当放行 —— 前提是把话说清、
-//               由他显式确认，而不是硬性挡死。
-enum class MirrorMembersIssue { None, Count, SameDisk };
-MirrorMembersIssue mirrorMembersIssue(const QVector<QString> &devicePaths);
+//   SameDisk —— 落在同一块盘上。这是安全告警，不是结构问题：数据本身是好的，
+//               只是那块盘一坏全没。用户要拿它用是正当的（镜像 = 同一盘上的
+//               备份目录，防误删有用、防坏盘没用；mergerfs = 同一盘上的摊写，
+//               没有加速也没有冗余），界面应当放行 —— 前提是把话说清、由他
+//               显式确认，而不是硬性挡死。
+// 两类在两条路线上的**含义不同**（数量、后果、话术都各说各的），所以判据
+// 是共用的枚举、文案是各自生成的。只有一份枚举，界面才不会把两条路线的
+// "确认"混成一个复选框。
+enum class MembersIssue { None, Count, SameDisk };
+MembersIssue mirrorMembersIssue(const QVector<QString> &devicePaths);
 
 // 主/副本网的分工说明，给界面直接显示的一句话（primaryIsAccess 决定措辞）。
 QString mirrorRoleNote(bool primaryIsAccess);
+
+// ── mergerfs（第三方 FUSE 联合目录）──────────────────────────
+//
+// 它和 RAID0 **不是同一件事**，所以界面上不能叫它 RAID0：
+//   · 没有条带：一个文件整个落在一个分区上，不会被切成条带撒到多盘；
+//   · 没有冗余：坏一块盘，丢的是那块盘上的文件（不是整卷，也不是"没丢"）；
+//   · 可用容量 = 各分区空闲之和（与镜像的"一份"、RAID0 的 min×N 都不同）。
+// 它要的东西很少：几个**已挂载**的分区 + /dev/fuse + fusermount3 + mergerfs
+// 二进制，全程普通用户权限，不建文件、不碰分区、不抹数据。
+//
+// mergerfs 至少 2 个成员才有意义（1 个就是直连单盘，没有"合并"这件事）。
+constexpr int kMergerMinMembers = 2;
+
+// source 就是分区的挂载点，这里只做纯字符串把关：它会进 argv，而 mergerfs
+// 用 ':' 分隔 source —— 挂载点里带冒号会被解析成两个 source，把一份数据
+// 当两份用。返回空串 = 合法，否则返回拒绝原因（与 validateMirrorDir 同一风格）。
+QString validateMergerSource(const QString &path);
+
+// source 列表的结构性冲突：同一个目录出现两次，或一个 source 在另一个 source
+// **里面**（嵌套的 union 会把同一份数据算两次容量，也会让删除动作作用到
+// 不该作用的那一层）。返回空 = 没有冲突。
+QString mergerSourcesConflict(const QVector<QString> &paths);
+
+// mergerfs 的 argv（不含程序名）。minfreespace 用 mergerfs 自己的默认 4G：
+// mfs 类策略在一个分区接近写满时不该把新文件塞进去，那条阈值是策略的一部分。
+QStringList mergerfsArgs(const QVector<QString> &sources, const QString &mountPoint,
+                         MergerPolicy p);
+
+// 与镜像同一套类别，文案按 mergerfs 的说法（同盘：没有加速也没有冗余）。
+MembersIssue mergerMembersIssue(const QVector<QString> &devicePaths);
+QString mergerMembersWarning(const QVector<QString> &devicePaths);
 
 // IQN：遵循 ietf.2007-06 规范，反序域名 + 日期 + 序号
 // 例：iqn.2026-11.com.example:servertoolbox-01

@@ -108,24 +108,41 @@ private:
     void onInstallFuseClicked();
 
     // ── 软件镜像（nasrs RAID1）──
-    // 与 raidfs 那个框的区别：这里的每条命令都真能跑，所以徽标写的是
+    // 与 mergerfs 那格的区别：这里的每条命令都真能跑，所以徽标写的是
     // "落后多少"，而不是"引擎未实现"。两者共用一个位置（都是第三个出口），
     // 但语义完全不同，别把它们的状态合并成一套。
     QWidget *buildMirrorBox();
-    void refreshMirrorBox();              // 路径预填 + 成员组合告警 + 按钮可用性
+    void refreshMirrorBox();              // 路径预填 + 按钮可用性
     void onMirrorSyncClicked();           // 「同步一次」
     void onMirrorCheckClicked();          // 「查副本落后多少」
     void onMirrorAccessChanged(int idx);  // 访问主副本 / 副本网
     void applyMirrorStatus(const NasController::MirrorStatus &st);
     void onMirrorAutoToggled(bool on);    // 定时同步开关
-    void onMirrorAckSameDisk();          // 「知道了」：显式接受"同一块盘 = 零冗余"，放行同步/查副本
+
+    // ── mergerfs（第三方 FUSE 合并目录，RAID0 那格现在用它）──
+    QWidget *buildMergerBox();
+    void refreshMergerBox();              // source 列表 + 合并挂载点 + 按钮/策略
+    QString mergerMountPoint() const;     // /mnt/<卷名>，卷名空时为空串
+
+    // 成员组合的告警与「知道了」：**两条路线共用一行**（阵列区里，不在各自那格）。
+    // 同盘这件事对镜像是"零冗余"、对 mergerfs 是"没有加速也没有冗余"，话要说
+    // 两遍，但确认与放行是同一套：分成两行会让用户在一行确认过之后以为另一行
+    // 也确认过了。
+    void onMembersAckSameDisk();
+    // 放行判据只写一份：按钮可用性、mirrorDirs、mergerfs 守卫、定时器都问它。
+    // 分开写必漂 —— 之前漂出来过一次：按钮亮了、定时器过了确认闸，mirrorDirs
+    // 照旧把同盘当硬拒绝，用户看到"已放行"却同步不了。
+    bool membersGateOpen(Nas::Engine engine, const QVector<QString> &devices) const;
     void setMirrorPill(const QString &text, const char *role);
     // 算出并校验两个副本目录（同步 / 查询 / 定时器三个入口共用同一套守卫）。
     // 返回 false 时 *why 里一定是要显示给用户看的那句话 —— 失败却不说话，
     // 按钮就成了哑弹，而这正是本页最不想要的那种"点了没反应"。
     bool mirrorDirs(QString *primary, QString *secondary, QString *why) const;
-    // 放行判据只写一份：按钮可用性、mirrorDirs、定时器三处都问它（分开写必漂）
-    bool mirrorGateOpen(const QVector<QString> &devices) const;
+    // mergerfs 的 source 与挂载点，同一套守卫（① 创建 / ② 挂载共用）。
+    // 挂载点由调用方传（raidfs 那格那栏是用户可改的）。
+    bool mergerDirs(QStringList *sources, const QString &mountIn, QString *why) const;
+    // 成员组合告警行（红字 +「知道了」）的唯一计算处：两条路线共用那一行
+    void refreshMembersWarn();
     void appendInstallLog(const QString &chunk);  // 写日志框（\r 也算换行）
     // 把 m_env 翻译成右上角缺失提示 + 页顶按钮显隐。两处必须同一次算完，
     // 否则会在中间状态下互相打脸（按钮说"齐了"、红字还说"缺"）。
@@ -237,8 +254,12 @@ private:
     QComboBox *m_mirrorAccess = nullptr;   // 访问者读哪一份（决定 SMB 指向）
     QLabel  *m_mirrorPill = nullptr;       // 未同步 / 已一致 / 读不到
     QLabel  *m_mirrorState = nullptr;      // 最近一次同步或查询的结果，一行话
-    QLabel  *m_mirrorWarn = nullptr;       // 成员组合的问题（同盘 = 零冗余）
-    QPushButton *m_mirrorAckBtn = nullptr; // 「知道了」：显式接受零冗余，放行同步/查副本
+    // 成员组合的问题与「知道了」：**阵列区共用一行**（镜像与 mergerfs 都用它），
+    // 不在各自那格。同盘对镜像是"零冗余"、对 mergerfs 是"没有加速也没有冗余"，
+    // 话两遍，确认与放行是同一套。分成两行的话，用户在一行确认过之后会以为
+    // 另一行也确认过了。
+    QLabel *m_membersWarn = nullptr;
+    QPushButton *m_membersAckBtn = nullptr;
     // 记住的是**这一对分区**（dev 列表 join），不是"用户点过知道了"这个事实：
     // 换组合就要重新确认。用布尔记的写法会让一次确认永远有效 —— 用户先拿
     // 两块好盘确认过一次，之后换成同一块盘上的两个分区，界面上就再没有障碍了。
@@ -248,6 +269,14 @@ private:
     QCheckBox *m_mirrorDeleteExtras = nullptr;  // 同步时删副本上多余的
     QCheckBox *m_mirrorAuto = nullptr;          // 定时同步
     QTimer  *m_mirrorTimer = nullptr;
+
+    // ── mergerfs（RAID0 那格现在用它）──
+    // source 与合并挂载点同样是 QLabel：这两个值会进 mergerfs 的 argv，
+    // 给输入框就等于允许用户把一个 source 写成 / 或某个挂载点本身。
+    QWidget *m_mergerBox = nullptr;
+    QLabel  *m_mergerSources = nullptr;   // 哪几个分区的挂载点被并起来
+    QLabel  *m_mergerMount = nullptr;     // /mnt/<卷名>
+    QComboBox *m_policy = nullptr;        // mergerfs 写入策略（新文件落到哪个分区）
 
     // ── 页顶通栏「一键安装依赖的组件」──
     // 这一组的状态只有"在装 / 没在装"两种，全部围绕 m_installProc 转。

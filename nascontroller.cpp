@@ -113,6 +113,23 @@ QString NasController::nasrsBinaryPath()
 }
 
 
+QString NasController::mergerfsBinaryPath()
+{
+    // 与 nasrs 同一套找法，但**不共用函数**：mergerfs 由包管理器装进系统目录，
+    // 而 AppImage 的包内路径（exeDir/usr/bin）里放的是 nasrs。共用一份发现逻辑
+    // 迟早要在"mergerfs 该不该随包走"这件事上打架，而两家的答案本来就不同。
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    const QStringList cands = {
+        exeDir + "/mergerfs",
+        exeDir + "/../lib/mergerfs",
+        "/usr/local/bin/mergerfs",
+        "/usr/bin/mergerfs",
+    };
+    for (const QString &c : cands)
+        if (QFileInfo::exists(c) && QFileInfo(c).isExecutable()) return c;
+    return QStandardPaths::findExecutable("mergerfs");
+}
+
 NasController::Env NasController::probe() const
 {
     Env e;
@@ -120,6 +137,7 @@ NasController::Env NasController::probe() const
     e.targetCli   = !findTool("targetcli").isEmpty();
     e.losetup     = !findTool("losetup").isEmpty();
     e.nasrsBinary = !nasrsBinaryPath().isEmpty();
+    e.mergerfsBinary = !mergerfsBinaryPath().isEmpty();
 
     // FUSE：raidfs 挂目录靠它，与 iSCSI 的依赖完全是两套。
     //   · /dev/fuse 是字符设备，不在就一律挂不了；
@@ -183,11 +201,14 @@ e.smbService = QFileInfo::exists("/usr/lib/systemd/system/smbd.service")
     if (!e.targetCli)     e.missing << "targetcli / targetcli-fb（LIO 配置工具）";
     if (!e.configfsMounted) e.missing << "configfs 未挂载（mount -t configfs configfs /sys/kernel/config）";
     if (!e.kernelModules) e.missing << "target_core_mod 内核模块";
-    // loop 在本机是 built-in，所以不检查 loop.ko 是否存在，只看 losetup
-    if (!e.losetup)       e.missing << "losetup（自研引擎需要）";
+    // losetup 不再进 missing：它是自研 RAID0 那条的依赖（backing 文件 → loop →
+    // LIO），那条路线已经换成 mergerfs，全程不碰 loop。留着这句会让用 mergerfs
+    // 的人看到一句他根本用不上的"环境未就绪"。
     // 注意：fuseDevice/fuseMount 也**不进** missing，理由与 Samba 相同 ——
-    // raidfs 是可选出口，没 FUSE 的人做 iSCSI / 内核 RAID 不该看到"环境未
-    // 就绪"。raidfs 页自己判断 readyForFuse。
+    // mergerfs 是可选出口，没 FUSE 的人做 iSCSI / 内核 RAID 不该看到"环境未
+    // 就绪"。mergerfs 那一格自己判断 readyForMerger。
+    // mergerfs **二进制**进 missing：它靠包管理器装（apt 有，dnf/pacman 没有），
+    // 这条已经在 nasDepSpecs 表里，上面那个循环会顺带收掉，不在这里重复。
     //
     // 注意：smbd/testparm/smb.service 缺失**不进** missing。SMB 是可选功能，
     // 没装 Samba 的人用 RAID 不该看到环境未就绪。SMB 页自己判断 readyForSmb。
@@ -260,49 +281,73 @@ NasController::planMdadmCreate(const Nas::Plan &plan, const QString &arrayName) 
     return steps;
 }
 
-// ── 自研 RAID0 路线 ─────────────────────────────────────────
+// ── mergerfs 路线（RAID0 那格现在用它）────────────────────────
+//
+// 自研 RAID0 已经整条撤掉（nasrs 里的 serve/raid.rs/nbd.rs 一起删），原因写在
+// README 里：导出层从来没有实现，`serve` 算完布局就退出码 3。mergerfs 是第三方
+// 现成的东西，全程普通用户权限，不建大文件、不碰分区、不抹数据。
+//
+// 它**不是 RAID0**，这里不写一条"RAID0 挂载"的命令来骗人：一个文件整个落在一个
+// 分区上，没有条带，也没有冗余。所以文案写 mergerfs，容量账是各分区空闲之和。
 QVector<NasController::Step>
-NasController::planRaid0RsCreate(const Nas::Plan &plan, const QString &volumeName,
-                                 qint64 backingSizeBytes) const
+NasController::planMergerfsCreate(const Nas::Plan &plan, const QString &mountPoint) const
 {
     QVector<Step> steps;
-    if (!safeVolumeName(volumeName)) return steps;
+    if (plan.engine != Nas::Engine::MergerFs) return steps;
+    if (!safeVolumeName(plan.volumeName)) return steps;
+    if (plan.members.size() < Nas::kMergerMinMembers) return steps;
+    // 挂载点会进 argv，也会进 systemd 单元名 —— 这里放宽一个字符就是开注入口
+    if (!Nas::validateMountPoint(mountPoint).isEmpty()) return steps;
 
-    const QString bin = nasrsBinaryPath();
+    QStringList srcs;
+    for (const Nas::Member &m : plan.members) {
+        if (!Nas::validateMergerSource(m.filePath).isEmpty()) return steps;
+        srcs << m.filePath;
+    }
+    if (!Nas::mergerSourcesConflict(srcs).isEmpty()) return steps;
+
+    // ① 只建目录，不挂任何东西：可撤销，也不遮任何内容。
+    // 用 install -d 而不是 mkdir：一并把权限定下来，且目录已存在时不报错
+    // （重复创建是正常操作）。
+    Step mkd;
+    mkd.program = "pkexec";
+    mkd.args = { "install", "-d", "-m", "0755", mountPoint };
+    mkd.describe = QString("创建挂载目录 %1（mergerfs 的挂载点）").arg(mountPoint);
+    mkd.destructive = false;
+    steps.append(mkd);
+
+    return steps;
+}
+
+QVector<NasController::Step>
+NasController::planMergerfsMount(const Nas::Plan &plan, const QString &mountPoint) const
+{
+    QVector<Step> steps;
+    const auto pre = planMergerfsCreate(plan, mountPoint);
+    if (pre.isEmpty()) return steps;   // 同一套校验，不各写一遍
+
+    const QString bin = mergerfsBinaryPath();
     if (bin.isEmpty()) return steps;
 
-    QStringList files;
-    for (const Nas::Member &m : plan.members) {
-        // backing 文件路径来自分区挂载点 + 卷名，两者都要过校验
-        if (m.filePath.isEmpty()) return steps;
-        if (!m.filePath.startsWith('/') || m.filePath.contains("..")) return steps;
-        files << m.filePath;
-    }
-    if (files.size() < 2) return steps;
+    QStringList srcs;
+    for (const Nas::Member &m : plan.members) srcs << m.filePath;
 
-    // 1) 预分配 backing 文件
-    for (const QString &f : files) {
-        Step s;
-        s.program = "fallocate";
-        s.args = { "-l", QString::number(backingSizeBytes), f };
-        s.describe = QString("创建 backing 文件 %1（%2）")
-                        .arg(f, Nas::humanSize(backingSizeBytes));
-        // 只在目标路径不存在时才创建；存在则拒，绝不覆盖已有文件
-        s.destructive = false;
-        steps.append(s);
-    }
-
-    // 2) 起引擎：nasrs 把两个文件拼成一个块设备，通过本地 TCP/NBD 暴露
-    //    这里用 --stdout 模式由调用方持有进程，参数留白由 nasrs 的 --help 对齐
-    Step run;
-    run.program = bin;
-    run.args = { "serve", "--name", volumeName,
-                 "--chunk", QString::number(plan.stripeChunkKiB) + "K" };
-    for (const QString &f : files) run.args << "--disk" << f;
-    run.describe = QString("启动 nasrs RAID0 卷 %1（%2 个 backing 文件）")
-                       .arg(volumeName).arg(files.size());
-    run.destructive = false;
-    steps.append(run);
+    Step mt;
+    // 走 pkexec（root）挂载，不是用户态挂载，这一条不是随便选的：
+    //   · 用户挂的 FUSE 目录默认**只有挂载者能读**（allow_other 还要
+    //     /etc/fuse.conf 里的 user_allow_other），而 SMB 那出口是 smbd（root）
+    //     去读它 —— 挂上了却共享不出东西，是最难查的那种"界面说成功、别人读不到"。
+    //   · root 挂载 + allow_other 让 smbd 与访客都读得到，权限模型与本页其它
+    //     特权动作（install / mount / systemctl）一致，都走同一道授权。
+    mt.program = "pkexec";
+    mt.args = QStringList() << bin << Nas::mergerfsArgs(srcs, mountPoint, plan.mergerPolicy);
+    mt.describe = QString("mergerfs：把 %1 个分区并成 %2（策略 %3，可用 = 各分区空闲之和）")
+                      .arg(int(srcs.size())).arg(mountPoint).arg(Nas::mergerPolicyLabel(plan.mergerPolicy));
+    // 标 destructive：这一步会在挂载目录上盖一个文件系统。挂载可撤销（卸载就
+    // 恢复），但它让目录里原有的内容暂时看不见 —— 用户若以为文件丢了会慌，
+    // 所以要走确认，不能省。
+    mt.destructive = true;
+    steps.append(mt);
 
     return steps;
 }
@@ -639,49 +684,6 @@ void NasController::pumpQueue()
     }
 }
 
-
-QVector<NasController::Step>
-NasController::planRaidfsMount(const Nas::Plan &plan, const QString &mountPoint) const
-{
-    QVector<Step> steps;
-    // 两道模型层校验，缺一不可：
-    //   · 挂载点必须在 /mnt 直下且字符集安全 —— 它会进 argv，也会进
-    //     systemd 单元名，这里放宽一个字符就等于开一个注入口；
-    //   · 卷名与成员要够：RAID0 至少 2 个成员，少于 2 个 nasrs 自己会拒绝。
-    if (!Nas::validateMountPoint(mountPoint).isEmpty()) return steps;
-    if (plan.members.size() < 2) return steps;
-    for (const Nas::Member &m : plan.members)
-        if (m.filePath.isEmpty()) return steps;
-
-    // 1) 建挂载目录。用 install -d 而不是 mkdir：一并把权限定下来，
-    //    且目录已存在时不报错（重复挂载是正常操作）。
-    Step mkd;
-    mkd.program = "pkexec";
-    mkd.args = { "install", "-d", "-m", "0755", mountPoint };
-    mkd.describe = QString("创建挂载目录 %1").arg(mountPoint);
-    mkd.destructive = false;
-    steps.append(mkd);
-
-    // 2) 起 nasrs 导出。这里刻意不写 nasrs 的具体参数：引擎还没有导出
-    //    通路，写一条看起来完整、实际跑不通的命令比不写更糟 —— 用户会
-    //    以为是自己配置错了。等导出实现后在这里补 program/args。
-    Step srv;
-    srv.program = nasrsBinaryPath();
-    srv.args = { "export-fs" };
-    for (const Nas::Member &m : plan.members) {
-        srv.args << "--disk" << m.filePath;
-    }
-    srv.args << "--name" << plan.volumeName << "--mount" << mountPoint;
-    srv.describe = QString("用 nasrs 把卷 %1 导出并挂到 %2")
-                      .arg(plan.volumeName, mountPoint);
-    // 标成 destructive 是保守做法：这一步会在挂载目录上盖一个文件系统。
-    // 挂载本身可撤销（unmount 就恢复原状），但它会让目录里原有的内容
-    // 暂时看不见，用户若误以为文件丢了会很慌，所以要走确认。
-    srv.destructive = true;
-    steps.append(srv);
-
-    return steps;
-}
 
 QVector<NasController::Step>
 NasController::planRaidfsUnmount(const QString &mountPoint) const

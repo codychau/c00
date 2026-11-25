@@ -139,7 +139,7 @@ static constexpr qint64 kMinBytes = 2LL * 1024 * 1024 * 1024;
 //
 // mdadm 直接拿分区当成员（会抹掉上面的文件系统），所以"已挂载"是障碍、
 // "空分区"正合适。两条自研路线相反：它们只在已有的文件系统里放东西
-// （RAID0 放一个大文件，镜像放一个目录），所以"已挂载"是前提、"空分区"用不了。
+// （mergerfs 用它的挂载点当 source，镜像放一个目录），所以"已挂载"是前提、"空分区"用不了。
 //
 // 写成 `!= Mdadm` 而不是枚举两个自研值：将来再加第三条不碰分区的路线时，
 // 枚举的写法会静默走回 mdadm 的判定 —— 那意味着界面会把"已挂载的分区"标成
@@ -291,6 +291,30 @@ ArrayInfo evaluateArray(const Plan &plan)
         if (minCap < 0 || m.capacity < minCap) minCap = m.capacity;
     }
 
+    // ── mergerfs：可用容量 = 各成员空闲之和 ──
+    // 这条必须走在通用算法前面。通用算法算的是 RAID0 的 min×N，mergerfs 拿到
+    // 那个数字会报出"200G+100G = 200G"这种账（min 100 × 2 = 200，而真实可写
+    // 是 300）。mergerfs 没有条带、没有副本，容量就是各分区当前空闲加起来。
+    // 走通用算法还会顺带报一个"浪费 %1" —— mergerfs 什么都不浪费，那条浪费
+    // 说明会让用户去找根本不存在的水分。
+    if (plan.engine == Engine::MergerFs) {
+        info.usable = info.totalRaw;
+        info.wasted = 0;
+
+        const QString memberWarn = mergerMembersWarning(devicesOf(plan));
+        if (!memberWarn.isEmpty()) {
+            info.health = ArrayHealth::Single;
+            info.note = memberWarn;
+            return info;
+        }
+        info.health = ArrayHealth::Ok;
+        info.note = QString("mergerfs：可用 %1（各分区空闲之和），策略 %2。"
+                            "一个文件整个落在一个分区上 —— 没有条带；"
+                            "坏一块盘丢的是它上面的文件，不是整卷。")
+                        .arg(humanSize(info.usable), mergerPolicyLabel(plan.mergerPolicy));
+        return info;
+    }
+
     if (info.members == 1) {
         // 单个成员就是一条直连盘，不是 RAID；允许但要说清
         info.health = ArrayHealth::Single;
@@ -337,25 +361,6 @@ ArrayInfo evaluateArray(const Plan &plan)
                         .arg(info.members).arg(humanSize(info.usable));
     }
     return info;
-}
-
-// ── backing 文件大小建议 ────────────────────────────────────
-// 关键约束：自研引擎的 RAID0 要求所有 backing 文件**等大**，
-// 否则最后一个条带写不满，实现上要么补零要么报错。
-// 所以只能按最小的可用空间来定，并且再打个折 ——
-// 目标分区上可能同时有别的程序在写，留余量避免文件写不下。
-qint64 suggestBackingSize(const QVector<qint64> &partitionFreeBytes,
-                          double safetyRatio)
-{
-    qint64 minFree = -1;
-    for (qint64 f : partitionFreeBytes) {
-        if (f <= 0) continue;
-        if (minFree < 0 || f < minFree) minFree = f;
-    }
-    if (minFree < 0) return 0;
-    // 向下取整到 MiB，避免小数尾巴造成两个文件大小不一致
-    const double v = double(minFree) * safetyRatio;
-    return qint64(v / (1024 * 1024)) * (1024 * 1024);
 }
 
 // ── 软件镜像（nasrs RAID1）──────────────────────────────────
@@ -427,38 +432,71 @@ QString mirrorDirConflict(const QString &path, const QStringList &mountPoints)
     return QString();
 }
 
-// 判据只写一份，文案也只写一份：两个 API（issue / warning）都从这条内部函数
-// 出来，且**文案在这里就格式化好**。分开写会漂 —— 漂出来的结果是"界面放行了，
-// 模型层还在拒绝"，或者反过来：红字说明与放行条件对不上。
+// 父盘计算只写一份：镜像与 mergerfs 的"同盘"是**同一条判据**，只是话要说两遍。
+// 共用文案会逼着 mergerfs 说"两份副本"这种镜像的词 —— mergerfs 根本没有副本。
+static QSet<QString> parentDisksOf(const QVector<QString> &devicePaths, bool *incomplete)
+{
+    QSet<QString> parents;
+    *incomplete = false;
+    for (const QString &p : devicePaths) {
+        const QString name = p.section('/', -1);   // /dev/sdb1 → sdb1
+        if (name.isEmpty()) { *incomplete = true; return parents; }
+        parents.insert(parentDiskOf(name));
+    }
+    return parents;
+}
+
+// 判据与文案只写一份：两个 API（issue / warning）都从这里出来，且**文案在这里
+// 就格式化好**。分开写会漂 —— 漂出来的结果是"界面放行了，模型层还在拒绝"，
+// 或者反过来：红字说明与放行条件对不上。
 // （上一版在这里留了 %1 让调用方填，两种 issue 的 %1 是不同东西：Count 填的
 // 是成员数、SameDisk 填的是盘名，而"设备名不完整"那条要填的是路径 ——
 // 让调用方填等于三处各填各的，必然漏。）
-static QPair<MirrorMembersIssue, QString> mirrorMembersCheck(
-    const QVector<QString> &devicePaths)
+static QPair<MembersIssue, QString> mirrorMembersCheck(const QVector<QString> &devicePaths)
 {
     if (devicePaths.size() != kMirrorMembers)
-        return { MirrorMembersIssue::Count,
+        return { MembersIssue::Count,
                  QString::fromUtf8("镜像阵列要正好 %1 个成员（一主一备），当前 %2 个。")
                      .arg(kMirrorMembers).arg(devicePaths.size()) };
 
-    QSet<QString> parents;
-    for (const QString &p : devicePaths) {
-        const QString name = p.section('/', -1);   // /dev/sdb1 → sdb1
-        if (name.isEmpty())
-            return { MirrorMembersIssue::Count,
-                     QString::fromUtf8("成员设备名不完整：%1").arg(p) };
-        parents.insert(parentDiskOf(name));
-    }
+    bool incomplete = false;
+    const QSet<QString> parents = parentDisksOf(devicePaths, &incomplete);
+    if (incomplete)
+        return { MembersIssue::Count,
+                 QString::fromUtf8("成员设备名不完整：%1").arg(devicePaths.first()) };
     if (parents.size() == 1)
-        return { MirrorMembersIssue::SameDisk,
+        return { MembersIssue::SameDisk,
                  QString::fromUtf8("两个分区都在 %1 上：这块盘一坏，两份副本一起没 —— "
                                    "那等于没有镜像。要就用也行（同一块盘上的备份目录，"
                                    "防误删有用、防坏盘没用），点右边的「知道了」就放行。")
                      .arg(*parents.constBegin()) };
-    return { MirrorMembersIssue::None, QString() };
+    return { MembersIssue::None, QString() };
 }
 
-MirrorMembersIssue mirrorMembersIssue(const QVector<QString> &devicePaths)
+static QPair<MembersIssue, QString> mergerMembersCheck(const QVector<QString> &devicePaths)
+{
+    if (devicePaths.size() < kMergerMinMembers)
+        return { MembersIssue::Count,
+                 QString::fromUtf8("mergerfs 要至少 %1 个分区才有意义（1 个就是直连单盘，"
+                                   "没有合并这件事），当前 %2 个。")
+                     .arg(kMergerMinMembers).arg(devicePaths.size()) };
+
+    bool incomplete = false;
+    const QSet<QString> parents = parentDisksOf(devicePaths, &incomplete);
+    if (incomplete)
+        return { MembersIssue::Count,
+                 QString::fromUtf8("成员设备名不完整：%1").arg(devicePaths.first()) };
+    if (parents.size() == 1)
+        return { MembersIssue::SameDisk,
+                 QString::fromUtf8("%1 个分区都在 %2 上：mergerfs 摊写落在同一块盘上，"
+                                   "没有加速（只有一个设备在转），坏盘时这些分区上的文件"
+                                   "一起没。要就用也行（同一块盘上的一个大目录），"
+                                   "点右边的「知道了」就放行。")
+                     .arg(devicePaths.size()).arg(*parents.constBegin()) };
+    return { MembersIssue::None, QString() };
+}
+
+MembersIssue mirrorMembersIssue(const QVector<QString> &devicePaths)
 {
     return mirrorMembersCheck(devicePaths).first;
 }
@@ -466,6 +504,117 @@ MirrorMembersIssue mirrorMembersIssue(const QVector<QString> &devicePaths)
 QString mirrorMembersWarning(const QVector<QString> &devicePaths)
 {
     return mirrorMembersCheck(devicePaths).second;
+}
+
+MembersIssue mergerMembersIssue(const QVector<QString> &devicePaths)
+{
+    return mergerMembersCheck(devicePaths).first;
+}
+
+QString mergerMembersWarning(const QVector<QString> &devicePaths)
+{
+    return mergerMembersCheck(devicePaths).second;
+}
+
+// ── mergerfs 参数与文案 ──────────────────────────────────────
+
+QString mergerPolicyOption(MergerPolicy p)
+{
+    switch (p) {
+        case MergerPolicy::Mfs: return "mfs";
+        case MergerPolicy::Eol: return "eol";
+        case MergerPolicy::Lfs: return "lfs";
+    }
+    return "mfs";
+}
+
+QString mergerPolicyLabel(MergerPolicy p)
+{
+    switch (p) {
+        case MergerPolicy::Mfs: return QString::fromUtf8("最空闲优先（mfs）");
+        case MergerPolicy::Eol: return QString::fromUtf8("顺序填满（eol）");
+        case MergerPolicy::Lfs: return QString::fromUtf8("最紧优先（lfs）");
+    }
+    return QString::fromUtf8("最空闲优先（mfs）");
+}
+
+// 策略的后果必须写在选它的那一刻，不能写进 tooltip：这里选错的代价是"我以为
+// 数据撒在几块盘上，其实全在第一块盘上"，那要当场看见。
+// 刻意不用 **加粗**：状态栏是纯文本，星号会原样显示出来。
+QString mergerPolicyNote(MergerPolicy p)
+{
+    switch (p) {
+        case MergerPolicy::Eol:
+            return QString::fromUtf8("顺序填满：写满第一个分区才写第二个。账最好算，"
+                                     "但第一块盘承担了全部写入 —— 它坏掉丢得最多。"
+                                     "一个文件整个落在一个分区上，mergerfs 没有条带。");
+        case MergerPolicy::Lfs:
+            return QString::fromUtf8("最紧优先：新文件写到当前最紧的分区，把空的留给后来的"
+                                     "大文件。少用。一个文件整个落在一个分区上，没有条带。");
+        case MergerPolicy::Mfs:
+            return QString::fromUtf8("最空闲优先：新文件写到当前最空的分区，各盘使用率均衡。"
+                                     "一个文件整个落在一个分区上 —— mergerfs 没有条带，"
+                                     "坏一块盘丢的是它上面的文件，不是整卷。");
+    }
+    return QString();
+}
+
+QString validateMergerSource(const QString &path)
+{
+    if (path.isEmpty())
+        return QString::fromUtf8("source 不能为空：分区没挂载就没有 source");
+    if (!path.startsWith('/'))
+        return QString::fromUtf8("source 必须是绝对路径");
+    if (QDir::cleanPath(path) != path)
+        return QString::fromUtf8("source 路径要规范（不要有 // 或 ./）");
+    // /、/mnt、/media 本身不能当 source：那等于"把整个系统/整层挂载树"
+    // 变成一个 union 的一支，写进去的东西落在根盘上，而 mergerfs 会把
+    // 那一整支的容量算进阵列。
+    if (path == "/" || path == "/mnt" || path == "/media")
+        return QString::fromUtf8("source 不能是 /、/mnt 或 /media 本身 —— 那是整层挂载树，"
+                                 "不是某个分区。请在它下面指一层目录。");
+    // mergerfs 用 ':' 分隔 source。挂载点里带冒号（label 里真出现过）会被读成
+    // 两个 source，把同一份数据当两支用。这一条在字符串层面挡掉，不转义。
+    if (path.contains(':'))
+        return QString::fromUtf8("source 路径不能含冒号：mergerfs 用冒号分隔 source，"
+                                 "含冒号会被解析成两个 source。");
+    if (path.count('/') < 2)
+        return QString::fromUtf8("source 至少两层（/mnt/d 这种）");
+    return QString();
+}
+
+QString mergerSourcesConflict(const QVector<QString> &paths)
+{
+    QSet<QString> seen;
+    for (const QString &p : paths) {
+        if (seen.contains(p))
+            return QString::fromUtf8("同一个目录出现两次（%1）：mergerfs 会把同一份数据当两支 source，"
+                                     "容量算两遍，删除动作也会作用到不该作用的那一层。").arg(p);
+        seen.insert(p);
+    }
+    for (const QString &outer : paths)
+        for (const QString &inner : paths)
+            if (inner != outer && inner.startsWith(outer + "/"))
+                return QString::fromUtf8("%1 在 %2 里面：嵌套的 source 会让同一份数据被算两次容量。")
+                        .arg(inner, outer);
+    return QString();
+}
+
+QStringList mergerfsArgs(const QVector<QString> &sources, const QString &mountPoint,
+                         MergerPolicy p)
+{
+    QStringList args;
+    // minfreespace 用 mergerfs 自己的默认值（4G）：mfs 类策略在一个分区接近写满时
+    // 不该再把新文件塞进去，这条阈值是策略的一部分，不是可调参数。
+    // allow_other：挂载后 smbd（root）与访客都读得到。少了这条，FUSE 目录默认
+    // 只有挂载者能读 —— SMB 那条出口会"挂上了却共享不出东西"，是最难查的那类
+    // 界面说成功、别人读不到。
+    args << "-o" << QString("category.create=%1,minfreespace=4G,allow_other").arg(mergerPolicyOption(p));
+    QStringList srcs;
+    for (const QString &s : sources) srcs << s;
+    args << srcs.join(':');
+    args << mountPoint;
+    return args;
 }
 
 QString mirrorRoleNote(bool primaryIsAccess)
@@ -1063,6 +1212,17 @@ const QVector<DepSpec> &nasDepSpecs()
           { QStringLiteral("fuse3") },
           { QStringLiteral("fuse3") },
           { QStringLiteral("fuse3") } },
+
+        // mergerfs（FUSE 合并目录）。这条是 RAID0 那格现在用的第三方引擎。
+        // 包名只在 apt 家有：repology 上 Debian 11–14/Ubuntu 18.04–27.04 都有
+        // mergerfs，而 dnf 系（Fedora/RHEL/openEuler）**一个都没有** —— 本容器
+        // （openEuler 24.03）里 `dnf list --available mergerfs` 直接报
+        // "No matching Packages"，这是实测，不是猜。Arch 只在 AUR，同 targetcli
+        // 的处理：空列表，让界面如实说"这家装不了"，而不是摆一个必然失败的按钮。
+        { QStringLiteral("mergerfs（FUSE 合并目录）"), QStringLiteral("mergerfs"),
+          { QStringLiteral("mergerfs") },
+          {},
+          {} },
 
         // Samba：smbd 与 smbd.service 都在 samba 包里。Debian/Ubuntu 把
         // testparm（离线校验 smb.conf 的那个）拆进了 samba-common-bin，

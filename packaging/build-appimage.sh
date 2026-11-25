@@ -49,7 +49,15 @@ else
     echo "!! 未找到 llama-proxy，AI 代理功能在 AppImage 里会不可用" >&2
 fi
 
-# nasrs 是自研引擎（RAID0 + 软件镜像 RAID1），NAS 页那两条路线全靠它。
+# nasrs 是自研引擎（软件镜像 RAID1），NAS 页镜像那条路线全靠它。
+#
+# mergerfs **不随包走**：它是发行版的包（apt 家有，dnf 系没有），程序按
+# 「同目录 → ../lib → /usr/local/bin → /usr/bin → PATH」检测它
+# （见 nascontroller.cpp::mergerfsBinaryPath）。把它塞进 AppImage 等于替用户
+# 决定他要用一个没装过的东西，而且 FUSE 挂载助手与内核模块都跟包走，
+# 一个二进制挪进来也挂不上。
+#
+# RAID0 那条（nasrs serve）已整条删除：导出层从未实现，那一格换成 mergerfs。
 #
 # 这一步原来**没有**：脚本手工铺 AppDir，只拷了 server-toolbox 和
 # llama-proxy，而 CMakeLists 里的 install(PROGRAMS … nasrs …) 根本不会被这条
@@ -60,7 +68,7 @@ fi
 if [ -x nasrs/target/release/nasrs ]; then
     cp nasrs/target/release/nasrs "$APPDIR/usr/bin/"
 elif [ "${ALLOW_MISSING_NASRS:-0}" = "1" ]; then
-    echo "!! 未找到 nasrs，NAS 页两个自研引擎在 AppImage 里都不可用（ALLOW_MISSING_NASRS=1 已确认）" >&2
+    echo "!! 未找到 nasrs，NAS 页镜像引擎在 AppImage 里不可用（ALLOW_MISSING_NASRS=1 已确认）" >&2
 else
     echo "!! 未找到 nasrs/target/release/nasrs —— 先跑 cargo build --release --manifest-path nasrs/Cargo.toml" >&2
     echo "   确实要打一个不含自研引擎的包，就设 ALLOW_MISSING_NASRS=1 再来" >&2
@@ -375,7 +383,7 @@ fi
 # 自研引擎：NAS 页的 RAID0 与软件镜像两条路线全用它。少了它包照样能起来，
 # 界面只在选那两条时说一句"引擎不在程序旁边"—— 一个能启动的残废包，
 # 靠"启动自检通过"是发现不了的，所以这里点名查。
-[ -x "$APPDIR/usr/bin/nasrs" ]           || fail "缺 nasrs 引擎（NAS 页两条自研路线全不可用）"
+[ -x "$APPDIR/usr/bin/nasrs" ]           || fail "缺 nasrs 引擎（NAS 页镜像路线不可用）"
 
 # 依赖闭合检查：把包内 usr/lib 当成**唯一**的库路径，看谁还 "not found"。
 # 白名单里的系统库（libc / libGL / X11 / ICU…）本来就留给宿主，所以过滤掉；

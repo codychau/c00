@@ -39,7 +39,7 @@ A Qt6 desktop tool for Linux, for driving the various jobs a home server has to 
 - **⚙️ Services** — manage system services
 - **📋 Logs** — application logs plus system log viewing
 - **📂 File mounting** — mount management for disk devices
-- **📁 NAS** — pick partitions, drag lines between them to build a RAID, export it as iSCSI / SMB or mount it under `/mnt`
+- **📁 NAS** — pick partitions and drag lines between them: mdadm builds a RAID exported as iSCSI, mergerfs merges several partitions into one directory, or the mirror keeps two copies and exports via SMB
   - **Install the dependency components** — the full-width orange banner at the very top of the
     page. It knows `dnf` / `apt-get` / `pacman`: first a confirmation dialog (what is missing →
     which packages get installed, which commands get run, and an honest "cannot install this" for
@@ -56,6 +56,24 @@ A Qt6 desktop tool for Linux, for driving the various jobs a home server has to 
   - Package names follow each distribution's naming (Debian/Ubuntu use `targetcli-fb` and
     `samba-common-bin`; Arch's official repositories have no targetcli at all, so no AUR package is
     slipped in to make the UI look complete)
+  - **mergerfs merged directory (third-party FUSE)** — pick ≥2 partitions: the sources are their
+    **existing mount points**, and mergerfs unions them into one directory under `/mnt/<name>`.
+    No backing file, no touching the partitions, no wiping — plain user permissions are enough.
+    Usable capacity = **the sum of free space on each partition**.
+    - **It is not RAID0** and the UI does not call it RAID0: a file lands entirely on one partition,
+      there is no striping; a disk dies, the files on that partition die — not the whole volume.
+      That sentence sits in the box permanently, not in a tooltip.
+    - The only parameter you choose is the **write policy** (which partition a new file goes to):
+      most free space (mfs, default, evens out usage), end of list (eol, easy to account for but the
+      first partition takes every write), least free space (lfs). Picking one prints its consequence
+      in the status bar right away. The old "stripe granularity" row is hidden for mergerfs.
+    - mergerfs is a distribution package: **this program only detects it, never bundles it, never
+      installs it for you.** Debian/Ubuntu have it (the top install button can install it);
+      openEuler / Fedora repos do not (verified: `dnf list --available mergerfs` answers
+      `No matching Packages`) and Arch only has it in AUR. On those two the box keeps saying
+      "mergerfs not detected" and does not show a button that is guaranteed to fail.
+    - The only exits are SMB and mounting the directory (it gives a directory, there is no block
+      device to export as iSCSI).
   - **Software mirror RAID1 (`nasrs mirror`)** — pick exactly two partitions: both end up holding a
     complete copy of the directory, and visitors read one of them. It is the only one of the three
     engines that works **end to end today** — no root, no kernel modules, no NBD/LIO, and the sync
@@ -250,16 +268,22 @@ documentation. The boot restore unit `target.service` (`targetctl restore`) come
 **python3-rtslib-fb**; `targetcli-fb` only installs `targetclid.service/socket` — installing just
 the targetcli gives you no automatic restore.
 
-The in-house engine v1 goes `nasrs → loop → LIO block`, and deliberately **does not use TCMU**:
-`tcmu`, `libtcmu` and `tcmu-rs` do not exist on crates.io, GitHub has only two experimental
+The in-house RAID0 route (`nasrs serve` + `raid.rs` + `nbd.rs`) has been deleted wholesale and
+that slot now uses third-party **mergerfs**. The reason for deleting it is exactly this paragraph:
+exporting as a block device needs loop/NBD + root + kernel modules, and the cheaper road does not
+exist — `tcmu`, `libtcmu` and `tcmu-rs` do not exist on crates.io, GitHub has only two experimental
 repositories untouched for years, and writing raw uio + netlink yourself is a multi-week job.
+`serve` computed the layout and exited with code 3, never end to end, so that box honestly said
+"engine not implemented" for as long as it existed. mergerfs is finished, packaged and in
+distribution repositories; the price is that it hands you a directory, not a block device, so the
+box claims neither striping nor redundancy, and capacity is the sum of free space.
 
 The mirror route is a different thing and goes `nasrs mirror`: a purely user-space **one-way**
 copy — write to a temporary file, `sync_all`, then `rename`, with mtimes preserved via
 `utimensat`, so the second round only copies what actually changed. Any difference is resolved in
 favour of the primary and **never by comparing timestamps** (clocks are not trustworthy). It
-touches neither NBD nor LIO, so none of the export-layer problems above are on its path: RAID0 is
-still stuck at "can compute the layout, cannot export it" (`serve` exits with code 3) while the
+touches neither FUSE, nor NBD, nor LIO, so none of the export-layer problems above are on its
+path. nasrs now does exactly this one thing. The
 mirror is usable day to day.
 
 ## Packaging an AppImage
@@ -281,10 +305,14 @@ the host, as AppImage practice dictates, so on a server with no GL (this host, o
 one) the AppImage stops at `libEGL.so.1: cannot open shared object file`. To run on such a machine,
 use the container image (`Containerfile`, which ships mesa and libglvnd).
 
-What gets packaged: the program itself + `llama-proxy` + **`nasrs` (the in-house engine)** +
-**Qt's own libraries and plugins** (core/gui/widgets/network/dbus, the xcb / wayland platform
+What gets packaged: the program itself + `llama-proxy` + **`nasrs` (the in-house mirror engine)**
++ **Qt's own libraries and plugins** (core/gui/widgets/network/dbus, the xcb / wayland platform
 plugins, imageformats), plus **`libproxy`** (a direct dependency of QtGui, 14 KB, and server
-distributions often do not install it). libc, libGL, X11, ICU and other system libraries are never
+distributions often do not install it). **mergerfs is not bundled**: it is a distribution package,
+found by looking next to the program → `../lib` → `/usr/local/bin` → `/usr/bin` → `PATH`, and when
+it is absent the page says "mergerfs not detected" — no bundling, no installing on the user's
+behalf (the FUSE helper and the kernel fuse module belong to the system, so moving one binary in
+would not mount anything either). libc, libGL, X11, ICU and other system libraries are never
 included — the normal AppImage practice is to rely on the host's system libraries, and bundling
 glibc instead tends to crash on other distributions.
 
@@ -296,8 +324,8 @@ The self-check does three things, none of which is "it runs on the build machine
    starts fine on a machine that has Qt (using the system Qt, the bundled copy unused) and blows up
    on a machine that does not.
 
-A missing `nasrs` **stops the build**: losing one engine means shipping a crippled package — it
-starts fine, the UI only says "the nasrs engine is not next to the program" when you pick the
+A missing `nasrs` **stops the build**: losing the mirror engine means shipping a crippled package
+— it starts fine, the UI only says "the nasrs engine is not next to the program" when you pick the
 in-house engine, and a startup self-check cannot catch that. To really build a package without the
 in-house engine, set `ALLOW_MISSING_NASRS=1`. Emoji font and license lookup handle both Debian and
 RPM layouts (`/usr/share/fonts/truetype/noto/` vs `/usr/share/fonts/google-noto-emoji/`,

@@ -38,7 +38,7 @@
 - **⚙️ 服务控制** — 管理系统服务
 - **📋 日志管理** — 应用日志 + 系统日志查看
 - **📂 文件挂载** — 磁盘设备挂载管理
-- **📁 NAS** — 挑分区拖线组 RAID，导出 iSCSI / SMB 或挂成 /mnt 目录
+- **📁 NAS** — 挑分区拖线：mdadm 组 RAID 导 iSCSI，mergerfs 把几个分区并成一个目录，或镜像存两份后走 SMB
   - **一键安装依赖的组件** — 页顶通栏橘黄按钮，认得 `dnf` / `apt-get` / `pacman` 三家：
     先弹确认框（缺什么 → 装哪些包、会跑哪几条命令，装不了的如实说装不了），
     再要 sudo 密码，包管理器的输出实时进页面上的日志框；装失败贴原话，不假装成功
@@ -48,8 +48,21 @@
     而是单独写在导出页底部，附现成的处置命令；只在 iSCSI 出口下才提它们
   - 包名按各家叫法给（Debian/Ubuntu 是 `targetcli-fb`、`samba-common-bin`；
     Arch 官方仓库没有 targetcli，就不塞 AUR 包骗人）
+  - **mergerfs 合并目录（第三方 FUSE）** — 选 ≥2 个分区：source 就是它们**已有的挂载点**，
+    mergerfs 把这几个目录并成 `/mnt/<卷名>` 一个目录。不建大文件、不碰分区、不抹数据，
+    普通用户权限就够。可用容量 = **各分区空闲之和**。
+    - **它不是 RAID0**，界面也不叫它 RAID0：一个文件整个落在一个分区上，没有条带；
+      坏一块盘，丢的是那块盘上的文件，不是整卷。页面上那一行说明是常驻的，不藏进 tooltip。
+    - 唯一需要你选的参数是**写入策略**（新文件落到哪个分区）：最空闲优先（mfs，默认，
+      各盘使用率均衡）、顺序填满（eol，账好算但第一块盘承担了全部写入）、最紧优先（lfs）。
+      选完立刻在状态栏写清后果。原来的「条带粒度」那一行对 mergerfs 整行收掉。
+    - mergerfs 是发行版的包，**本程序只检测、不捆绑、不代装**：apt 家有（页顶一键安装能装），
+      openEuler / Fedora 的仓库里没有（实测 `dnf list --available mergerfs` 报
+      `No matching Packages`），Arch 只在 AUR。对那两家这一格会一直显示「检测不到 mergerfs」，
+      不会摆一个必然失败的安装按钮。
+    - 出口只有 SMB 与挂载目录（它交出来的是目录，没有块设备可导 iSCSI）。
   - **软件镜像 RAID1（`nasrs mirror`）** — 选正好两个分区：两边都是完整的目录副本，
-    访问者读其中一份。它是三条路线里唯一**现在就能用到底**的一条 ——
+    访问者读其中一份。它是三条路线里唯一**不依赖任何外部包**的一条 —— 引擎随程序一起发布，
     不要 root、不要内核模块、不要 NBD/LIO，连同步本身都不走 pkexec
     - 可用容量是**一份**，不是两块之和。两份落在同一块盘上时红字说清后果（这块盘
       一坏，两份一起没 = 零冗余），右边给一个「知道了」：点了就放行同步与查副本。
@@ -200,15 +213,20 @@ AppImage 已内置该字体，不受本节影响。
 开机恢复单元 `target.service`（`targetctl restore`）由 **python3-rtslib-fb** 提供，
 `targetcli-fb` 只装 `targetclid.service/socket` —— 只装 targetcli 不会有自动恢复。
 
-自研引擎 v1 走 `nasrs → loop → LIO block`，**不走 TCMU**：crates.io 上
-`tcmu`/`libtcmu`/`tcmu-rs` 全部不存在，GitHub 上只有两个多年停更的实验仓库，
-自己裸写 uio + netlink 是按周起的工作量。
+自研 RAID0 那条（`nasrs serve` + `raid.rs` + `nbd.rs`）已整条删除，这一格改用
+第三方 **mergerfs**。删掉的理由就是下面这段：导出成块设备要 loop/NBD + root +
+内核模块，而更省事的那条路不存在 —— crates.io 上 `tcmu`/`libtcmu`/`tcmu-rs`
+全部不存在，GitHub 上只有两个多年停更的实验仓库，自己裸写 uio + netlink 是按周
+起的工作量。`serve` 算完布局就退出码 3，从未端到端跑通过，所以界面里那一格长期
+老实写着"引擎未实现"。mergerfs 是别人已经写完、并躺在发行版仓库里的东西，代价是
+它给的是目录而不是块设备：这一格因此不声称条带，也不声称冗余，可用容量是各分区
+空闲之和。
 
 镜像那条是另一回事，走 `nasrs mirror`：纯用户态的**单向**拷贝 ——
 临时文件写完 `sync_all` 再 `rename`，mtime 用 `utimensat` 保住，所以第二轮
 只拷真正变过的文件。不一致一律以主网为准，**不比时间戳**（时钟不可信）。
-它不碰 NBD 也不碰 LIO，因此上面那条导出层的坑完全不在它的路径上：
-RAID0 还停在"算得出布局、导不出去"（`serve` 直接退出码 3），镜像已经能天天用。
+它不碰 FUSE、不碰 NBD 也不碰 LIO，因此上面那条导出层的坑完全不在它的路径上。
+nasrs 现在只做这一件事。
 
 
 ## 打包 AppImage
@@ -229,9 +247,13 @@ VERSION=1.2.0 ./packaging/build-appimage.sh     # 自定义版本号
 `libEGL.so.1: cannot open shared object file`。要在这类机器上跑，用容器镜像
 （`Containerfile`，里面带 mesa 与 libglvnd）。
 
-打包范围：程序本体 + `llama-proxy` + **`nasrs`（自研引擎）** + **Qt 自己的库和插件**
+打包范围：程序本体 + `llama-proxy` + **`nasrs`（自研镜像引擎）** + **Qt 自己的库和插件**
 （core/gui/widgets/network/dbus、xcb / wayland 平台插件、imageformats），外加
-**`libproxy`**（QtGui 的直接依赖，14 KB，服务器发行版常不装）。libc、libGL、X11、
+**`libproxy`**（QtGui 的直接依赖，14 KB，服务器发行版常不装）。
+**mergerfs 不随包走**：它是发行版的包，本程序按「同目录 → ../lib → /usr/local/bin →
+/usr/bin → PATH」检测它，检测不到就在页面上说「检测不到 mergerfs」，不捆绑、不代装
+（FUSE 挂载助手与内核 fuse 模块都跟系统走，单挪一个二进制进去也挂不上）。
+libc、libGL、X11、
 ICU 等系统库一律不打进去 —— AppImage 的通行做法是依赖宿主已有的系统库，把 glibc 打包反而会在
 别的发行版上崩。
 

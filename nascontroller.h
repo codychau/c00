@@ -7,13 +7,15 @@
 
 class QProcess;
 
-// ─────────────────────────────────────────────────────────────
+//  ─────────────────────────────────────────────────────────────
 //  NasController：把 Nas::Plan 变成现实。
 //
-//  两条路线，最后都汇到同一个 iSCSI 导出层：
+//  三条路线，出口各不相同：
 //
-//    mdadm 路线   mdadm --create /dev/mdX → LIO block 后端 → iSCSI
-//    nasrs 路线   两个 backing 文件 → losetup → LIO block 后端 → iSCSI
+//    mdadm 路线    mdadm --create /dev/mdX → LIO block 后端 → iSCSI
+//    mergerfs 路线 几个已挂载的分区 → mergerfs（第三方 FUSE）→ 一个目录
+//                  出口只有 SMB 与"挂到 /mnt 下的目录"，没有块设备可导 iSCSI
+//    nasrs 镜像    主副本目录 → nasrs mirror 单向拷 → 副本目录，出口只有 SMB
 //
 //  设计约定（重要）：
 //   1) 所有会改磁盘的动作都必须先生成一条"待执行命令"，由页面弹确认框，
@@ -64,8 +66,9 @@ public:
         bool configfsMounted = false;
         bool kernelModules = false;   // target_core_mod 等模块文件在不在
         bool losetup = false;
-        bool nasrsBinary = false;     // 自研引擎可执行文件是否找到
-    // RAID FS 走 FUSE，与 iSCSI 那条完全不是一套依赖：不要并进 iSCSI 那批
+        bool nasrsBinary = false;     // 自研引擎可执行文件是否找到（镜像路线用）
+        bool mergerfsBinary = false;  // 第三方 mergerfs 是否找到（RAID0 那格现在用它）
+    // FUSE 走 mergerfs，与 iSCSI 那条完全不是一套依赖：不要并进 iSCSI 那批
     // 缺失项里，否则没装 fuse 的用户连 iSCSI 都会被提示"环境未就绪"。
     bool aptAvailable = false;    // apt-get 在不在（安装按钮的另一半条件）
     bool aptFamily  = false;    // 发行版是否 ubuntu/debian 系（os-release 判定）
@@ -84,9 +87,9 @@ bool smbService = false;      // systemd 是否有 smbd.service
     QStringList missingDepLabels; // 同一批的人话名，界面直接显示
         QStringList missing;          // 人类可读的缺失项
         bool readyForSmb() const { return smbd && testparm && smbService; }
-    // 注意这里只表示"环境具备挂 FUSE 的条件"，不表示 raidfs 能用：
-    // nasrs 目前还没有实现导出（见 planRaidfsMount 的说明）。
-    bool readyForFuse() const { return nasrsBinary && fuseDevice && fuseMount; }
+    // mergerfs 那条能不能跑：二进制 + /dev/fuse + fusermount3，三个都要。
+    // 与 nasrs 无关（镜像路线不碰 FUSE，RAID0 那格也不碰 nasrs 了）。
+    bool readyForMerger() const { return mergerfsBinary && fuseDevice && fuseMount; }
     // 能不能"一键装 fuse"：只在 fuse 助手还缺、且确实是 apt 系、且 apt 在时成立。
     // 注意这里不含 fuseDevice —— /dev/fuse 缺不是 apt 能补的（那是内核 fuse 模块），
     // 真缺它时该提示"加载 fuse 模块"而不是装包。装包只解决 fusermount3。
@@ -106,11 +109,19 @@ bool smbService = false;      // systemd 是否有 smbd.service
     // ── 探测 ──
     Env probe() const;
     static QString nasrsBinaryPath();     // 打包/源码两种布局都找一遍
+    // mergerfs 是发行版装的第三方二进制，找法与 nasrs 同一套：程序旁边
+    // （AppImage 里是 usr/bin）→ ../lib → /usr/local/bin → /usr/bin → PATH。
+    // 与 nasrs 共用一份发现逻辑是错的：mergerfs 由包管理器装到系统目录，
+    // 不会出现在 AppImage 的包内路径，而 nasrs 必须随包走。
+    static QString mergerfsBinaryPath();
 
     // ── 命令生成（纯生成，不执行）──
     QVector<Step> planMdadmCreate(const Nas::Plan &plan, const QString &arrayName) const;
-    QVector<Step> planRaid0RsCreate(const Nas::Plan &plan, const QString &volumeName,
-                                    qint64 backingSizeBytes) const;
+    // mergerfs：① 建挂载目录（/mnt/<卷名>），② 把几个 source 挂成那个目录。
+    // 分两步是因为 ① 不挂任何东西（建目录可撤销），② 才会在目录上盖一个
+    // 文件系统 —— 遮内容这件事必须走确认，不能在建目录时就顺手做掉。
+    QVector<Step> planMergerfsCreate(const Nas::Plan &plan, const QString &mountPoint) const;
+    QVector<Step> planMergerfsMount(const Nas::Plan &plan, const QString &mountPoint) const;
     // iSCSI 导出。走 targetcli 而不是手写 configfs，理由见 .cpp 顶部注释。
     // portalIp 空 → 不加 portals 行（targetcli 默认 0.0.0.0:3260，等于全网开放）
     // allowAnon   → 开 LIO 的 Demo Mode；任何能连上 3260 的主机都能读写
@@ -126,11 +137,8 @@ bool smbService = false;      // systemd 是否有 smbd.service
 // 让影视服务（Jellyfin / 电视墙）直接扫目录。用户要的正是这个：iSCSI 那条
 // 走到块设备就结束了，影视服务拿不到文件。
 //
-// 诚实说明：这两条命令链在当前 nasrs 上**跑不通**。nasrs 现在只算布局、
-// 打印容量就退出（退出码 3），没有任何导出通路 —— iSCSI 那条也没接
-// targetcli。所以命令是给"引擎实现之后"用的，UI 必须同屏显示"未实现"，
-// 不能让它看起来像点一下就能挂载。
-QVector<Step> planRaidfsMount(const Nas::Plan &plan, const QString &mountPoint) const;
+// planRaidfsMount 已经删掉：它是自研 RAID0 的"未实现导出"占位（nasrs 只算布局
+// 就退出码 3）。现在挂载这一格走 planMergerfsMount，那条命令真能跑。
 // 卸载。umount 对未挂载目标会失败，这一步本身就是那道检查。
 QVector<Step> planRaidfsUnmount(const QString &mountPoint) const;
 

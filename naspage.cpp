@@ -64,9 +64,21 @@ static constexpr int kMirrorAutoMs = 5 * 60 * 1000;
 static Nas::Engine engineFromIndex(int i)
 {
     switch (i) {
-    case 1:  return Nas::Engine::Raid0Rs;
+    case 1:  return Nas::Engine::MergerFs;
     case 2:  return Nas::Engine::MirrorRs;
     default: return Nas::Engine::Mdadm;
+    }
+}
+
+// 策略下拉的下标 → MergerPolicy。与 engineFromIndex 同一套理由：三处要用
+// （组 Plan、生成 mergerfs argv、状态栏那句后果），各写一遍三元迟早会写成
+// "分区按 mfs 选的、命令按 eol 生成"。
+static Nas::MergerPolicy policyFromIndex(int i)
+{
+    switch (i) {
+    case 1:  return Nas::MergerPolicy::Eol;
+    case 2:  return Nas::MergerPolicy::Lfs;
+    default: return Nas::MergerPolicy::Mfs;
     }
 }
 
@@ -150,13 +162,17 @@ NasPage::NasPage(QWidget *parent)
     topRow->addWidget(new QLabel("实现"));
     m_engine = new QComboBox();
     m_engine->addItem("mdadm（内核 RAID，稳）");
-    m_engine->addItem("nasrs RAID0（条带 over 文件，不占分区）");
+    m_engine->addItem("mergerfs 合并目录（第三方 FUSE）");
     m_engine->addItem("nasrs 镜像 RAID1（文件存两份，读其中一份）");
-    // 三条路线的可用性差别很大，下拉框里就要说清：RAID0 那条缺导出通路（现在
-    // 只能算布局），镜像这条普通权限就能跑通。把两条并列成"看着都能用"是骗人。
+    // 三条路线的可用性差别很大，下拉框里就要说清。名字也不能骗人：mergerfs
+    // 不是 RAID0 —— 一个文件整个落在一个分区上，没有条带，坏盘丢那块盘上的
+    // 文件（不是整卷）。原先这一格写着"自研 RAID0 条带"，而那条自研路线的
+    // 导出层从来没实现（算完布局就退出码 3），现在整条撤掉了。
     m_engine->setItemData(0, "内核 mdadm 建阵列，稳，但要 root 与 mdadm 包。", Qt::ToolTipRole);
-    m_engine->setItemData(1, "自研引擎把两个大文件拼成块设备。"
-                             "导出层（loop/NBD + LIO）尚未实现，现在只能算布局。", Qt::ToolTipRole);
+    m_engine->setItemData(1, "第三方 mergerfs：把几个分区已有的挂载点并成一个目录。"
+                             "普通用户权限，不建文件、不碰分区、不抹数据。"
+                             "可用容量 = 各分区空闲之和。没有条带，也没有冗余：坏一块盘，"
+                             "丢的是那块盘上的文件。需要 mergerfs 与 /dev/fuse。", Qt::ToolTipRole);
     m_engine->setItemData(2, "自研引擎把主目录完整拷到副本目录，访问者读其中一份。"
                              "不要 root、不要内核模块，现在就能用；可用容量是一份。", Qt::ToolTipRole);
     connect(m_engine, &QComboBox::currentIndexChanged, this, &NasPage::onEngineChanged);
@@ -227,7 +243,7 @@ NasPage::NasPage(QWidget *parent)
     m_modeIscsi->setToolTip("导出为 iSCSI LUN，发起端拿到的是裸块设备，自己格式化。");
     m_modeSmb->setToolTip("用 Samba 把该分区的挂载点作为共享目录导出。只读文件，不碰分区数据。");
     m_modeMount = new QRadioButton("RAID 挂载目录");
-    m_modeMount->setToolTip("nasrs 做 RAID0 后挂成 /mnt 下的目录，影视服务能直接扫。不导 iSCSI。");
+    m_modeMount->setToolTip("mergerfs 把选中的分区并成 /mnt 下的目录，影视服务能直接扫。不导 iSCSI。");
     m_modeIscsi->setChecked(true);       // 默认 iSCSI：与既有行为一致，不擅自改默认
     m_modeGroup = new QButtonGroup(this);
     m_modeGroup->addButton(m_modeIscsi);
@@ -259,14 +275,75 @@ NasPage::NasPage(QWidget *parent)
     // 少了这条，"先点分区、后填名字"这个最常见的顺序会让两条路径标签一直停在
     // 「（先在上方点选第一个分区）」不动 —— 页面显示的路径和真去建的那个不是
     // 同一个东西，比不显示更糟。（镜像页探针抓的就是它）
-    connect(m_volName, &QLineEdit::textChanged, this, [this]() { refreshMirrorBox(); });
+    connect(m_volName, &QLineEdit::textChanged, this, [this]() {
+        refreshMirrorBox();
+        // mergerfs 的合并挂载点与 SMB 共享路径同样由卷名推出来，少了这条，
+        // "先点分区、后填名字"这个顺序会让两条路径标签一直停在占位文案，
+        // 页面显示的路径和真去挂的那个不是同一个东西。
+        refreshMergerBox();
+    });
 
     m_chunk = new QSpinBox();
     m_chunk->setRange(4, 16384);
     m_chunk->setValue(512);
     m_chunk->setSuffix(" KiB");
     m_chunk->setToolTip("条带粒度。大文件顺序读：越大越好；小块随机写：越小越好。");
-    m_arrayForm->addRow("条带粒度", m_chunk);   // 镜像不条带，整行在 syncExportMode 里收掉
+    m_arrayForm->addRow("条带粒度", m_chunk);   // 只对 mdadm 有意义，行按引擎显隐
+
+    // mergerfs 没有条带，所以"条带粒度"这一格对它整行收掉（上面那行是 mdadm 的）。
+    // 它唯一真正需要你选的参数是新文件落到哪个分区 —— 这就是策略。
+    // 单独一行而不是复用条带那行：两条路线的语义不同，共用一行迟早写成
+    // "同一格在不同引擎下是两种东西"，那种界面没人能预期。
+    m_policy = new QComboBox();
+    m_policy->setObjectName("mergerPolicy");
+    m_policy->addItem(Nas::mergerPolicyLabel(Nas::MergerPolicy::Mfs));
+    m_policy->addItem(Nas::mergerPolicyLabel(Nas::MergerPolicy::Eol));
+    m_policy->addItem(Nas::mergerPolicyLabel(Nas::MergerPolicy::Lfs));
+    m_policy->setItemData(0, Nas::mergerPolicyNote(Nas::MergerPolicy::Mfs), Qt::ToolTipRole);
+    m_policy->setItemData(1, Nas::mergerPolicyNote(Nas::MergerPolicy::Eol), Qt::ToolTipRole);
+    m_policy->setItemData(2, Nas::mergerPolicyNote(Nas::MergerPolicy::Lfs), Qt::ToolTipRole);
+    m_policy->setToolTip(Nas::mergerPolicyNote(Nas::MergerPolicy::Mfs));
+    connect(m_policy, &QComboBox::currentIndexChanged, this, [this](int) {
+        refreshMergerBox();
+        // 策略改变的是"新文件写到哪块盘"，这是选完必须当场看见的后果，
+        // 不是 tooltip 里的一句话（tooltip 要鼠标停上去才看得到）。
+        setStatus(Nas::mergerPolicyNote(policyFromIndex(m_policy->currentIndex())));
+    });
+    m_arrayForm->addRow("写入策略", m_policy);
+
+    // 成员组合的问题（数量不对、两块盘是同一块）用红字，且只在有问题时出现。
+    // 这一行**挂在阵列区**而不是镜像那格：镜像与 mergerfs 都可能撞上"选了两块盘、
+    // 其实是一块盘上的两个分区"，分成两行会让用户在一行确认过之后以为另一行也
+    // 确认过了。常驻说明走 setStatus，不占这条 —— 常驻的红字看两天就不看了。
+    m_membersWarn = new QLabel();
+    m_membersWarn->setObjectName("membersWarn");
+    m_membersWarn->setWordWrap(true);
+    m_membersWarn->setTextFormat(Qt::RichText);
+    m_membersWarn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_membersWarn->setProperty("role", "bad");
+    m_membersWarn->setVisible(false);
+
+    // 同盘那条红字右边一个「知道了」：它把"零冗余"从硬性拦截变成**用户显式接受**。
+    // 这条不是结构问题（数据是好的），是安全告警 —— 拿两个分区当同一块盘上的
+    // 备份目录是正当用法，防误删有用、防坏盘没用；mergerfs 同理，同一块盘上的
+    // 大目录照样能装片子，只是没有加速也没有冗余。硬性挡死等于替用户决定他
+    // 不需要这个用法，而他只是想要一个目录。
+    // 数量那条**不给**「知道了」：谁是主、坏了顶哪份都没定义，
+    // 点一下不会让语义变清楚。
+    m_membersAckBtn = new QPushButton(QString::fromUtf8("知道了"));
+    m_membersAckBtn->setObjectName("membersAckBtn");
+    m_membersAckBtn->setToolTip(QString::fromUtf8(
+        "把「同一块盘」这件事确认下来，同步、查副本、挂载随之放行。\n"
+        "记住的是这一组分区 —— 换了分区组合就要重新确认，不是一次性设置。"));
+    m_membersAckBtn->setVisible(false);
+
+    auto *warnRowW = new QWidget();
+    auto *warnRow = new QHBoxLayout(warnRowW);
+    warnRow->setContentsMargins(0, 0, 0, 0);
+    warnRow->addWidget(m_membersWarn, 1);
+    warnRow->addWidget(m_membersAckBtn);
+    m_arrayForm->addRow(QString(), warnRowW);
+    connect(m_membersAckBtn, &QPushButton::clicked, this, &NasPage::onMembersAckSameDisk);
 
     m_iqn = new QLineEdit(Nas::makeIqn("local", "26-11", "01"));
     m_iqn->setToolTip("iqn.<YY-MM>.<反序域名>:<名字>。域名乱填可能与别的 target 撞名。");
@@ -333,6 +410,13 @@ NasPage::NasPage(QWidget *parent)
     m_fsBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
     outer->addWidget(m_fsBox);
     m_fsBox->setVisible(false);   // 默认 iSCSI，挂载框先藏起来
+
+    // mergerfs（第三方 FUSE 合并目录）的参数：哪几个分区的挂载点被并起来、
+    // 并成哪个目录。写入策略那一行在阵列表单里（与条带粒度同层、按引擎显隐）。
+    m_mergerBox = buildMergerBox();
+    m_mergerBox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    arrayV->addWidget(m_mergerBox);
+    m_mergerBox->setVisible(false);
 
     // 软件镜像（自研 RAID1）的参数：两份目录、读哪一份、同步状态、定时器。
     // 这些全是"盘怎么拼"的事，归上方阵列区，不进导出页 —— 导出页只留共享名、
@@ -439,9 +523,9 @@ void NasPage::onEngineChanged(int index)
     refresh();
     // 三条路线的危险程度不同，这里只切视图：
     //  mdadm  会抹掉所选分区的文件系统（mdadm --create 写 superblock）
-    //  nasrs  只在分区已有的文件系统里放东西（RAID0 放一个大文件，镜像放一个目录），
+    //  nasrs  只在分区已有的文件系统里放东西（镜像放一个目录），mergerfs 更干脆：
     //         不碰分区本身
-    // 卡口数量：RAID0 至少 2 个成员才有意义，镜像必须正好 2 个（一主一备）。
+    // 卡口数量：mergerfs 至少 2 个成员才有意义，镜像必须正好 2 个（一主一备）。
     updateSummary();
 }
 
@@ -449,7 +533,9 @@ void NasPage::onEngineChanged(int index)
 // 尽头没有按钮可点 —— 不给处置办法的红字只会让人去搜错误。
 //
 // 按当前出口过滤：configfs 与内核 target 模块是 LIO/iSCSI 才需要的，
-// 选 SMB 或挂载目录时摆出来就是无关噪音；nasrs 引擎只在选了 nasrs 引擎时相关。
+// 选 SMB 或挂载目录时摆出来就是无关噪音；nasrs 只服务镜像那格，所以只在那格相关。
+// mergerfs **不在这里**：它是发行版的包（apt 家有），走页顶的一键安装那条链，
+// 混进来会变成"按钮说装不了、红字又叫你自己补"，而你自己补不了包名。
 QStringList NasPage::nonPackageBlockers() const
 {
     QStringList b;
@@ -459,7 +545,8 @@ QStringList NasPage::nonPackageBlockers() const
     if (iscsi && !m_env.kernelModules)
         b << QString::fromUtf8("内核目录里没找到 target_core_mod 模块文件"
                                "（若内核已把 LIO 编进去，这条可以忽略）");
-    if (!m_env.nasrsBinary && m_engine && engineFromIndex(m_engine->currentIndex()) != Nas::Engine::Mdadm)
+    if (m_engine && engineFromIndex(m_engine->currentIndex()) == Nas::Engine::MirrorRs
+        && !m_env.nasrsBinary)
         b << QString::fromUtf8("nasrs 引擎不在程序旁边 —— 它随本程序一起发布，不是发行版的包");
     return b;
 }
@@ -626,9 +713,11 @@ void NasPage::onSlotClicked(const QString &device, int slotIndex)
     }
 
     // 上限：mdadm 走内核，理论很宽；这里按常见控制器给 8，
-    // 超过 8 路的 RAID0 任一盘故障即整卷失效，收益早就不对了。
+    // 超过 8 路的条带任一盘故障即整卷失效，收益早就不对了。
+    // 话里不写"RAID0"：这一格现在是 mergerfs，它没有条带，任一盘故障只丢
+    // 那块盘上的文件。写 RAID0 会让用户以为 mergerfs 也是"坏一块全完"。
     if (m.size() >= 8) {
-        setStatus("RAID0 最多 8 个成员；盘再多也不建议继续加", true);
+        setStatus("最多 8 个成员；盘再多也不建议继续加", true);
         return;
     }
 
@@ -656,6 +745,7 @@ Nas::Plan NasPage::currentPlan() const
     Nas::Plan plan;
     plan.engine = engineFromIndex(m_engine->currentIndex());
     plan.stripeChunkKiB = m_chunk->value();
+    plan.mergerPolicy = policyFromIndex(m_policy->currentIndex());
     plan.volumeName = m_volName->text().trimmed();
 
     // members() 是有序的：下标即条带序号，绝不能在这里排序或去重
@@ -669,12 +759,13 @@ Nas::Plan NasPage::currentPlan() const
             m.capacity = d.freeBytes > 0 ? d.freeBytes : d.bytes;
             break;
         }
-        if (plan.engine == Nas::Engine::Raid0Rs) {
-            m.kind = Nas::MemberKind::BackingFile;
-            // backing 文件放在该分区当前的挂载点上；没挂载就没有落脚处，
-            // 这也是"nasrs 不占分区"的代价：必须有个可用的文件系统。
+        if (plan.engine == Nas::Engine::MergerFs) {
+            // mergerfs 的 source 就是分区**已有的挂载点**：不建文件、不碰分区。
+            // 没挂载就没有 source —— 这也是这一路线对"已挂载"的判定与 mdadm
+            // 完全相反的原因（见 nasmodel.cpp::judge）。
+            m.kind = Nas::MemberKind::SourceDir;
             for (const NasBoardWidget::Disk &d : m_disks)
-                if (d.device == dev) m.filePath = d.mountpoint + "/" + plan.volumeName + ".nas.img";
+                if (d.device == dev) m.filePath = d.mountpoint;
         } else if (plan.engine == Nas::Engine::MirrorRs) {
             // 镜像目录同样落在挂载点里，由模型层拼（它顺手处理了卷名清洗与
             // "挂载点为空就返回空串"）。这里不自己拼字符串：拼法有两份，
@@ -702,94 +793,110 @@ void NasPage::syncExportMode(int memberCount)
     m_syncingExportMode = true;
     struct G { bool &f; ~G(){ f = false; } } guard{ m_syncingExportMode };
 
-    // 镜像引擎先单独算：它给的是**目录**，不是块设备，所以三条出口里只剩
-    // SMB 一条是说得通的（iSCSI 没有块设备可导，"挂载目录"那条是给 nasrs
-    // RAID0 卷的）。放在成员数规则之前，是为了让下面那几条规则保持原样 ——
-    // 它们说的是"条带/SMB 不跨盘"这套 RAID0 的事实，混进镜像就全变了味。
-    const bool mirror = engineFromIndex(m_engine->currentIndex()) == Nas::Engine::MirrorRs;
+    // 三条路线的出口各不相同，先把引擎算出来再谈成员数：
+    //   mdadm    块设备 → iSCSI；单分区也能直接共享它的挂载点
+    //   mergerfs 目录 → 只有 SMB 与"挂到 /mnt 的目录"，没有块设备可导 iSCSI
+    //   镜像     目录 → 只有 SMB
+    const Nas::Engine eng = engineFromIndex(m_engine->currentIndex());
+    const bool mirror = eng == Nas::Engine::MirrorRs;
+    const bool merger = eng == Nas::Engine::MergerFs;
 
     // 三个出口的合法成员数各不相同，这是本函数唯一真正的规则来源：
-    //   iSCSI  ≥1 —— 块级，单盘也能导（只是没条带）
-    //   SMB    =1 —— 文件级，Samba 不跨盘条带
-    //   挂载   ≥2 —— 这条出口的卖点就是"多盘 RAID0 挂成一个目录"，
-    //                少于 2 个成员 nasrs 自己会拒，这里先挡下来
-    const bool smbAllowed   = mirror ? true : (memberCount == 1);
-    const bool mountAllowed = mirror ? false : (memberCount >= 2);
+    //   iSCSI  ≥1 且只属于 mdadm —— 块级，单盘也能导（只是没条带）
+    //   SMB    mdadm 要正好 1；两条目录路线恒真 —— 文件级，Samba 不跨盘条带
+    //   挂载   ≥2 且只有 mergerfs —— 这条出口的卖点就是"多盘并成一个目录"
+    const bool iscsiAllowed = !mirror && !merger;
+    const bool smbAllowed   = mirror || merger || (memberCount == 1);
+    const bool mountAllowed = merger && memberCount >= 2;
     const bool wasMount = m_modeMount->isChecked();
 
-    m_modeIscsi->setEnabled(!mirror);
+    m_modeIscsi->setEnabled(iscsiAllowed);
     m_modeSmb->setEnabled(smbAllowed);
     m_modeMount->setEnabled(mountAllowed);
     // **点不动的那一格必须自己说为什么**。光置灰不够：主题的置灰只是文字淡一档、
     // 指示圈几乎没变，用户分不清自己在跟规则较劲还是界面坏了 —— 报上来的原话
     // 就是"选了两个分区，只能到 SMB，点了 RAID 挂载没有反应"。真相是那时选着
     // 镜像引擎（它给的是目录，出口只有 SMB），可界面一个字都没说。
-    m_modeIscsi->setToolTip(mirror
-        ? QString::fromUtf8("点不动：镜像给的是目录，不是块设备，没有 LUN 可导。")
-        : QString::fromUtf8("导出为 iSCSI LUN，发起端拿到的是裸块设备，自己格式化。"));
+    m_modeIscsi->setToolTip(iscsiAllowed
+        ? QString::fromUtf8("导出为 iSCSI LUN，发起端拿到的是裸块设备，自己格式化。")
+        : QString::fromUtf8(merger
+            ? "点不动：mergerfs 交出来的是一个目录，没有块设备，没有 LUN 可导。"
+            : "点不动：镜像给的是目录，不是块设备，没有 LUN 可导。"));
     m_modeSmb->setToolTip(smbAllowed
-        ? QString::fromUtf8("用 Samba 把该分区的挂载点作为共享目录导出。只读文件，不碰分区数据。")
+        ? QString::fromUtf8(merger
+            ? "用 Samba 共享 mergerfs 合并出来的那个目录（/mnt 下，程序算好）。只读文件，不碰分区数据。"
+            : "用 Samba 把该分区的挂载点作为共享目录导出。只读文件，不碰分区数据。")
         : QString::fromUtf8("点不动：Samba 不跨盘条带，SMB 只在正好 1 个分区时可用（现在 %1 个）。"
                             "多盘请走 iSCSI 或挂载目录。").arg(memberCount));
-    m_modeMount->setToolTip(mirror
-        ? QString::fromUtf8("点不动：这条是给 nasrs RAID0 卷的。镜像两条读的都是目录本身，"
-                            "出口只有 SMB。")
-        : mountAllowed
-            ? QString::fromUtf8("nasrs 做 RAID0 后挂成 /mnt 下的目录，影视服务能直接扫。不导 iSCSI。")
-            : QString::fromUtf8("点不动：这条的卖点就是多盘条带，少于 2 个成员 nasrs 自己会拒"
-                                "（现在 %1 个）。").arg(memberCount));
+    m_modeMount->setToolTip(mountAllowed
+        ? QString::fromUtf8("mergerfs 把选中的分区并成 /mnt 下的一个目录，影视服务能直接扫。"
+                            "没有条带，也没有冗余 —— 一个文件整个落在一个分区上。")
+        : merger
+            ? QString::fromUtf8("点不动：mergerfs 至少 2 个分区才有意义（1 个就是直连单盘，"
+                                "现在 %1 个）。").arg(memberCount)
+            : mirror
+                ? QString::fromUtf8("点不动：这一格是 mergerfs 的。镜像两份读的都是目录本身，"
+                                    "出口只有 SMB。")
+                : QString::fromUtf8("点不动：把 mdadm 卷挂到 /mnt 这一步本程序没实现。"
+                                    "请走 iSCSI，或在别处自己 mount /dev/mdX。"));
 
-    // 成员数变化可能让当前选中的出口失效，此时回落到本引擎下总是合法的那条：
-    // 镜像回 SMB（唯一出口），其余回 iSCSI。
-    const auto fallback = [this, mirror] {
-        if (mirror) m_modeSmb->setChecked(true);
-        else        m_modeIscsi->setChecked(true);
+    // 成员数或引擎变化可能让当前选中的出口失效，此时回落到本引擎下总是合法的那条：
+    // 两条目录路线回 SMB（mergerfs 的 SMB 永远说得通），mdadm 回 iSCSI。
+    const auto fallback = [this, eng] {
+        if (eng == Nas::Engine::Mdadm) m_modeIscsi->setChecked(true);
+        else                           m_modeSmb->setChecked(true);
     };
-    if (mirror && !m_modeSmb->isChecked()) fallback();
+    if (!iscsiAllowed && m_modeIscsi->isChecked())   fallback();
     if (!smbAllowed && m_modeSmb->isChecked())   fallback();
     if (!mountAllowed && m_modeMount->isChecked()) fallback();
 
     // 只有"刚刚才允许"时主动切过去，不做每敲一下都跳：
-    //   掉到 1 盘 -> 建议 SMB；升到 ≥2 盘且原本是 iSCSI -> 建议挂载。
+    //   掉到 1 盘 -> 建议 SMB；升到 ≥2 盘 -> mergerfs 建议并成目录。
     // 用户手动选过别的就不抢（droppedToOne 那套同理）。镜像不参与这套
     // 建议：它没有得选，抢着切只会把用户刚看懂的界面搬走。
     const bool roseToMulti = (memberCount >= 2 && m_lastMemberCount < 2);
     const bool droppedToOne = (memberCount == 1 && m_lastMemberCount > 1);
     if (!mirror && smbAllowed && droppedToOne && !m_modeSmb->isChecked()) {
         m_modeSmb->setChecked(true);
-        setStatus("只剩 1 个分区，已切到 SMB 文件共享（可手动切回 iSCSI）");
-    } else if (!mirror && mountAllowed && roseToMulti && !wasMount && m_modeIscsi->isChecked()) {
+        setStatus("只剩 1 个分区，已切到 SMB 文件共享（可手动切回别的出口）");
+    } else if (mountAllowed && roseToMulti && !wasMount) {
         m_modeMount->setChecked(true);
-        setStatus("已选多个分区，可挂成一个目录给影视服务扫（可切回 iSCSI）");
+        setStatus("已选多个分区，mergerfs 可以把它们并成一个目录给影视服务扫（可切回 SMB）");
     }
 
-    // 提示语按当前成员数说明"还能选哪些"，而不是只说选中的那个
+    // 提示语按当前引擎与成员数说明"还能选哪些"，而不是只说选中的那个
     if (mirror)
         m_modeHint->setText(QString::fromUtf8(
             "镜像引擎：出口只有 SMB —— 它给的是目录，不是块设备。"
             "两份目录与「访问哪一份」在上方阵列区"));
+    else if (merger)
+        m_modeHint->setText(QString::fromUtf8(
+            "mergerfs：出口是 SMB 或挂成 /mnt 下的目录（它给的是目录，没有块设备可导 iSCSI）。"
+            "source 与写入策略在上方阵列区；可用容量 = 各分区空闲之和，没有条带也没有冗余。"));
     else if (memberCount == 0)
-        m_modeHint->setText("先在上方点选分区：1 个可走 SMB，≥2 个可做 RAID（iSCSI 或挂目录）");
+        m_modeHint->setText("先在上方点选分区：1 个可走 SMB，≥2 个可做 mdadm RAID（iSCSI）");
     else if (memberCount == 1)
-        m_modeHint->setText("单个分区：SMB（文件级，最常用）或 iSCSI（块级）；挂载目录需 ≥2 盘");
+        m_modeHint->setText("单个分区：SMB（文件级，最常用）或 iSCSI（块级）；换 mergerfs 需要 ≥2 个分区");
     else
-        m_modeHint->setText(QString("已选 %1 个分区：iSCSI RAID 或挂成 /mnt 目录；SMB 不跨盘条带")
+        m_modeHint->setText(QString("已选 %1 个分区：mdadm 走 iSCSI；要并成一个目录就换 mergerfs")
                                 .arg(memberCount));
 
     // 三选一显隐 + 按钮文案
     const bool smb   = m_modeSmb->isChecked();
     const bool mount = m_modeMount->isChecked();
     m_mirrorBox->setVisible(mirror);
-    // 阵列区（名称 / 条带 / 镜像那两目录与同步）：真在拼阵列时才出现。
+    m_mergerBox->setVisible(merger && memberCount >= 2);
+    // 阵列区（名称 / 条带 / 写入策略 / 两份目录与同步）：真在拼阵列时才出现。
     // 镜像永远要（两份目录和名字是它的定义）；其余引擎只有 ≥2 个成员才有
     // 阵列 —— 单分区是直接导出那个分区，没有"拼"这一步，就不该有名字栏。
     m_arrayBox->setVisible(mirror || memberCount >= 2);
-    // 条带粒度对镜像没有意义：它不条带，可用容量就是一份。
-    m_arrayForm->setRowVisible(1, !mirror);
+    // 条带粒度只对 mdadm 有意义；mergerfs 不条带，它那行是写入策略。
+    m_arrayForm->setRowVisible(1, eng == Nas::Engine::Mdadm && memberCount >= 2);
+    m_arrayForm->setRowVisible(2, merger && memberCount >= 2);
     // iSCSI 框现在真的只有 iSCSI 的事了（IQN / 监听地址 / 匿名 ACL）。
     // 这里不再需要那个 "|| mirror" 的例外和逐行藏：例外存在的唯一理由
     //（要给它留个填名字的地方）已经跟着「名称」搬走了。
-    m_iscsiBox->setVisible(!smb && !mount && !mirror);
+    m_iscsiBox->setVisible(!smb && !mount && !mirror && !merger);
     m_smbBox->setVisible(smb);
     m_smbWarn->setVisible(smb);
     m_fsBox->setVisible(mount);
@@ -825,6 +932,7 @@ void NasPage::syncExportMode(int memberCount)
     }
     refreshSmbWarning();
     refreshRaidFsStatus();
+    refreshMergerBox();
     refreshMirrorBox();
     m_lastMemberCount = memberCount;
 }
@@ -876,9 +984,12 @@ void NasPage::updateSummary()
     // 镜像的成员数是定义的一部分（一主一备），不是偏好：1 个没有副本、
     // 3 个以上语义未定（谁是主、坏了顶哪份），所以按钮在这里就卡住，
     // 而不是等用户填完名字、按过确认之后才告诉他数量不对。
+    // mergerfs 的下限是 2：1 个 source 就是直连单盘，没有"合并"这件事。
     bool canCreate = info.members >= 1 && !plan.volumeName.isEmpty();
     if (plan.engine == Nas::Engine::MirrorRs)
         canCreate = info.members == Nas::kMirrorMembers && !plan.volumeName.isEmpty();
+    if (plan.engine == Nas::Engine::MergerFs)
+        canCreate = info.members >= Nas::kMergerMinMembers && !plan.volumeName.isEmpty();
     m_createBtn->setEnabled(canCreate);
 }
 
@@ -941,9 +1052,14 @@ void NasPage::createArray()
         setStatus("缺 mdadm，建不了内核阵列（用页顶的一键安装）", true);
         return;
     }
-    if (plan.engine == Nas::Engine::Raid0Rs && (!m_env.nasrsBinary || !m_env.losetup)) {
-        setStatus("nasrs 引擎或 losetup 不在 —— 引擎随本程序一起发布，losetup 属 util-linux", true);
-        return;
+
+    // mergerfs 要的是**第三方二进制 + FUSE**，与 nasrs 无关（nasrs 只服务镜像）。
+    // 这里只报"缺什么"，不猜命令：mergerfs 在 openEuler / Fedora 的仓库里没有
+    // （实测 dnf 报 No matching Packages），页顶的一键安装会老实说这家装不了。
+    if (plan.engine == Nas::Engine::MergerFs) {
+        QStringList srcs;
+        QString why;
+        if (!mergerDirs(&srcs, mergerMountPoint(), &why)) { setStatus(why, true); return; }
     }
 
     m_pendingConfirmName = plan.volumeName;
@@ -967,11 +1083,27 @@ void NasPage::createArray()
         return;
     }
 
+    if (plan.engine == Nas::Engine::MergerFs) {
+        // ① 在这里只做一件事：建那个挂载目录。不挂任何东西、不碰分区，
+        // 所以可撤销，也不需要"手输核对"（confirmSteps 里非破坏性那条只问一次）。
+        const QString mp = mergerMountPoint();
+        steps = m_ctl.planMergerfsCreate(plan, mp);
+        if (steps.isEmpty()) {
+            setStatus("生成建目录命令失败（名称或 source 路径不合法）", true);
+            return;
+        }
+        const QVector<NasController::Step> go =
+            confirmSteps(steps, QString::fromUtf8("创建 mergerfs 卷（建挂载目录 %1）").arg(mp));
+        if (go.isEmpty()) return;
+        m_ctl.run(go);
+        setStatus(QString::fromUtf8("目录 %1 已建好。下一步「② 挂到目录（mergerfs）」才真把"
+                                    "几个分区并成它 —— 挂载会在它上面盖一层，"
+                                    "目录里原有的内容会暂时看不见，卸载后回来。").arg(mp));
+        return;
+    }
+
     if (plan.engine == Nas::Engine::Mdadm)
         steps = m_ctl.planMdadmCreate(plan, plan.volumeName);
-    else
-        steps = m_ctl.planRaid0RsCreate(plan, plan.volumeName,
-                                        Nas::suggestBackingSize({}, 0.95));
 
     const QVector<NasController::Step> go = confirmSteps(steps, "创建阵列");
     if (go.isEmpty()) return;
@@ -1110,9 +1242,10 @@ void NasPage::exportIscsi()
         return;
     }
     // 导出对象取决于引擎：
-    //   mdadm → /dev/md-<卷名>（mdadm --create 建出来的就是这个名字）
-    //   nasrs → 由 nasrs serve 挂上的 loop 设备，v1 尚未接入 NBD/loop，
-    //           所以这里必须**明说没做**，不能拿 backing 文件路径冒充块设备
+    //   mdadm    → /dev/md-<卷名>（mdadm --create 建出来的就是这个名字）
+    //   mergerfs → 一个目录，没有块设备，没有 LUN 可导 —— 这里必须明说，
+    //              不能拿 source 路径冒充块设备（自研 RAID0 那条曾想这么接 loop）
+    //   镜像     → 同上，两份都是目录
     QString blockDev;
     if (plan.engine == Nas::Engine::Mdadm) {
         blockDev = "/dev/md-" + plan.volumeName;
@@ -1121,8 +1254,9 @@ void NasPage::exportIscsi()
             return;
         }
     } else {
-        setStatus("nasrs 引擎尚未接入 loop/NBD 导出（见 nasrs/src/main.rs 末尾说明），"
-                  "目前只有 --report 可用", true);
+        setStatus(plan.engine == Nas::Engine::MergerFs
+            ? "mergerfs 交出来的是一个目录，没有块设备可导 iSCSI —— 这一格请走 SMB 或挂载目录"
+            : "镜像交出来的是目录，没有块设备可导 iSCSI —— 这一格请走 SMB", true);
         return;
     }
 
@@ -1205,15 +1339,15 @@ void NasPage::setStatus(const QString &text, bool bad)
     m_status->setStyleSheet(bad ? ("color:" + Theme::bad().name()) : QString());
 }
 
-// ── RAID 挂载目录 ──────────────────────────────────────────
+// ── mergerfs 挂载目录 ──────────────────────────────────────
 //
-// 用户要的出口：同一个 nasrs 引擎做 RAID0，但不导成 iSCSI，而是挂成一个
-// /mnt 下的目录，让影视服务直接扫。iSCSI 那条走到块设备就结束了，
-// Jellyfin 这类服务拿不到文件，所以才需要这一页。
+// 用户要的出口：把几个分区并成一个 /mnt 下的目录，让影视服务直接扫。
+// iSCSI 那条走到块设备就结束了，Jellyfin 这类服务拿不到文件，所以需要这一格。
 //
-// 这一页最要紧的是别让人以为能直接用。nasrs 现在只算布局就退出（退出码
-// 3），没有任何导出通路。所以状态徽标写的不是"环境未就绪"，而是"引擎未
-// 实现"—— 两者的处置动作完全不同，写成前者会把人引去装软件，白费功夫。
+// 这一格原来是自研 nasrs 的 RAID0，那条的导出层从来没实现（算完布局就退出码 3），
+// 所以徽标曾写"引擎未实现"。现在换成第三方 mergerfs，命令真能跑 —— 徽标改写成
+// 环境状态，**别再挂"未实现"**：那句话在新的事实上会说谎，也会把能用的东西
+// 说成不能用。同时不叫它 RAID0：没有条带、没有冗余，可用容量是各分区之和。
 QWidget *NasPage::buildRaidFsBox()
 {
     // 这是导出页里的一个出口框，不是独立标签页。所以不再自带整页标题和
@@ -1271,7 +1405,7 @@ QWidget *NasPage::buildRaidFsBox()
     row->addStretch(1);
     m_umountBtn = new QPushButton("卸载该目录");
     m_umountBtn->setToolTip("umount 挂载点。目录里原有的内容会重新显现。");
-    m_umountBtn->setEnabled(false);
+    m_umountBtn->setEnabled(false);   // 由 refreshRaidFsStatus 跟着真实状态开
     connect(m_umountBtn, &QPushButton::clicked, this, &NasPage::onUmountFsClicked);
     row->addWidget(m_umountBtn);
     v->addLayout(row);
@@ -1281,19 +1415,24 @@ QWidget *NasPage::buildRaidFsBox()
 }
 
 
-// 把"能不能挂"讲清楚。刻意分成两层说，合成一句就会误导人：
-//   环境层：/dev/fuse、fusermount3、nasrs 二进制在不在 —— 这些缺了能装；
-//   实现层：nasrs 目前根本没有导出通路，只算布局就退出（退出码 3）。
-// 只报环境层会让人去装软件，装完照样不能用。所以未实现时徽标就写未实现。
+// 把"能不能挂"讲清楚。这一格现在是 mergerfs（第三方 FUSE 合并目录），
+// 自研 RAID0 那条已经整条撤掉，所以这里不再写"引擎未实现" —— 那句话在
+// 这一格上挂了很久，它说的事实是真的（nasrs 只算布局、退出码 3），现在
+// 事实变了，界面必须跟着改：命令真能跑，缺的就只剩环境。
+//
+// 环境层三样：mergerfs 二进制、/dev/fuse、fusermount3。前一样靠包管理器，
+// 后两样属内核与 fuse 包。mergerfs **在 openEuler / Fedora 的仓库里没有**
+// （实测 dnf 报 No matching Packages），所以这一格对 dnf 系只可能显示
+// "检测不到"，不能摆一个必然失败的安装按钮 —— 表里那条 dnf 空列表就是为此。
 void NasPage::refreshRaidFsStatus()
 {
     if (!m_fsPill) return;
 
     struct Row { const char *name; bool has; const char *why; };
     const QList<Row> rows = {
+        { "mergerfs",     m_env.mergerfsBinary, "第三方联合文件系统，本程序只检测、不捆绑" },
         { "/dev/fuse",    m_env.fuseDevice,  "内核 FUSE 支持" },
         { "fusermount3",  m_env.fuseMount,   "非 root 挂载助手（apt install fuse3）" },
-        { "nasrs",        m_env.nasrsBinary, "RAID 引擎" },
     };
     // 与电视墙那页同一套画法：逐项 ✓/✗ 上色，缺什么一目了然。
     // 不用 <ul>/<li> —— QLabel 的富文本支持很窄，列表标签不会生效，
@@ -1314,24 +1453,45 @@ void NasPage::refreshRaidFsStatus()
     // 不需要单独写"用完就消失"的逻辑，可见性永远跟着真实环境走。
     if (m_installFuseBtn)
         m_installFuseBtn->setVisible(m_env.canInstallFuse());
-    // 徽标只写状态本身，不写颜色以外的信息；未实现这条优先级最高，
-    // 而且**不随环境是否齐备改措辞** —— 环境齐备也不代表能用。
-    m_fsPill->setText(QString::fromUtf8("引擎未实现"));
-    // 徽标走主题 role，不写行内 setStyleSheet：颜色只在一个地方定义。
-    // 之前写的是 alpha(warn,36) 底 + warn 字，实测文字整块看不见 ——
-    // 同色系半透明底被压成实心后与文字同色。用 role 就没这个坑。
-    m_fsPill->setProperty("role", "pill-warn");
+
+    // 徽标只写状态本身。mergerfs 缺是"环境缺"，不是"未实现"：这条区别必须
+    // 保住 —— 未实现时徽标写未实现，环境齐了也不会变绿。
+    if (m_env.readyForMerger()) {
+        setRole(m_fsPill, "pill-ok");
+        m_fsPill->setText(QString::fromUtf8("mergerfs 已就位"));
+    } else {
+        setRole(m_fsPill, "pill-warn");
+        m_fsPill->setText(m_env.mergerfsBinary
+            ? QString::fromUtf8("缺 FUSE 挂载助手")
+            : QString::fromUtf8("检测不到 mergerfs"));
+    }
     QStringList notes;
     notes << QString::fromUtf8(
-        "<b>nasrs 还没有导出能力</b>：当前版本只计算条带布局、打印容量就退出"
-        "（退出码 3）。本页生成的命令要等引擎补上导出之后才跑得通。");
-    if (!m_env.fuseDevice || !m_env.fuseMount || !m_env.nasrsBinary)
-        notes << QString::fromUtf8("另外本机还缺上面打 ✗ 的环境依赖，装上也不代表能用。");
+        "<b>mergerfs 不是 RAID0</b>：一个文件整个落在一个分区上，没有条带；"
+        "可用容量 = 各分区空闲之和；坏一块盘，丢的是那块盘上的文件，不是整卷。");
+    if (!m_env.mergerfsBinary)
+        notes << QString::fromUtf8(
+            "本机没有 mergerfs。它是发行版的包，本程序只检测、不捆绑、不代装：\n"
+            "Debian/Ubuntu 的仓库里有（页顶的一键安装能装），"
+            "openEuler / Fedora 的仓库里没有（实测 dnf 报 No matching Packages），"
+            "Arch 只在 AUR。这一格对那两家只会一直显示「检测不到」。");
+    if (!m_env.fuseDevice)
+        notes << QString::fromUtf8(
+            "<b>/dev/fuse 不在</b>：那属内核 fuse 模块，装包补不了，"
+            "需要先加载 fuse 模块（modprobe fuse）。");
     notes << QString::fromUtf8(
-        "挂载目录现在就能填：路径是否合法、会不会遮住现有内容，这些与引擎无关，"
-        "现在就校验并报错。");
+        "挂载目录现在就能填：路径是否合法、会不会遮住现有内容，这些与 mergerfs 无关，"
+        "现在就校验并报错。挂载会在目录上盖一层，原有内容暂时看不见，卸载后回来。");
     m_fsNote->setText(notes.join("<br>"));
+
+    // 卸载按钮跟着"这一格在不在、挂载点合不合法"走。它以前在构造时置灰之后
+    // 就再没人动过 —— 这一格换成真能跑的 mergerfs 之后，那条灰就说谎了：
+    // 用户挂上了，却找不到撤销的地方。
+    if (m_umountBtn)
+        m_umountBtn->setEnabled(m_env.mergerfsBinary
+            && Nas::validateMountPoint(m_mountPoint->text().trimmed()).isEmpty());
 }
+
 void NasPage::onMountFsClicked()
 {
     const QString mp = m_mountPoint->text().trimmed();
@@ -1363,28 +1523,35 @@ void NasPage::onMountFsClicked()
         }
     }
 
-    // 4) 成员要够。RAID0 少于 2 个成员 nasrs 自己会拒，这里先挡下来并说清原因，
-    //    免得用户看到一句英文报错。
+    // 4) mergerfs 的守卫：source 列表、确认闸（同盘要显式接受）、写入策略、
+    //    mergerfs 二进制、/dev/fuse、fusermount3。与 ① 创建共用 mergerDirs，
+    //    两处不会各说各话。
     const Nas::Plan plan = currentPlan();
-    if (plan.members.size() < 2) {
-        setStatus("先在上方点选至少 2 个分区，RAID0 需要 2 个以上成员", true);
+    if (plan.engine != Nas::Engine::MergerFs) {
+        setStatus("这一格是 mergerfs 的：换到 mergerfs 引擎再挂。"
+                  "mdadm 卷要挂成目录，请走 iSCSI 或在别处自己 mount /dev/mdX", true);
         return;
     }
+    QStringList srcs;
+    QString why;
+    if (!mergerDirs(&srcs, mp, &why)) { setStatus(why, true); return; }
 
-    const auto steps = m_ctl.planRaidfsMount(plan, mp);
+    const auto steps = m_ctl.planMergerfsMount(plan, mp);
     if (steps.isEmpty()) { setStatus("命令生成失败：参数不合法", true); return; }
 
     // 引擎没实现，所以这里不走 confirmSteps 真的执行 —— 那是骗人。
     // 改成把命令逐条列出来给人看并明说跑不通：流程可审，但不假装能用。
-    QStringList lines;
-    for (const NasController::Step &s : steps)
-        lines << QString("# %1\n    %2 %3").arg(s.describe, s.program, s.args.join(" "));
-    setStatus(QString::fromUtf8("命令已生成（%1 步），但 nasrs 尚未实现导出，不会执行。")
-                  .arg(steps.size()), true);
-    QMessageBox::information(this, QString::fromUtf8("RAID 挂载目录"),
-        QString::fromUtf8("引擎还未实现，以下命令不会执行，仅供核对：") + "\n\n"
-        + lines.join("\n"));
-}
+    // 这一条是**真执行**的。自研 RAID0 那条的导出层从来没实现（nasrs 算完布局
+    // 就退出码 3），所以这一格原先只列命令、明说不会跑。mergerfs 是现成的
+    // 第三方二进制，命令形状清楚，走 confirmSteps 真跑。
+    const QVector<NasController::Step> go =
+        confirmSteps(steps, QString::fromUtf8("mergerfs：把 %1 个分区并成 %2")
+                                  .arg(srcs.size()).arg(mp));
+    if (go.isEmpty()) return;
+    m_ctl.run(go);
+    setStatus(QString::fromUtf8("已挂 %1（策略 %2）。可用 = 各分区空闲之和；"
+                                "一个文件整个落在一个分区上，没有条带、没有冗余。")
+                  .arg(mp, Nas::mergerPolicyLabel(plan.mergerPolicy)));}
 
 // 卸载。只撤我们自己挂的那个目录，且必须由用户点：
 // umount 一个正在被影视服务读取的目录会让对方的 IO 报错。
@@ -1422,6 +1589,221 @@ void NasPage::onInstallFuseClicked()
 // 围绕两个数字：差几个文件、差多少字节。不写"已实现/未实现"那种工程话
 // （raidfs 那格才需要写那个），也不写"同步成功"这种还没跑就先承诺的话。
 //
+// ── mergerfs（第三方 FUSE 合并目录，RAID0 那格现在用它）───────
+//
+// 三个决定，与镜像那格同一套理由：
+//   · source 与合并挂载点只显示、不给输入：这两个值会进 mergerfs 的 argv。
+//     给输入框就等于允许把一个 source 写成 / 或某个挂载点本身。
+//   · 顺序 = 用户点分区的先后。mergerfs 的 source 列表顺序**有意义**
+//     （eol 策略下排第一的先被写满），不是摆设，所以不提供"交换"按钮。
+//   · 这一格不写"可用容量 = 各分区之和"之外的承诺：没有条带、没有冗余。
+QWidget *NasPage::buildMergerBox()
+{
+    auto *box = new QWidget();
+    auto *v = new QVBoxLayout(box);
+    v->setContentsMargins(0, 8, 0, 0);
+
+    auto *form = new QFormLayout();
+    form->setContentsMargins(0, 0, 0, 0);
+
+    m_mergerSources = new QLabel();
+    m_mergerSources->setObjectName("mergerSources");
+    m_mergerSources->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_mergerSources->setWordWrap(true);
+    m_mergerMount = new QLabel();
+    m_mergerMount->setObjectName("mergerMount");
+    m_mergerMount->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    form->addRow(QString::fromUtf8("合并哪些分区"), m_mergerSources);
+    form->addRow(QString::fromUtf8("并成一个目录"), m_mergerMount);
+
+    // "这不是 RAID0"写在选它的地方，不藏进 tooltip：坏盘时丢什么，是这一格
+    // 唯一真正的风险，必须常驻可见。状态栏那句策略后果说的是新文件落哪，
+    // 这句说的是丢什么 —— 两件不同的事，各占一行。
+    auto *note = new QLabel(QString::fromUtf8(
+        "mergerfs 不是 RAID0：一个文件整个落在一个分区上，没有条带；"
+        "坏一块盘，丢的是那块盘上的文件，不是整卷。可用容量 = 各分区空闲之和。"));
+    note->setWordWrap(true);
+    note->setObjectName("mergerNote");
+    note->setProperty("role", "mute");
+    v->addLayout(form);
+    v->addWidget(note);
+    return box;
+}
+
+QString NasPage::mergerMountPoint() const
+{
+    // 只走 defaultMountPoint：它保证返回空串或必然合法的路径，
+    // 预填一个非法挂载点等于把雷埋进 argv。
+    return Nas::defaultMountPoint(m_volName->text().trimmed());
+}
+
+// mergerfs 的 source 列表与合并挂载点，带全部守卫。与 mirrorDirs 同一套形状：
+// 返回 false 时 *why 一定是要显示给用户看的那句话（① 创建、② 挂载两处共用）。
+bool NasPage::mergerDirs(QStringList *sources, const QString &mountIn, QString *why) const
+{
+    const Nas::Plan plan = currentPlan();
+    QVector<QString> devs;
+    for (const Nas::Member &m : plan.members) devs << m.device;
+    if (!membersGateOpen(Nas::Engine::MergerFs, devs)) {
+        *why = Nas::mergerMembersWarning(devs);
+        return false;
+    }
+
+    QStringList out;
+    for (int i = 0; i < plan.members.size(); ++i) {
+        const Nas::Member &m = plan.members.at(i);
+        const QString err = Nas::validateMergerSource(m.filePath);
+        if (!err.isEmpty()) {
+            *why = QString::fromUtf8("第 %1 个 source（%2）：%3")
+                        .arg(i + 1).arg(m.device).arg(err);
+            return false;
+        }
+        out << m.filePath;
+    }
+    const QString conf = Nas::mergerSourcesConflict(out);
+    if (!conf.isEmpty()) { *why = conf; return false; }
+
+    const QString mpErr = Nas::validateMountPoint(mountIn);
+    if (!mpErr.isEmpty()) { *why = QString::fromUtf8("合并挂载点：%1").arg(mpErr); return false; }
+    if (!m_env.mergerfsBinary) {
+        *why = QString::fromUtf8("检测不到 mergerfs —— 它是第三方包，本程序只负责检测，"
+                                 "不能凭空空挂载。Debian/Ubuntu 的仓库里有 mergerfs，"
+                                 "openEuler / Fedora 的仓库里没有（实测 dnf 报 No matching Packages）。");
+        return false;
+    }
+    if (!m_env.fuseDevice) {
+        *why = QString::fromUtf8("/dev/fuse 不在 —— 那是内核 fuse 模块，装包补不了，"
+                                 "需要先加载 fuse 模块。");
+        return false;
+    }
+    if (!m_env.fuseMount) {
+        *why = QString::fromUtf8("缺 fusermount3（挂载 FUSE 卷的助手），可以用页顶的一键安装装。");
+        return false;
+    }
+    // 挂载点原样带回：调用方是 raidfs 那栏（用户可改），这里不改它。
+    // 为什么签名里 *sources 是指针、挂载点是 const 引用：挂载点由调用方给、
+    // 这里只校验，source 列表才是这里算出来的东西。
+    *sources = out;
+    return true;
+}
+
+void NasPage::refreshMergerBox()
+{
+    if (!m_mergerSources) return;
+    const Nas::Engine eng = engineFromIndex(m_engine->currentIndex());
+    if (eng != Nas::Engine::MergerFs) {
+        // 换走引擎就把这两条恢复成普通可编辑：mergerfs 模式下 SMB 路径是
+        // 程序算出来的只读值，别的模式下它归用户。
+        m_smbPath->setReadOnly(false);
+        m_smbWrite->setEnabled(true);
+        refreshMembersWarn();
+        return;
+    }
+
+    const Nas::Plan plan = currentPlan();
+    QStringList lines;
+    for (int i = 0; i < plan.members.size(); ++i) {
+        const Nas::Member &m = plan.members.at(i);
+        lines << QString::fromUtf8("第 %1 个：%2　%3（空闲 %4）")
+                    .arg(i + 1).arg(m.device, m.filePath, Nas::humanSize(m.capacity));
+    }
+    m_mergerSources->setText(lines.isEmpty()
+        ? QString::fromUtf8("（先在上方点选分区，顺序就是 mergerfs 的 source 顺序）")
+        : lines.join("\n"));
+
+    const QString mp = mergerMountPoint();
+    m_mergerMount->setText(mp.isEmpty()
+        ? QString::fromUtf8("（填名称后自动出现 /mnt/<名称>）") : mp);
+
+    // SMB 共享路径 = 合并出来的那个目录。这里覆盖 m_smbPath 是有意的：
+    // mergerfs 模式下它是只读的，被覆盖的只能是程序自己填的值。
+    const bool smb = m_modeSmb->isChecked();
+    m_smbPath->setReadOnly(true);
+    if (smb && !mp.isEmpty() && m_smbPath->text() != mp) m_smbPath->setText(mp);
+    // 共享名跟卷名走：mergerfs 的共享就是那个合并目录，名字用第一个分区的
+    // 挂载点推出来的话，共享名会和目录名对不上，用户在 smb.conf 里找不到自己
+    // 刚配的东西。这里只填空的，不覆盖用户改过的名字。
+    if (smb && m_smbName->text().isEmpty()) {
+        const QString n = plan.volumeName;
+        // validateShareName 返回空 = 合法（全页都是这个约定），别写反
+        if (!n.isEmpty() && Nas::validateShareName(n).isEmpty()) m_smbName->setText(n);
+    }
+    refreshMembersWarn();
+}
+
+// 成员组合告警行（阵列区那一行）：镜像与 mergerfs 共用，只在这里算一次。
+// 放行判据 membersGateOpen 也在这里读，红字与按钮可用性不会各说各话。
+void NasPage::refreshMembersWarn()
+{
+    if (!m_membersWarn) return;
+    const Nas::Engine eng = engineFromIndex(m_engine->currentIndex());
+    const bool shown = m_arrayBox && m_arrayBox->isVisible()
+                       && eng != Nas::Engine::Mdadm;
+    if (!shown) {
+        m_membersWarn->setVisible(false);
+        m_membersAckBtn->setVisible(false);
+        return;
+    }
+    const Nas::Plan plan = currentPlan();
+    QVector<QString> devList;
+    for (const Nas::Member &m : plan.members) devList << m.device;
+
+    const bool merger = eng == Nas::Engine::MergerFs;
+    const QString warn  = merger ? Nas::mergerMembersWarning(devList)
+                                 : Nas::mirrorMembersWarning(devList);
+    const auto issue    = merger ? Nas::mergerMembersIssue(devList)
+                                 : Nas::mirrorMembersIssue(devList);
+    const QString pairKey = devList.join(QLatin1Char(','));
+    const bool acked = (issue == Nas::MembersIssue::SameDisk && pairKey == m_sameDiskAckKey);
+
+    m_membersWarn->setText(warn);
+    m_membersWarn->setVisible(!warn.isEmpty());
+    m_membersAckBtn->setVisible(issue == Nas::MembersIssue::SameDisk);
+    // 已确认的按钮变成"回执"而不是消失：红字还在，用户能看到放行这件事仍然
+    // 生效。让它消失的话，页面看着像"问题自己好了"。
+    m_membersAckBtn->setText(acked ? QString::fromUtf8("已确认：同一块盘")
+                                   : QString::fromUtf8("知道了"));
+    m_membersAckBtn->setEnabled(!acked);
+}
+
+// 放行判据只写一份：镜像的按钮、mirrorDirs、定时器、mergerfs 的挂载与创建，
+// 全都问它。分开写必漂 —— 之前漂出来过一次：按钮亮了、定时器过了确认闸，
+// mirrorDirs 照旧把同盘当硬拒绝，用户看到"已放行"却同步不了。
+bool NasPage::membersGateOpen(Nas::Engine engine, const QVector<QString> &devices) const
+{
+    const auto iss = (engine == Nas::Engine::MergerFs)
+        ? Nas::mergerMembersIssue(devices) : Nas::mirrorMembersIssue(devices);
+    return iss == Nas::MembersIssue::None
+           || (iss == Nas::MembersIssue::SameDisk
+               && devices.join(QLatin1Char(',')) == m_sameDiskAckKey);
+}
+
+void NasPage::onMembersAckSameDisk()
+{
+    const Nas::Plan plan = currentPlan();
+    const Nas::Engine eng = engineFromIndex(m_engine->currentIndex());
+    QVector<QString> devList;
+    for (const Nas::Member &m : plan.members) devList << m.device;
+    // 只接受同盘这一条。数量不对时按钮本来就不出现，这里再挡一次：
+    // 万一将来某个调用路径让按钮在数量不对时可见，确认也不该放行"一主一备
+    // 凑不齐""一个分区没有合并意义"这类语义未定的组合。
+    const auto iss = (eng == Nas::Engine::MergerFs)
+        ? Nas::mergerMembersIssue(devList) : Nas::mirrorMembersIssue(devList);
+    if (iss != Nas::MembersIssue::SameDisk) return;
+    m_sameDiskAckKey = devList.join(QLatin1Char(','));
+    refreshMembersWarn();
+    refreshMirrorBox();
+    refreshMergerBox();
+    setStatus(eng == Nas::Engine::MergerFs
+        ? QString::fromUtf8("已确认：这几块分区在同一块盘上，创建与挂载放行。"
+                            "目录照做（多一个能装片子的地方），没有加速、没有冗余 —— "
+                            "坏盘时这些分区上的文件一起没，这条不会因为确认而变。")
+        : QString::fromUtf8("已确认：两份在同一块盘上，同步与查副本放行。"
+                            "副本照做（防误删、防手滑覆盖），坏盘时两份一起没 —— "
+                            "这条不会因为确认而变。"),
+        true);
+}
+
 // 三个决定，改界面之前先看：
 //   · 路径只显示不给输入：这个值会进 nasrs 的 argv，而那条命令带删除能力。
 //   · 顺序 = 用户在面板上点分区的先后：先点的是主副本（可写），后点的是副本。
@@ -1503,35 +1885,8 @@ QWidget *NasPage::buildMirrorBox()
     form->addRow(QString(), m_mirrorAuto);
     v->addLayout(form);
 
-    // 成员组合的问题（不是 2 个、或两块盘是同一块）用红字，且只在有问题时出现。
-    // 常驻说明走 setStatus，不占这条 —— 常驻的红字看两天就不看了。
-    m_mirrorWarn = new QLabel();
-    m_mirrorWarn->setObjectName("mirrorWarn");
-    m_mirrorWarn->setWordWrap(true);
-    m_mirrorWarn->setTextFormat(Qt::RichText);
-    m_mirrorWarn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_mirrorWarn->setProperty("role", "bad");
-    m_mirrorWarn->setVisible(false);
-
-    // 同盘那条红字右边一个「知道了」：它把"零冗余"从硬性拦截变成**用户显式接受**。
-    // 这条不是结构问题（数据是好的），是安全告警 —— 拿两个分区当同一块盘上的
-    // 备份目录是正当用法，防误删有用、防坏盘没用。硬性挡死等于替用户决定他
-    // 不需要这个用法，而他只是想要一份拷贝。
-    // 数量不是 2 那条**不给**「知道了」：谁是主、坏了顶哪份都没定义，
-    // 点一下不会让语义变清楚。
-    m_mirrorAckBtn = new QPushButton(QString::fromUtf8("知道了"));
-    m_mirrorAckBtn->setObjectName("mirrorAckBtn");
-    m_mirrorAckBtn->setToolTip(QString::fromUtf8(
-        "把「同一块盘 = 零冗余」确认下来，同步与查副本随之放行。\n"
-        "记住的是这一对分区 —— 换了分区组合就要重新确认，不是一次性设置。"));
-    m_mirrorAckBtn->setVisible(false);
-
-    auto *warnRow = new QHBoxLayout();
-    warnRow->setContentsMargins(0, 0, 0, 0);
-    warnRow->addWidget(m_mirrorWarn, 1);
-    warnRow->addWidget(m_mirrorAckBtn);
-    v->addLayout(warnRow);
-    connect(m_mirrorAckBtn, &QPushButton::clicked, this, &NasPage::onMirrorAckSameDisk);
+    // 成员组合的告警行（红字 +「知道了」）不在这里 —— 它挂在阵列区，镜像与
+    // mergerfs 共用一行。见构造函数里的 m_membersWarn。
 
     // 同步按钮排最后：它是"上面都填好之后"才成立的动作，和 SMB 那格里的
     // 「卸载该目录」同一层级，不放进底部的 ①/② 主流程行。
@@ -1559,7 +1914,7 @@ QWidget *NasPage::buildMirrorBox()
         const Nas::Plan gatePlan = currentPlan();
         QVector<QString> devs;
         for (const Nas::Member &m : gatePlan.members) devs << m.device;
-        if (!mirrorGateOpen(devs)) {
+        if (!membersGateOpen(Nas::Engine::MirrorRs, devs)) {
             m_mirrorTimer->stop();
             // 用模型层那句话，不在这里另写一套：同盘的情况它带着「点右边的
             // 知道了」，数量的情况它说的是"要正好 2 个" —— 在这儿硬写一句
@@ -1597,18 +1952,6 @@ void NasPage::setMirrorPill(const QString &text, const char *role)
     ::setRole(m_mirrorPill, role);
 }
 
-// 放行条件只写一份：**按钮可用性、mirrorDirs、定时器**三处都问它。
-// 分开写必然漂 —— 漂出来的样子就是这次探针抓到的：按钮亮了、定时器过了确认
-// 这道闸，然后 mirrorDirs 照旧把同盘当硬拒绝，用户看到"同步已放行"却停不下来。
-// 数量不是 2 永远挡（语义未定，确认帮不上）；同盘在**这一对分区**被显式接受后放行。
-bool NasPage::mirrorGateOpen(const QVector<QString> &devices) const
-{
-    const auto iss = Nas::mirrorMembersIssue(devices);
-    return iss == Nas::MirrorMembersIssue::None
-           || (iss == Nas::MirrorMembersIssue::SameDisk
-               && devices.join(QLatin1Char(',')) == m_sameDiskAckKey);
-}
-
 // 算出并校验两个副本目录。三个入口（同步、查询、定时器）共用同一套守卫，
 // 免得其中一处漏了"目录正好等于挂载点"这种检查，另两处挡住了。
 // why 一定带回给用户看的那句话 —— 返回 false 却不说话，按钮就成了哑弹。
@@ -1624,7 +1967,10 @@ bool NasPage::mirrorDirs(QString *primary, QString *secondary, QString *why) con
 
     // 这里用放行判据，不是"有没有警告"：确认过的那对分区就是要让它过。
     // 判据与确认记的是同一对分区，所以换组合自动失效（见 naspage.h 注释）。
-    if (!mirrorGateOpen(devs)) { *why = Nas::mirrorMembersWarning(devs); return false; }
+    if (!membersGateOpen(Nas::Engine::MirrorRs, devs)) {
+        *why = Nas::mirrorMembersWarning(devs);
+        return false;
+    }
 
     const QString p = plan.members.at(0).filePath;
     const QString s = plan.members.at(1).filePath;
@@ -1688,26 +2034,12 @@ void NasPage::refreshMirrorBox()
         ? QString::fromUtf8("（再点选第二个分区）") : s + "　· " + labelFor(1));
     Q_UNUSED(devs);
 
+    // 告警行与「知道了」在阵列区那一行，由 refreshMembersWarn 统一算（两条路线
+    // 共用），这里只读放行判据。
+    refreshMembersWarn();
     QVector<QString> devList;
     for (const Nas::Member &m : plan.members) devList << m.device;
-    const QString warn = Nas::mirrorMembersWarning(devList);
-    const auto issue = Nas::mirrorMembersIssue(devList);
-    // 确认记的是这一对分区，不是"点过知道了"这个事实（见 naspage.h 的注释）。
-    const QString pairKey = devList.join(QLatin1Char(','));
-    const bool acked = (issue == Nas::MirrorMembersIssue::SameDisk
-                        && pairKey == m_sameDiskAckKey);
-
-    m_mirrorWarn->setText(warn);
-    m_mirrorWarn->setVisible(!warn.isEmpty());
-    m_mirrorAckBtn->setVisible(issue == Nas::MirrorMembersIssue::SameDisk);
-    // 已确认的按钮变成"回执"而不是消失：红字还在，用户能看到放行这件事仍然
-    // 生效。让它消失的话，页面看着像"问题自己好了"。
-    m_mirrorAckBtn->setText(acked ? QString::fromUtf8("已确认：零冗余")
-                                  : QString::fromUtf8("知道了"));
-    m_mirrorAckBtn->setEnabled(!acked);
-
-    // 放行条件与 mirrorDirs、定时器同一个判据（mirrorGateOpen），三处不会各说各话
-    const bool gateOpen = mirrorGateOpen(devList);
+    const bool gateOpen = membersGateOpen(Nas::Engine::MirrorRs, devList);
     m_mirrorSyncBtn->setEnabled(gateOpen && !m_ctl.busy());
     m_mirrorCheckBtn->setEnabled(gateOpen && !m_ctl.busy());
 
@@ -1725,23 +2057,6 @@ void NasPage::refreshMirrorBox()
     } else {
         m_smbWrite->setEnabled(true);
     }
-}
-
-void NasPage::onMirrorAckSameDisk()
-{
-    const Nas::Plan plan = currentPlan();
-    QVector<QString> devList;
-    for (const Nas::Member &m : plan.members) devList << m.device;
-    // 只接受同盘这一条。数量不对时按钮本来就不出现，这里再挡一次：
-    // 万一将来某个调用路径让按钮在数量不对时可见，确认也不该放行"一主一备
-    // 凑不齐"这种语义未定的组合。
-    if (Nas::mirrorMembersIssue(devList) != Nas::MirrorMembersIssue::SameDisk) return;
-    m_sameDiskAckKey = devList.join(QLatin1Char(','));
-    refreshMirrorBox();
-    setStatus(QString::fromUtf8(
-        "已确认：两份在同一块盘上，同步与查副本放行。"
-        "副本照做（防误删、防手滑覆盖），坏盘时两份一起没 —— 这条不会因为确认而变。"),
-        true);
 }
 
 void NasPage::onMirrorAccessChanged(int idx)

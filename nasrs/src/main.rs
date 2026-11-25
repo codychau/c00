@@ -1,165 +1,27 @@
-//! nasrs —— 用户态 RAID0 over 文件，导出为块设备。
+//! nasrs —— 用户态软件镜像（RAID1）：把主网目录完整拷到副本目录。
 //!
-//! 设计要点：**v1 不做后台守护**。
-//! NBD 卷的生命周期等于本进程的生命周期。如果 nasrs 被 daemonize 或被
-//! systemd 之外的方式托管，进程一挂内核的 nbd 设备不会立刻报错，而是让
-//! 所有在它上面的文件系统卡死在 D 状态 —— 这比干脆起不来更糟。
-//! 所以这里坚持"前台进程 + 调用方负责监督"，由 Qt 侧持有其生命周期。
+//! 设计要点：**不做后台守护**。一轮同步 = 一个进程，跑完就退出；
+//! 定时（每 5 分钟）由调用方负责（Qt 页的 QTimer）。把本程序 daemonize
+//! 会留下没人监督的写进程 —— 那比跑完退出危险得多。
+//!
+//! 原来的 RAID0 路线（raid.rs + nbd.rs + `serve` 子命令）已整条删除：导出层
+//! 从来没有实现（算完布局就退出码 3），Qt 页那一格改用第三方 mergerfs
+//! （FUSE 合并目录），不需要自研的块设备导出。
 
 use nasrs::mirror::{self, Plan};
-use nasrs::raid::{self, Layout};
 use nasrs::sync;
-use std::fs::{File, OpenOptions};
-use std::io;
 use std::path::PathBuf;
 
-/// 一个成员：打开的 backing 文件 + 容量
-/// v1 只用 file 取 metadata 并持有 fd（保证文件不被别人换掉），
-/// 真正的 pread/pwrite 要等 NBD 服务端接入才用 —— 这个字段不是死的，
-/// 是还没接上。接上之前不要删。
-#[allow(dead_code)]
-struct Member {
-    file: File,
-    size: u64,
-    path: PathBuf,
-}
-
-/// 打开并校验所有 backing 文件。
-///
-/// 严格要求**所有文件同尺寸**：RAID0 的映射依赖等长成员，
-/// 若允许不等长，最后一个条带会写到短成员之外 —— 那是别人的文件，
-/// 会静默毁掉分区上的其它数据。宁可拒绝启动。
-fn open_members(paths: &[PathBuf], create_with_size: Option<u64>) -> io::Result<Vec<Member>> {
-    if paths.len() < 2 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "RAID0 至少需要 2 个成员",
-        ));
-    }
-    let mut out = Vec::with_capacity(paths.len());
-    for p in paths {
-        // 已存在就不 truncate：覆盖已有卷文件是危险操作，
-        // 需要显式的 --force，默认只读写打开。
-        let mut opts = OpenOptions::new();
-        opts.read(true).write(true);
-        if create_with_size.is_some() {
-            opts.create_new(true);
-        }
-        let file = opts.open(p).map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("打开 backing 文件失败 {}: {e}", p.display()),
-            )
-        })?;
-        let size = file.metadata()?.len();
-        if size == 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!("backing 文件 {} 大小为 0，先预分配", p.display()),
-            ));
-        }
-        out.push(Member { file, size, path: p.clone() });
-    }
-
-    let first = out[0].size;
-    for m in &out[1..] {
-        if m.size != first {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                format!(
-                    "成员尺寸不一致：{} 是 {}，{} 是 {}。RAID0 要求等长成员，                     否则尾部条带会写到短成员之外。",
-                    out[0].path.display(), first,
-                    m.path.display(), m.size
-                ),
-            ));
-        }
-    }
-    Ok(out)
-}
-
-/// 从成员算出卷布局
-fn build_layout(member_size: u64, disks: usize, chunk_kib: u64) -> Result<Layout, raid::MapError> {
-    Layout::new(chunk_kib * 1024, disks, member_size)
-}
-
 fn main() {
-    // 解析参数：serve --name X --chunk 512K --disk f1 --disk f2 [--report]
     let argv: Vec<String> = std::env::args().collect();
-
-    // 镜像路线（RAID1）与 RAID0 是两套参数，早分流而不是在同一个 while 里
-    // 塞两组 match 分支：混在一起时"忘了给 --disk"这类误用会被另一套参数的
-    // 默认值悄悄兜住，跑出一条谁也没打算执行的命令。
-    if argv.get(1).map(|s| s.as_str()) == Some("mirror") {
-        std::process::exit(cmd_mirror(&argv[2..]));
-    }
-
-    let mut chunk_kib: u64 = 512;
-    let mut disks: Vec<PathBuf> = Vec::new();
-    let mut name = String::from("nasrs0");
-    let mut report_only = false;
-
-    let mut i = 1;
-    while i < argv.len() {
-        match argv[i].as_str() {
-            "serve" => {}
-            "--name" => { i += 1; if let Some(v) = argv.get(i) { name = v.clone(); } }
-            "--chunk" => {
-                i += 1;
-                if let Some(v) = argv.get(i) {
-                    let t = v.trim_end_matches(|c: char| !c.is_ascii_digit());
-                    let mult = if v.ends_with('K') || v.ends_with('k') { 1 }
-                               else if v.ends_with('M') || v.ends_with('m') { 1024 }
-                               else { 1 };
-                    chunk_kib = t.parse::<u64>().unwrap_or(512) * mult;
-                }
-            }
-            "--disk" => { i += 1; if let Some(v) = argv.get(i) { disks.push(PathBuf::from(v)); } }
-            "--report" => report_only = true,
-            other => {
-                eprintln!("未知参数：{other}");
-                std::process::exit(2);
-            }
-        }
-        i += 1;
-    }
-
-    if disks.len() < 2 {
-        eprintln!("需要至少两个 --disk，例如 --disk /data1/nas.img --disk /data2/nas.img");
+    // 第一个参数必须是 mirror。其它写法（含旧的 `serve`）一律退 2：
+    // 这里不"兼容"旧参数，兼容会让一句已删除的用法悄悄继续存在。
+    if argv.get(1).map(|s| s.as_str()) != Some("mirror") {
+        eprint!("{MIRROR_USAGE}");
+        eprintln!("\n本程序只做镜像：第一个参数必须是 mirror。");
         std::process::exit(2);
     }
-
-    let members = match open_members(&disks, None) {
-        Ok(m) => m,
-        Err(e) => { eprintln!("错误：{e}"); std::process::exit(1); }
-    };
-    let layout = match build_layout(members[0].size, members.len(), chunk_kib) {
-        Ok(l) => l,
-        Err(e) => { eprintln!("布局不合法：{e:?}"); std::process::exit(1); }
-    };
-
-    println!("卷名      : {name}");
-    println!("成员      : {}", members.len());
-    for m in &members {
-        println!("  {}  {}", m.path.display(), human(m.size));
-    }
-    println!("条带粒度  : {} KiB", layout.chunk / 1024);
-    println!("卷容量    : {}", human(layout.capacity()));
-    let slack = layout.slack_per_disk();
-    if slack > 0 {
-        // 说清楚零头为什么不算进容量：不是 bug，是"必须整条带"的代价
-        println!("每盘零头  : {}（不足一个条带，不计入容量）", human(slack));
-    }
-
-    if report_only {
-        return;
-    }
-
-    // v1 到这里就停：容量与映射都已算清并打印。
-    // NBD 服务端需要 nbd 内核模块与 CAP_SYS_ADMIN，本机非 root 无法验证，
-    // 所以不写"看起来能用但从没跑过"的绑定代码 —— 那会让人误以为已可用。
-    eprintln!("\n尚未接入 NBD 服务端（需要 nbd 内核模块与 root，且必须实机验证）。");
-    eprintln!("当前 --report 已给出布局与容量；映射逻辑在 raid.rs 有单元测试覆盖。");
-    std::process::exit(3);
+    std::process::exit(cmd_mirror(&argv[2..]));
 }
 
 fn human(b: u64) -> String {
@@ -170,13 +32,11 @@ fn human(b: u64) -> String {
     format!("{v:.2} {}", U[i])
 }
 
-// ── 镜像路线（软件 RAID1）───────────────────────────────────
+// ── 镜像（软件 RAID1）───────────────────────────────────────
 //
-// 与 RAID0 那条的区别不是"又一个功能"，而是**今天就能用**：
-// 两个目录、普通用户权限、不需要 nbd/loop/targetcli，也不需要 root。
-// RAID0 + NBD + LIO 那条链还缺导出通路（见下面 serve 分支末尾的说明），
-// 而"两份都存完整的、访问者只读其中一份"这件事已经完整可跑了 ——
-// 所以界面把它单独做成一条路线，而不是画成 RAID0 的一个开关。
+// 这一条是普通用户权限就能跑通的：两个目录、不需要 nbd/loop/targetcli，
+// 也不需要 root。"两份都存完整的、访问者只读其中一份"这件事已经完整可用，
+// 所以界面把它单独做成一条路线。
 
 const MIRROR_USAGE: &str = "\
 nasrs mirror —— 把主网目录完整镜像到副本目录（软件 RAID1，单向）
