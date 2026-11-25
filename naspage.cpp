@@ -573,6 +573,7 @@ void NasPage::syncEnvAndInstallUi()
     // 内核模块，结果"包装齐了、按钮没了、红字还挂着"，看着就像程序坏了 ——
     // 那两类现在归导出页底部那条说明（见 refreshBlockNote）。
     const QStringList lack = m_env.missingDepLabels;
+    const QStringList installable = Nas::packagesToInstall(m_env.pkg, m_env.missingDeps);
     if (lack.isEmpty()) {
         m_envLabel->setVisible(false);
     } else {
@@ -581,6 +582,12 @@ void NasPage::syncEnvAndInstallUi()
         // 唯一的信号，得在这里说清"该自己装"，不然用户会以为少了个本该有的按钮。
         if (m_env.pkg == Nas::Pkg::None)
             hint += QString::fromUtf8("（系统里没有 dnf / apt-get / pacman，得自己装）");
+        else if (installable.isEmpty())
+            // 表里有这一项、这家仓库里却没有对应的包（mergerfs 在 dnf/pacman 系
+            // 就是这种）：按钮点了也不会有确认框，只有一行红字容易被当成"程序卡了"。
+            // 这里把"按钮帮不上"写在同一个标签里，不留"看着像坏了"的观感。
+            hint += QString::fromUtf8("（%1 的官方仓库里没有这些的包，页顶按钮帮不上，要自己装）")
+                        .arg(Nas::pkgManagerName(m_env.pkg));
         m_envLabel->setText(hint);
         m_envLabel->setStyleSheet("color:" + Theme::bad().name());
         m_envLabel->setVisible(true);
@@ -598,7 +605,10 @@ void NasPage::syncEnvAndInstallUi()
     // 装到一半不许隐藏：进程还活着的时候按钮消失，比留着更让人慌。
     if (m_installAllBtn) {
         const bool busy = m_installProc && m_installProc->state() != QProcess::NotRunning;
-        const bool canInstall = m_env.pkg != Nas::Pkg::None && m_env.hasMissingDeps();
+        // 判据是"还有没有**这家能装的**包"，不是"有没有缺的东西"。
+        // 早先写的是后者，后果是：mergerfs 在 dnf/pacman 系永远缺、永远没有
+        // 对应的包，按钮永远摆在那儿，点下去只有一行红字 —— 用户读成"程序没反应"。
+        const bool canInstall = m_env.pkg != Nas::Pkg::None && !installable.isEmpty();
         m_installAllBtn->setVisible(canInstall || busy);
         if (busy) {
             m_installAllBtn->setToolTip(QString::fromUtf8("安装进行中，日志在下方…"));
@@ -2182,11 +2192,19 @@ void NasPage::onInstallAllDepsClicked()
 
     const NasController::InstallPlan plan = m_ctl.planInstallDeps(m_env);
     if (!plan.valid()) {
-        if (!plan.blocked.isEmpty())
-            setStatus(QString("%1 在 %2 的官方仓库里没有对应的包，得手动解决")
-                          .arg(plan.blocked.join("、"), plan.pmName), true);
-        else
-            setStatus("依赖清单没通过包名白名单，已中止（不该发生，请把本页日志发出来）", true);
+        const QString msg = !plan.blocked.isEmpty()
+            ? QString("%1 在 %2 的官方仓库里没有对应的包，页顶按钮帮不上 —— 要自己装"
+                      "（apt 系的机器上这一项有包，那一家的按钮才真能装）")
+                  .arg(plan.blocked.join("、"), plan.pmName)
+            : "依赖清单没通过包名白名单，已中止（不该发生，请把本页日志发出来）";
+        setStatus(msg, true);
+        // 这条必须弹窗，不能只写状态栏。这里曾经只写状态栏：点一个大通栏按钮
+        // 期待一个确认框，结果只有一行小字，用户读成"程序没反应"（实测用户就是
+        // 这么报的）。状态栏在按钮那一行里，容易被当成进度提示。
+        QMessageBox::warning(this, "一键安装帮不上", msg
+                             + QString("\n\n这一格（mergerfs 合并目录）在检测不到 mergerfs 时"
+                                "只会显示「检测不到 mergerfs」，创建与挂载都会停在那一句，"
+                                "不会假装成功。"));
         return;
     }
     m_installPlan = plan;
