@@ -51,7 +51,10 @@ public:
         QStringList blocked;   // 这家装不了的组件（人话名），只展示不执行
         QStringList commands;  // 会跑的几条命令，与 script 同源，展示用
         QString   script;      // 交给 sudo bash -c 的完整脚本
-        bool valid() const { return !packages.isEmpty() && !script.isEmpty(); }
+        // script 非空 = 有一条真能跑的安装路径。以前还要求 packages 非空，
+        // 那样「只有从源码编 mergerfs 这一条」的机器会被判成"装不了"——
+        // 而那条恰恰是 dnf/pacman 系唯一能落地的方式。
+        bool valid() const { return !script.isEmpty(); }
     };
 
     // 注意：targetcli saveconfig 会把 CHAP 密码**明文**写进

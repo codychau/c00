@@ -56,10 +56,16 @@
     - 唯一需要你选的参数是**写入策略**（新文件落到哪个分区）：最空闲优先（mfs，默认，
       各盘使用率均衡）、顺序填满（eol，账好算但第一块盘承担了全部写入）、最紧优先（lfs）。
       选完立刻在状态栏写清后果。原来的「条带粒度」那一行对 mergerfs 整行收掉。
-    - mergerfs 是发行版的包，**本程序只检测、不捆绑、不代装**：apt 家有（页顶一键安装能装），
+    - 页顶的**一键安装会按系统能力选路**：apt 系仓库里有现成的包，直接 `apt-get install`；
       openEuler / Fedora 的仓库里没有（实测 `dnf list --available mergerfs` 报
-      `No matching Packages`），Arch 只在 AUR。对那两家这一格会一直显示「检测不到 mergerfs」，
-      不会摆一个必然失败的安装按钮。
+      `No matching Packages`），Arch 只在 AUR —— 那两家它会**从源码编一个**：抓 Debian pool
+      的 `mergerfs_*.orig.tar.gz`，`make -j` 之后 `strip`，装到 `/usr/local/bin/mergerfs`。
+      编得动的原因是 mergerfs 的源码自带 vendored libfuse（作者改过的 fork，Makefile 里先
+      编成 `libfuse.a` 再静态链进去），所以**不需要发行版的 fuse3 开发头** —— 那正是 openEuler
+      上装不上的那一类包。只要 g++（C++17）、make、curl。约 1.2 MB，编完 `--version` 自检。
+      （脚本也单独留着：`packaging/build-mergerfs.sh`，脱离界面也能跑。）
+    - 编不出来也不会装成功假象：确认框先列出会跑的每条命令，失败的原话贴进日志框；
+      `--version` 跑不通就整条算失败。
     - 出口只有 SMB 与挂载目录（它交出来的是目录，没有块设备可导 iSCSI）。
   - **软件镜像 RAID1（`nasrs mirror`）** — 选正好两个分区：两边都是完整的目录副本，
     访问者读其中一份。它是三条路线里唯一**不依赖任何外部包**的一条 —— 引擎随程序一起发布，
@@ -250,9 +256,12 @@ VERSION=1.2.0 ./packaging/build-appimage.sh     # 自定义版本号
 打包范围：程序本体 + `llama-proxy` + **`nasrs`（自研镜像引擎）** + **Qt 自己的库和插件**
 （core/gui/widgets/network/dbus、xcb / wayland 平台插件、imageformats），外加
 **`libproxy`**（QtGui 的直接依赖，14 KB，服务器发行版常不装）。
-**mergerfs 不随包走**：它是发行版的包，本程序按「同目录 → ../lib → /usr/local/bin →
-/usr/bin → PATH」检测它，检测不到就在页面上说「检测不到 mergerfs」，不捆绑、不代装
-（FUSE 挂载助手与内核 fuse 模块都跟系统走，单挪一个二进制进去也挂不上）。
+**mergerfs 有两种来源，都按「同目录 → ../lib → /usr/local/bin → /usr/bin → PATH」找**：
+apt 系装发行版的包；dnf/pacman 系由一键安装从源码编一个（`packaging/build-mergerfs.sh`，
+静态链 vendored libfuse，不依赖发行版的 fuse3），编出来可以放程序旁边（同目录），
+也可以留在 `/usr/local/bin`。它不随 AppImage 发布 —— 编它要 g++/make，包里带一份
+等于把发行版的活提前干完，还多一份要跟着 glibc 走的产物；FUSE 挂载助手与内核 fuse
+模块也跟系统走。
 libc、libGL、X11、
 ICU 等系统库一律不打进去 —— AppImage 的通行做法是依赖宿主已有的系统库，把 glibc 打包反而会在
 别的发行版上崩。

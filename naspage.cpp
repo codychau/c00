@@ -76,7 +76,7 @@ static Nas::Engine engineFromIndex(int i)
 static Nas::MergerPolicy policyFromIndex(int i)
 {
     switch (i) {
-    case 1:  return Nas::MergerPolicy::Eol;
+    case 1:  return Nas::MergerPolicy::Ff;
     case 2:  return Nas::MergerPolicy::Lfs;
     default: return Nas::MergerPolicy::Mfs;
     }
@@ -297,10 +297,10 @@ NasPage::NasPage(QWidget *parent)
     m_policy = new QComboBox();
     m_policy->setObjectName("mergerPolicy");
     m_policy->addItem(Nas::mergerPolicyLabel(Nas::MergerPolicy::Mfs));
-    m_policy->addItem(Nas::mergerPolicyLabel(Nas::MergerPolicy::Eol));
+    m_policy->addItem(Nas::mergerPolicyLabel(Nas::MergerPolicy::Ff));
     m_policy->addItem(Nas::mergerPolicyLabel(Nas::MergerPolicy::Lfs));
     m_policy->setItemData(0, Nas::mergerPolicyNote(Nas::MergerPolicy::Mfs), Qt::ToolTipRole);
-    m_policy->setItemData(1, Nas::mergerPolicyNote(Nas::MergerPolicy::Eol), Qt::ToolTipRole);
+    m_policy->setItemData(1, Nas::mergerPolicyNote(Nas::MergerPolicy::Ff), Qt::ToolTipRole);
     m_policy->setItemData(2, Nas::mergerPolicyNote(Nas::MergerPolicy::Lfs), Qt::ToolTipRole);
     m_policy->setToolTip(Nas::mergerPolicyNote(Nas::MergerPolicy::Mfs));
     connect(m_policy, &QComboBox::currentIndexChanged, this, [this](int) {
@@ -574,6 +574,10 @@ void NasPage::syncEnvAndInstallUi()
     // 那两类现在归导出页底部那条说明（见 refreshBlockNote）。
     const QStringList lack = m_env.missingDepLabels;
     const QStringList installable = Nas::packagesToInstall(m_env.pkg, m_env.missingDeps);
+    // mergerfs 在这两家没有包，但能从源码编（见 Nas::mergerfsSourceInstallable）。
+    // 按钮的判据要把它算进"装得动"，否则 dnf 系永远看不见这个按钮 —— 而那边
+    // 恰恰是唯一需要它的地方。
+    const bool canBuildMerger = Nas::mergerfsSourceInstallable(m_env.pkg, m_env.missingDeps);
     if (lack.isEmpty()) {
         m_envLabel->setVisible(false);
     } else {
@@ -582,7 +586,7 @@ void NasPage::syncEnvAndInstallUi()
         // 唯一的信号，得在这里说清"该自己装"，不然用户会以为少了个本该有的按钮。
         if (m_env.pkg == Nas::Pkg::None)
             hint += QString::fromUtf8("（系统里没有 dnf / apt-get / pacman，得自己装）");
-        else if (installable.isEmpty())
+        else if (installable.isEmpty() && !canBuildMerger)
             // 表里有这一项、这家仓库里却没有对应的包（mergerfs 在 dnf/pacman 系
             // 就是这种）：按钮点了也不会有确认框，只有一行红字容易被当成"程序卡了"。
             // 这里把"按钮帮不上"写在同一个标签里，不留"看着像坏了"的观感。
@@ -608,16 +612,20 @@ void NasPage::syncEnvAndInstallUi()
         // 判据是"还有没有**这家能装的**包"，不是"有没有缺的东西"。
         // 早先写的是后者，后果是：mergerfs 在 dnf/pacman 系永远缺、永远没有
         // 对应的包，按钮永远摆在那儿，点下去只有一行红字 —— 用户读成"程序没反应"。
-        const bool canInstall = m_env.pkg != Nas::Pkg::None && !installable.isEmpty();
+        const bool canInstall = m_env.pkg != Nas::Pkg::None
+                                && (!installable.isEmpty() || canBuildMerger);
         m_installAllBtn->setVisible(canInstall || busy);
         if (busy) {
             m_installAllBtn->setToolTip(QString::fromUtf8("安装进行中，日志在下方…"));
         } else if (canInstall) {
-            m_installAllBtn->setToolTip(
-                QString::fromUtf8("包管理器：%1\n缺：%2\n"
-                                  "点一下先看确认框（列出会跑哪几条命令），再输 sudo 密码。")
-                    .arg(Nas::pkgManagerName(m_env.pkg),
-                         m_env.missingDepLabels.join(QString::fromUtf8("、"))));
+            QString tip = QString::fromUtf8("包管理器：%1\n缺：%2\n"
+                                            "点一下先看确认框（列出会跑哪几条命令），再输 sudo 密码。")
+                              .arg(Nas::pkgManagerName(m_env.pkg),
+                                   m_env.missingDepLabels.join(QString::fromUtf8("、")));
+            if (canBuildMerger && installable.isEmpty())
+                tip += QString::fromUtf8("\nmergerfs 这家没有现成的包：会从源码编（自带 libfuse，"
+                                         "要 g++/make，几分钟）。");
+            m_installAllBtn->setToolTip(tip);
         }
     }
 }
@@ -1481,10 +1489,13 @@ void NasPage::refreshRaidFsStatus()
         "可用容量 = 各分区空闲之和；坏一块盘，丢的是那块盘上的文件，不是整卷。");
     if (!m_env.mergerfsBinary)
         notes << QString::fromUtf8(
-            "本机没有 mergerfs。它是发行版的包，本程序只检测、不捆绑、不代装：\n"
-            "Debian/Ubuntu 的仓库里有（页顶的一键安装能装），"
-            "openEuler / Fedora 的仓库里没有（实测 dnf 报 No matching Packages），"
-            "Arch 只在 AUR。这一格对那两家只会一直显示「检测不到」。");
+            "本机没有 mergerfs。页顶的「一键安装」会按系统能力选路：Debian/Ubuntu 的仓库里"
+            "有现成的包，直接装；openEuler / Fedora 的仓库里没有（实测 dnf 报 "
+            "No matching Packages），Arch 只在 AUR —— 那两家它会**从源码编一个**：mergerfs "
+            "的源码自带 vendored libfuse（作者改过的 fork），所以不需要发行版的 fuse3 开发头，"
+            "只要 g++、make、curl，编完装到 /usr/local/bin/mergerfs（十几兆的中间产物会清掉）。\n"
+            "编完这一格就变成「mergerfs 已就位」——程序按「同目录 → ../lib → /usr/local/bin → "
+            "/usr/bin → PATH」找它，装完不用重启程序，刷新一下就认。");
     if (!m_env.fuseDevice)
         notes << QString::fromUtf8(
             "<b>/dev/fuse 不在</b>：那属内核 fuse 模块，装包补不了，"
@@ -2211,8 +2222,10 @@ void NasPage::onInstallAllDepsClicked()
 
     // 确认框：把「缺什么 → 装哪个包」和「会跑哪几条命令」都摊开。
     // 装包会改整个系统的状态，看过命令再点确认才算真确认。
-    QString text = QString("将用 %1 安装 %2 个组件（需要管理员权限）：\n")
-                       .arg(plan.pmName).arg(plan.packages.size());
+    QString text = plan.packages.isEmpty()
+        ? QString("将从源码编译缺失的组件（需要管理员权限，用 curl + make，不走包管理器）：\n")
+        : QString("将用 %1 安装 %2 个组件（需要管理员权限）：\n")
+              .arg(plan.pmName).arg(plan.packages.size());
     for (const QString &r : plan.rows)
         text += "  · " + r + "\n";
     text += "\n会执行的命令（set -e：任一条失败就停）：\n";
@@ -2221,7 +2234,11 @@ void NasPage::onInstallAllDepsClicked()
     if (!plan.blocked.isEmpty())
         text += "\n这几项它装不了（官方仓库没有对应的包，要自己想办法）：\n  · "
                 + plan.blocked.join("\n  · ") + "\n";
-    text += "\n会改动系统：装上软件包及其依赖。不碰磁盘、不改配置文件、不动已有的共享。";
+    text += plan.packages.isEmpty()
+        ? QString("\n会改动系统：从 Debian 的源码包编一个 mergerfs 二进制装到 /usr/local/bin（"
+                  "它自带 libfuse，不需要 fuse3 开发头），编译要几分钟，输出会实时贴在下方的日志框里。"
+                  "不碰磁盘、不改配置文件、不动已有的共享。")
+        : QString("\n会改动系统：装上软件包及其依赖。不碰磁盘、不改配置文件、不动已有的共享。");
     text += "\n装不上时会把包管理器的原话完整贴在页面日志里，不会假装成功。";
 
     if (QMessageBox::question(this, "一键安装依赖", text,
@@ -2257,8 +2274,11 @@ void NasPage::startInstall(const QString &password)
     m_installTimedOut = false;
     m_installLog->setVisible(true);
     m_installLog->clear();
-    appendInstallLog(QString("# 用 %1 安装：%2")
-                         .arg(m_installPlan.pmName, m_installPlan.packages.join(" ")));
+    appendInstallLog(m_installPlan.packages.isEmpty()
+                         ? QString("# 用 %1 从源码编译缺失组件（仓库里没有现成的包）")
+                               .arg(m_installPlan.pmName)
+                         : QString("# 用 %1 安装：%2")
+                               .arg(m_installPlan.pmName, m_installPlan.packages.join(" ")));
     for (const QString &c : m_installPlan.commands)
         appendInstallLog("$ " + c);
 

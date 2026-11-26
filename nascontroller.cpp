@@ -289,6 +289,16 @@ NasController::planMdadmCreate(const Nas::Plan &plan, const QString &arrayName) 
 //
 // 它**不是 RAID0**，这里不写一条"RAID0 挂载"的命令来骗人：一个文件整个落在一个
 // 分区上，没有条带，也没有冗余。所以文案写 mergerfs，容量账是各分区空闲之和。
+// 提权前缀：已经是 root 就不套 pkexec。
+// 这一条不是优化，是"别让日志里出现一句谁也看不懂的话"：部署环境里 start.sh 就是
+// 以 root 跑本程序的，而容器里没有 polkit 的会话总线 —— 实测 pkexec 在里面直接回
+// "Refusing to render service to dead parents"（退出码 127）。root 只需要直接跑，
+// 授权对话框是给非 root 的桌面会话用的，那才是 pkexec 存在的原因。
+static QStringList privPrefix()
+{
+    return (geteuid() == 0) ? QStringList{} : QStringList{ QStringLiteral("pkexec") };
+}
+
 QVector<NasController::Step>
 NasController::planMergerfsCreate(const Nas::Plan &plan, const QString &mountPoint) const
 {
@@ -309,9 +319,17 @@ NasController::planMergerfsCreate(const Nas::Plan &plan, const QString &mountPoi
     // ① 只建目录，不挂任何东西：可撤销，也不遮任何内容。
     // 用 install -d 而不是 mkdir：一并把权限定下来，且目录已存在时不报错
     // （重复创建是正常操作）。
+    const QStringList pre = privPrefix();
     Step mkd;
-    mkd.program = "pkexec";
-    mkd.args = { "install", "-d", "-m", "0755", mountPoint };
+    mkd.program = pre.isEmpty() ? QStringLiteral("install") : QStringLiteral("pkexec");
+    // pkexec 的写法是 `pkexec <程序> <参数…>`，直接跑的写法是 `<程序> <参数…>` ——
+    // 两种都把程序名放在 program 里，所以只有 pkexec 才需要把目标程序再当一次参数。
+    // 早先这里无条件把 "install" 塞进 args：root 下变成 `install install -d …`，
+    // 把 install 自己的子命令位置占了，创建挂载目录直接失败。
+    QStringList mkArgs = pre;
+    if (!pre.isEmpty()) mkArgs << "install";
+    mkArgs << "-d" << "-m" << "0755" << mountPoint;
+    mkd.args = mkArgs;
     mkd.describe = QString("创建挂载目录 %1（mergerfs 的挂载点）").arg(mountPoint);
     mkd.destructive = false;
     steps.append(mkd);
@@ -333,14 +351,21 @@ NasController::planMergerfsMount(const Nas::Plan &plan, const QString &mountPoin
     for (const Nas::Member &m : plan.members) srcs << m.filePath;
 
     Step mt;
-    // 走 pkexec（root）挂载，不是用户态挂载，这一条不是随便选的：
+    // 挂载要 root，这一条不是随便选的：
     //   · 用户挂的 FUSE 目录默认**只有挂载者能读**（allow_other 还要
     //     /etc/fuse.conf 里的 user_allow_other），而 SMB 那出口是 smbd（root）
     //     去读它 —— 挂上了却共享不出东西，是最难查的那种"界面说成功、别人读不到"。
-    //   · root 挂载 + allow_other 让 smbd 与访客都读得到，权限模型与本页其它
-    //     特权动作（install / mount / systemctl）一致，都走同一道授权。
-    mt.program = "pkexec";
-    mt.args = QStringList() << bin << Nas::mergerfsArgs(srcs, mountPoint, plan.mergerPolicy);
+    //   · root 挂载 + allow_other 让 smbd 与访客都读得到。
+    // 前缀按 euid 走（privPrefix）：部署环境 start.sh 就是 root 跑的，容器里没有
+    // polkit 会话总线，pkexec 在那里只会回一句"Refusing to render service to
+    // dead parents"（实测退出码 127）。root 直接跑就够，授权对话框是给非 root
+    // 桌面会话的。
+    const QStringList priv = privPrefix();
+    mt.program = priv.isEmpty() ? bin : QStringLiteral("pkexec");
+    QStringList mtArgs = priv;
+    if (!priv.isEmpty()) mtArgs << bin;   // 同上：只有 pkexec 才把程序名当参数
+    mtArgs << Nas::mergerfsArgs(srcs, mountPoint, plan.mergerPolicy);
+    mt.args = mtArgs;
     mt.describe = QString("mergerfs：把 %1 个分区并成 %2（策略 %3，可用 = 各分区空闲之和）")
                       .arg(int(srcs.size())).arg(mountPoint).arg(Nas::mergerPolicyLabel(plan.mergerPolicy));
     // 标 destructive：这一步会在挂载目录上盖一个文件系统。挂载可撤销（卸载就
@@ -918,6 +943,16 @@ NasController::InstallPlan NasController::planInstallDeps(const Env &env) const
     p.blocked = Nas::packagesUnavailable(env.pkg, env.missingDeps);
     p.packages = Nas::packagesToInstall(env.pkg, env.missingDeps);
 
+    // mergerfs 在 dnf / pacman 系没有包，但源码自带 vendored libfuse，只要
+    // g++/make/curl 就能编出一个静态二进制（见 build-mergerfs.sh 里那段说明）。
+    // 所以这两家的"一键安装"不必摊手：把这一项从 blocked 里摘出来，改成编译步骤。
+    const bool buildMerger = Nas::mergerfsSourceInstallable(env.pkg, env.missingDeps);
+    if (buildMerger) {
+        const QString lbl = Nas::dependencyLabels({ QStringLiteral("mergerfs") })
+                                .value(0, QStringLiteral("mergerfs"));
+        p.blocked.removeAll(lbl);
+    }
+
     for (const QString &pkg : p.packages) {
         if (!Nas::isSafePackageName(pkg)) {
             // 表被改坏了。清空一切：宁可页面上报"生成失败"，
@@ -928,40 +963,83 @@ NasController::InstallPlan NasController::planInstallDeps(const Env &env) const
             return p;
         }
     }
-    if (p.packages.isEmpty()) return p;
+    // 只有 mergerfs 可编、没有包可装的机器（openEuler 上很常见）也要生成脚本：
+    // 这不是"没有可装的东西"，而是一条真能跑通的安装路径。
+    if (p.packages.isEmpty() && !buildMerger) return p;
 
     // 展示行：「缺的东西 → 要装的包」，让人一眼看出这条命令补的是哪个洞
     for (const QString &bin : env.missingDeps) {
         const QStringList pkgs = Nas::packagesToInstall(env.pkg, { bin });
         const QString label = Nas::dependencyLabels({ bin }).value(0, bin);
-        p.rows << (pkgs.isEmpty()
-                       ? QString("%1 → 无包可装").arg(label)
-                       : QString("%1 → %2").arg(label, pkgs.join(" ")));
+        if (bin == QLatin1String("mergerfs") && buildMerger && pkgs.isEmpty())
+            // 说清"编"而不是"装"：确认框里看到的是 make，用户才不会以为自己
+            // 点错了按钮（这条命令不看包管理器）。
+            p.rows << QString("%1 → 从源码编译（自带 libfuse，不需要 fuse3 开发头）")
+                          .arg(label);
+        else
+            p.rows << (pkgs.isEmpty()
+                           ? QString("%1 → 无包可装").arg(label)
+                           : QString("%1 → %2").arg(label, pkgs.join(" ")));
     }
 
     QStringList lines;
     lines << QStringLiteral("set -e");   // 任一条失败就停，不带病继续
 
-    const QString joined = p.packages.join(QLatin1Char(' '));
-    switch (env.pkg) {
-    case Nas::Pkg::Apt:
-        lines << QStringLiteral("export DEBIAN_FRONTEND=noninteractive");
-        lines << QStringLiteral("apt-get update");
-        p.commands << QStringLiteral("apt-get update");
-        lines << QStringLiteral("apt-get install -y ") + joined;
-        p.commands << QStringLiteral("apt-get install -y ") + joined;
-        break;
-    case Nas::Pkg::Dnf:
-        lines << QStringLiteral("dnf install -y ") + joined;
-        p.commands << QStringLiteral("dnf install -y ") + joined;
-        break;
-    case Nas::Pkg::Pacman:
-        // --needed：已装着的跳过，不重复下载也不重装，重复点这个按钮无害
-        lines << QStringLiteral("pacman -S --noconfirm --needed ") + joined;
-        p.commands << QStringLiteral("pacman -S --noconfirm --needed ") + joined;
-        break;
-    case Nas::Pkg::None:
-        return p;   // 认不出包管理器，什么都不生成
+    if (!p.packages.isEmpty()) {
+        const QString joined = p.packages.join(QLatin1Char(' '));
+        switch (env.pkg) {
+        case Nas::Pkg::Apt:
+            lines << QStringLiteral("export DEBIAN_FRONTEND=noninteractive");
+            lines << QStringLiteral("apt-get update");
+            p.commands << QStringLiteral("apt-get update");
+            lines << QStringLiteral("apt-get install -y ") + joined;
+            p.commands << QStringLiteral("apt-get install -y ") + joined;
+            break;
+        case Nas::Pkg::Dnf:
+            lines << QStringLiteral("dnf install -y ") + joined;
+            p.commands << QStringLiteral("dnf install -y ") + joined;
+            break;
+        case Nas::Pkg::Pacman:
+            // --needed：已装着的跳过，不重复下载也不重装，重复点这个按钮无害
+            lines << QStringLiteral("pacman -S --noconfirm --needed ") + joined;
+            p.commands << QStringLiteral("pacman -S --noconfirm --needed ") + joined;
+            break;
+        case Nas::Pkg::None:
+            return p;   // 认不出包管理器，什么都不生成
+        }
+    }
+
+    // 从源码编 mergerfs。这一段里出现的每个 token 都是本文件的字面量：POOL 是常量，
+    // 版本号是那台机器上 curl 回来的目录列表里挑出来的最新一项 —— 没有输入框、没有
+    // 文件名、没有设备名参与，注入口与上面包名那条同一个来源（没有外部输入）。
+    //
+    // 装到 /usr/local/bin：程序按「同目录 → ../lib → /usr/local/bin → /usr/bin →
+    // PATH」找它，这是非 apt 系机器上程序能看见它的落点之一，而且 root 可写。
+    // 编完立刻 --version 自检：确认产物真能跑，而不是"make 返回 0 就当成功"
+    // （错架构、缺库这两种都在这里露馅）。
+    if (buildMerger) {
+        lines << QStringLiteral("set -o pipefail");
+        lines << QStringLiteral("command -v curl >/dev/null || { echo '需要 curl（下载源码包）'; exit 1; }");
+        lines << QStringLiteral("command -v make >/dev/null || { echo '需要 make'; exit 1; }");
+        lines << QStringLiteral("command -v g++  >/dev/null || { echo '需要 g++（C++17）；dnf 系可以装 gcc-c++'; exit 1; }");
+        lines << QStringLiteral("POOL=http://deb.debian.org/debian/pool/main/m/mergerfs/");
+        lines << QStringLiteral("TMP=$(mktemp -d)");
+        lines << QStringLiteral("trap 'rm -rf \"$TMP\"' EXIT");
+        lines << QStringLiteral("curl -fsSL \"$POOL\" -o \"$TMP/index.html\"");
+        lines << QStringLiteral("TARBALL=$(grep -o 'mergerfs_[0-9.]*\\.orig\\.tar\\.gz' \"$TMP/index.html\" | sort -V | tail -1)");
+        lines << QStringLiteral("test -n \"$TARBALL\" || { echo '认不出源码包名（Debian pool 结构变了？）'; exit 1; }");
+        lines << QStringLiteral("echo \"源码包：$TARBALL\"");
+        lines << QStringLiteral("curl -fsSL \"$POOL$TARBALL\" -o \"$TMP/src.tar.gz\"");
+        lines << QStringLiteral("tar xzf \"$TMP/src.tar.gz\" -C \"$TMP\"");
+        lines << QStringLiteral("V=${TARBALL#mergerfs_}");   // 去掉前缀
+        lines << QStringLiteral("V=${V%.orig.tar.gz}");      // 去掉后缀
+        lines << QStringLiteral("cd \"$TMP/mergerfs-$V\"");
+        lines << QStringLiteral("./buildtools/update-version >/dev/null 2>&1 || true");
+        lines << QStringLiteral("make -j\"$(nproc)\" CXXFLAGS='-O2 -pipe -fstack-protector-strong -std=c++17 -MMD -MP'");
+        lines << QStringLiteral("strip build/mergerfs");
+        lines << QStringLiteral("install -m 0755 build/mergerfs /usr/local/bin/mergerfs");
+        lines << QStringLiteral("/usr/local/bin/mergerfs --version");
+        p.commands << QStringLiteral("从源码编译 mergerfs（curl Debian pool → make → strip → /usr/local/bin/mergerfs）");
     }
 
     p.script = lines.join(QLatin1Char('\n')) + QLatin1Char('\n');

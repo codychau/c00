@@ -67,11 +67,18 @@ A Qt6 desktop tool for Linux, for driving the various jobs a home server has to 
       most free space (mfs, default, evens out usage), end of list (eol, easy to account for but the
       first partition takes every write), least free space (lfs). Picking one prints its consequence
       in the status bar right away. The old "stripe granularity" row is hidden for mergerfs.
-    - mergerfs is a distribution package: **this program only detects it, never bundles it, never
-      installs it for you.** Debian/Ubuntu have it (the top install button can install it);
-      openEuler / Fedora repos do not (verified: `dnf list --available mergerfs` answers
-      `No matching Packages`) and Arch only has it in AUR. On those two the box keeps saying
-      "mergerfs not detected" and does not show a button that is guaranteed to fail.
+    - The top **install button picks its route by what the system can do**: on apt systems the
+      distro has a package, so it runs `apt-get install`; openEuler / Fedora repos do not
+      (verified: `dnf list --available mergerfs` answers `No matching Packages`) and Arch only has
+      it in AUR — there it **compiles from source**: fetch `mergerfs_*.orig.tar.gz` from the Debian
+      pool, `make -j`, `strip`, install to `/usr/local/bin/mergerfs`. That works because mergerfs
+      vendors libfuse (the author's fork, built into `libfuse.a` and linked statically), so **no
+      distro fuse3 development headers are needed** — the very thing that is missing on openEuler.
+      g++ (C++17), make and curl are enough. About 1.2 MB, with a `--version` self-check afterwards.
+      (The same script also exists standalone: `packaging/build-mergerfs.sh`.)
+    - A failed build never looks like success: the confirmation dialog lists every command first,
+      the package manager's / compiler's own words go into the log pane, and a `--version` that
+      does not run counts as failure.
     - The only exits are SMB and mounting the directory (it gives a directory, there is no block
       device to export as iSCSI).
   - **Software mirror RAID1 (`nasrs mirror`)** — pick exactly two partitions: both end up holding a
@@ -308,11 +315,13 @@ use the container image (`Containerfile`, which ships mesa and libglvnd).
 What gets packaged: the program itself + `llama-proxy` + **`nasrs` (the in-house mirror engine)**
 + **Qt's own libraries and plugins** (core/gui/widgets/network/dbus, the xcb / wayland platform
 plugins, imageformats), plus **`libproxy`** (a direct dependency of QtGui, 14 KB, and server
-distributions often do not install it). **mergerfs is not bundled**: it is a distribution package,
-found by looking next to the program → `../lib` → `/usr/local/bin` → `/usr/bin` → `PATH`, and when
-it is absent the page says "mergerfs not detected" — no bundling, no installing on the user's
-behalf (the FUSE helper and the kernel fuse module belong to the system, so moving one binary in
-would not mount anything either). libc, libGL, X11, ICU and other system libraries are never
+distributions often do not install it). **mergerfs has two sources, both found via**
+next to the program → `../lib` → `/usr/local/bin` → `/usr/bin` → `PATH`: apt systems install the
+distro package; on dnf/pacman the one-click install compiles it from source
+(`packaging/build-mergerfs.sh`, statically linked vendored libfuse, no distro fuse3 headers) and
+leaves it in `/usr/local/bin` (or copies it next to the program). It is not shipped inside the
+AppImage — building it needs g++/make, and the FUSE helper and kernel fuse module belong to the
+system anyway. libc, libGL, X11, ICU and other system libraries are never
 included — the normal AppImage practice is to rely on the host's system libraries, and bundling
 glibc instead tends to crash on other distributions.
 

@@ -518,11 +518,18 @@ QString mergerMembersWarning(const QVector<QString> &devicePaths)
 
 // ── mergerfs 参数与文案 ──────────────────────────────────────
 
+// 只给三条，每条都**在真机上试过**（mergerfs 2.42.0，实测 `-o category.create=…`）：
+//   mfs  最空闲优先（默认）
+//   ff   第一块盘优先（"first found"）：新文件总落第一支，写满才轮到下一支
+//   lfs  最紧优先
+// 早先这里写的是 "eol"，mergerfs 直接报 `invalid value - category.create=eol` 并
+// 拒绝挂载 —— 那个名字是编出来的，不是它认的策略。策略名一律以 `mergerfs -h` 与
+// 实测为准，不凭印象写。
 QString mergerPolicyOption(MergerPolicy p)
 {
     switch (p) {
         case MergerPolicy::Mfs: return "mfs";
-        case MergerPolicy::Eol: return "eol";
+        case MergerPolicy::Ff:  return "ff";
         case MergerPolicy::Lfs: return "lfs";
     }
     return "mfs";
@@ -532,7 +539,7 @@ QString mergerPolicyLabel(MergerPolicy p)
 {
     switch (p) {
         case MergerPolicy::Mfs: return QString::fromUtf8("最空闲优先（mfs）");
-        case MergerPolicy::Eol: return QString::fromUtf8("顺序填满（eol）");
+        case MergerPolicy::Ff:  return QString::fromUtf8("顺序填满（ff）");
         case MergerPolicy::Lfs: return QString::fromUtf8("最紧优先（lfs）");
     }
     return QString::fromUtf8("最空闲优先（mfs）");
@@ -544,9 +551,9 @@ QString mergerPolicyLabel(MergerPolicy p)
 QString mergerPolicyNote(MergerPolicy p)
 {
     switch (p) {
-        case MergerPolicy::Eol:
-            return QString::fromUtf8("顺序填满：写满第一个分区才写第二个。账最好算，"
-                                     "但第一块盘承担了全部写入 —— 它坏掉丢得最多。"
+        case MergerPolicy::Ff:
+            return QString::fromUtf8("顺序填满：新文件总落在第一个分区，写满了才轮到下一个。"
+                                     "账最好算，但第一块盘承担了全部写入 —— 它坏掉丢得最多。"
                                      "一个文件整个落在一个分区上，mergerfs 没有条带。");
         case MergerPolicy::Lfs:
             return QString::fromUtf8("最紧优先：新文件写到当前最紧的分区，把空的留给后来的"
@@ -578,8 +585,22 @@ QString validateMergerSource(const QString &path)
     if (path.contains(':'))
         return QString::fromUtf8("source 路径不能含冒号：mergerfs 用冒号分隔 source，"
                                  "含冒号会被解析成两个 source。");
-    if (path.count('/') < 2)
-        return QString::fromUtf8("source 至少两层（/mnt/d 这种）");
+    // 不按"至少两层"判。单层路径（/vol1、/data）是分区挂载点最常见的形状 ——
+    // 本项目的部署就是宿主 /mnt/vol1 挂进容器的 /vol1，那条规则会把真正要用的
+    // 那种路径挡在门外（实测 /vol1 被判"至少两层"，一路 fail 到创建按钮）。
+    // 该挡的不是"层数少"，而是**系统目录**：把 /proc 并进来等于把内核视图摊进
+    // 合并目录，写进去的东西还落在根盘上。
+    static const QStringList kReserved = {
+        QStringLiteral("/bin"),  QStringLiteral("/boot"), QStringLiteral("/dev"),
+        QStringLiteral("/etc"),  QStringLiteral("/home"), QStringLiteral("/lib"),
+        QStringLiteral("/lib64"), QStringLiteral("/proc"), QStringLiteral("/root"),
+        QStringLiteral("/run"),  QStringLiteral("/sbin"), QStringLiteral("/srv"),
+        QStringLiteral("/sys"),  QStringLiteral("/tmp"),  QStringLiteral("/usr"),
+        QStringLiteral("/var"),
+    };
+    if (kReserved.contains(path))
+        return QString::fromUtf8("%1 是系统目录，不能当 source —— 并进来等于把系统树"
+                                 "摊进合并目录，写进去的东西落在根盘上。").arg(path);
     return QString();
 }
 
@@ -1309,6 +1330,15 @@ QStringList packagesUnavailable(Pkg pm, const QStringList &missingBinaries)
         if (missingBinaries.contains(s.binary) && familyPackages(s, pm).isEmpty())
             out << s.label;
     return out;
+}
+
+bool mergerfsSourceInstallable(Pkg pm, const QStringList &missingBinaries)
+{
+    // 只在"这家没有包、而用户确实缺 mergerfs"时才为真。apt 系有包（mergerfs 官方
+    // 仓库里就有），走源码编译是绕远路 —— 多一份自己维护的产物，也多一次失败机会。
+    if (pm != Pkg::Dnf && pm != Pkg::Pacman) return false;
+    if (!missingBinaries.contains(QStringLiteral("mergerfs"))) return false;
+    return packagesToInstall(pm, { QStringLiteral("mergerfs") }).isEmpty();
 }
 
 QStringList dependencyLabels(const QStringList &missingBinaries)

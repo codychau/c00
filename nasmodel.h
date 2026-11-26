@@ -113,7 +113,7 @@ struct Member
 //          全部写入，它坏掉丢的东西最多。
 //   Lfs —— 最紧优先：写到当前最空的**对面**（最紧的那个分区）。少用，
 //          留给"我知道我在干嘛"的人。
-enum class MergerPolicy { Mfs, Eol, Lfs };
+enum class MergerPolicy { Mfs, Ff, Lfs };   // 名字以 mergerfs 实测认的为准（mfs/ff/lfs）
 
 // mergerfs 认的选项值（进 argv 的那三个字），与人话标签分开
 QString mergerPolicyOption(MergerPolicy p);
@@ -355,6 +355,17 @@ QStringList packagesToInstall(Pkg pm, const QStringList &missingBinaries);
 // 缺失依赖里，这家装不了的那些（人话名）。列出来是让用户明白「为什么装完
 // 还缺一项」，而不是以为程序漏装了。
 QStringList packagesUnavailable(Pkg pm, const QStringList &missingBinaries);
+
+// mergerfs 能不能走"从源码编一个"这条路。
+//
+// 为什么要这条：mergerfs 在 dnf 系（openEuler/Fedora）与 pacman 系（Arch 官方仓库）
+// 都没有包 —— 实测 `dnf list --available mergerfs` 报 No matching Packages。但它的
+// 源码自带 vendored libfuse（作者改过的 fork，Makefile 里先编成 libfuse.a 再静态
+// 链进去），所以**不需要发行版的 fuse3 开发头**，只要 g++（C++17）、make、curl、
+// strip。也就是说这两家的"一键安装"不必只能摊手：它可以真去编。
+//
+// apt 系返回 false：那边有现成的包，编译是绕远路，还多一份自己维护的产物。
+bool mergerfsSourceInstallable(Pkg pm, const QStringList &missingBinaries);
 
 // 缺失依赖对应的人话名，顺序与 missingBinaries 一致，给状态栏和确认框用。
 QStringList dependencyLabels(const QStringList &missingBinaries);
