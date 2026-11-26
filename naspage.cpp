@@ -119,9 +119,31 @@ static QByteArray captureLsblk()
 NasPage::NasPage(QWidget *parent)
     : QWidget(parent)
 {
-    auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(10, kTopbarInset, 10, 8);
+    // 整页套一层 QScrollArea。理由：这一页的内容只会越来越多（引擎、盘位画板、
+    // 阵列参数、同盘告警、导出三选一、mergerfs 的说明与依赖表…），而页面高度是
+    // 窗口给的固定值 —— 不滚动的话，窗口一矮，QFormLayout 的行就被压成一条缝，
+    // 输入框只剩几个像素高（用户报的就是这个）。套上之后高度跟着内容走，窗口再
+    // 矮也只是出现滚动条，控件本身的高度不再被挤。
+    // 与 StoragePage 同一套路：顶层 QVBoxLayout + 可滚动容器；topbar 的内缩留在
+    // 外框上，滚动区域从它下面开始（滚动内容不会钻到顶栏底下）。
+    auto *pageLayout = new QVBoxLayout(this);
+    pageLayout->setContentsMargins(0, kTopbarInset, 0, 0);
+    pageLayout->setSpacing(0);
+
+    auto *scroll = new QScrollArea(this);
+    scroll->setWidgetResizable(true);
+    scroll->setFrameShape(QFrame::NoFrame);
+    // widgetResizable(true) 下横向默认是 Ignored：比视口宽的内容会被静默裁掉，
+    // 连滚动条都不给（StoragePage 里踩过同一个坑）。布局行里有长路径与长说明，
+    // 窄窗口下就是这种情况。
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+
+    auto *content = new QWidget();
+    auto *layout = new QVBoxLayout(content);
+    layout->setContentsMargins(10, 0, 10, 8);
     layout->setSpacing(8);
+    scroll->setWidget(content);
+    pageLayout->addWidget(scroll, 1);
 
     // ── 页顶通栏：一键安装依赖的组件 ──
     // 摆在这里而不是塞进某一格里，是因为"依赖没装"是这台机器上最常见的
