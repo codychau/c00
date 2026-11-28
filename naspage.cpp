@@ -287,14 +287,22 @@ NasPage::NasPage(QWidget *parent)
     modeRow->addWidget(m_modeIscsi);
     modeRow->addWidget(m_modeSmb);
     modeRow->addWidget(m_modeMount);
-    m_modeHint = new QLabel();
-    // 这一行只有提示文字，不给约束的话布局会把富余竖直高度摊给它，
-    // 一行 17px 的提示实测被撑到 297px，在带边框的标签页里就是一片空白。
-    m_modeHint->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_modeHint->setMaximumHeight(m_modeHint->sizeHint().height() + 6);
-    m_modeHint->setProperty("role", "mute");
-    modeRow->addWidget(m_modeHint, 1);
     outer->addLayout(modeRow);
+
+    // 出口的后果说明：单独一行，并且允许折行。
+    // 两句都别小看 —— 以前它和三个单选按钮挤在同一行、又不许折行，mergerfs
+    // 那句实测 940px，加上按钮整页最小宽度被顶到 **1302px**，比窗口还宽；
+    // 横向滚动条已经关掉了，多出来的部分就是右边被裁，看起来像"内容自己
+    // 横向撑开了、又不给滚"。放到下一行之后它能用满整行宽度（989 视口下
+    // 一句话正好放得下），再窄才折行。
+    // 竖直策略留 Preferred 而不是 Fixed：折行后的高度得由 heightForWidth 算，
+    // 钉死高度会把第二行裁掉。富余高度不会被它吸走 —— 带 ExpandFlag 的
+    // 控件才吸，Preferred 不吸（当初被撑到 297px 是另一回事，见上面）。
+    m_modeHint = new QLabel();
+    m_modeHint->setWordWrap(true);
+    m_modeHint->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    m_modeHint->setProperty("role", "mute");
+    outer->addWidget(m_modeHint);
 
     // iSCSI 那套行整体装进一个容器，好和 SMB 那套互斥显隐。
     m_iscsiBox = new QWidget();
