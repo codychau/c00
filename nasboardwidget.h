@@ -3,6 +3,7 @@
 
 #include <QWidget>
 #include <QVector>
+#include <QHash>
 #include <QRectF>
 #include <QColor>
 #include <QString>
@@ -70,6 +71,16 @@ public:
 
     // 成员顺序 = 条带顺序，所以这里存的是**有序**列表而不是集合
     void setMembers(const QVector<QString> &orderedDevices);
+
+    // 已在某个阵列/合并卷里的分区 → 盘位底下画一条该阵列的横线。
+    // 颜色由页面分配（同色 = 同一个阵列），这里只负责画 —— 颜色语义
+    // 属于"这台机器上有哪几套卷"，不是画板该知道的事。
+    struct SlotMark
+    {
+        QColor color;      // 横线颜色
+        QString note;      // 悬停时说明是哪一套（"自研镜像「nas」"）
+    };
+    void setSlotMarks(const QHash<QString, SlotMark> &marks);
     QVector<QString> members() const { return m_members; }
 
     // 活动 LED 的闪动（真实硬盘灯就是闪的；静止的黄灯会被读成"故障"）
@@ -124,6 +135,7 @@ private:
     QVector<Disk> m_disks;
     QVector<QRectF> m_slotRects;
     QVector<QString> m_members;         // 有序 = 条带顺序
+    QHash<QString, SlotMark> m_slotMarks;   // 键 = 设备路径
     Nas::Engine m_engine = Nas::Engine::Mdadm;
     QString m_engineLabel = QStringLiteral("mdadm");
 

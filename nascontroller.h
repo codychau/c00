@@ -111,6 +111,11 @@ bool smbService = false;      // systemd 是否有 smbd.service
 
     // ── 探测 ──
     Env probe() const;
+
+    // 磁盘上已经存在的阵列/合并卷 —— 只给界面画"这个分区已经在用了"的标记。
+    // localMountPoints：只在这些挂载点下找自研镜像目录（<挂载点>/<卷名>.nas-mirror），
+    // 刻意不遍历整张挂载表：网络挂载 stat 一下就可能把界面卡住。
+    QVector<Nas::ExistingArray> existingArrays(const QStringList &localMountPoints) const;
     static QString nasrsBinaryPath();     // 打包/源码两种布局都找一遍
     // mergerfs 是发行版装的第三方二进制，找法与 nasrs 同一套：程序旁边
     // （AppImage 里是 usr/bin）→ ../lib → /usr/local/bin → /usr/bin → PATH。
@@ -164,7 +169,7 @@ QVector<Step> planRaidfsUnmount(const QString &mountPoint) const;
                                  const QString &secondaryDir,
                                  bool deleteExtras) const;
 
-    // 状态查询（只读，与 existingArrays() 同类：不提权、不改任何东西）。
+    // 状态查询（只读，与 probe() 同类：不提权、不改任何东西）。
     struct MirrorStatus
     {
         bool parsed = false;        // JSON 是否读出来了（≠ 同步成功）
@@ -212,10 +217,6 @@ QVector<Step> planSmbRemove(const QString &shareName) const;
     void run(const QVector<Step> &steps);
     void cancel();
     bool busy() const { return m_queueRunning; }
-
-    // 只读查询（不改动任何东西）
-    QStringList existingArrays() const;      // /proc/mdstat 里的 md*
-    QString mdstatText() const;
 
 signals:
     void stepStarted(int index, const QString &describe);

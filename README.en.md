@@ -104,6 +104,17 @@ A Qt6 desktop tool for Linux, for driving the various jobs a home server has to 
       share is **forced read-only** — writes by visitors would be silently overwritten by the next
       sync, which is worse than never allowing them
 
+  - **Colour lines under the bays** — a partition that already belongs to an array or a
+    merged volume gets a line under its bay; same colour = same volume, hovering names
+    the volume, and a matching legend sits right below the panel. Each route is detected
+    by its own evidence: mdadm reads `/proc/mdstat`; mergerfs is recovered from its own
+    process argv (the mount table keeps only the basename of each source — verified:
+    `/vol1:/vol2` shows up as `vol1:vol2` in `/proc/mounts`, the paths survive only in
+    argv); the mirror route looks for `<mountpoint>/<volume>.nas-mirror` itself (nasrs
+    keeps no state file). It only draws, it never blocks: a mirror and a merged volume may
+    legitimately share partitions, so selectability stays with `Nas::judge`. But once the
+    line is there, nobody has to guess that a partition is still empty.
+
 ## Dependencies
 
 - Qt6 (Core, Widgets)

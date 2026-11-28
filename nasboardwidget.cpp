@@ -115,6 +115,14 @@ void NasBoardWidget::setMembers(const QVector<QString> &ordered)
     update();
 }
 
+void NasBoardWidget::setSlotMarks(const QHash<QString, SlotMark> &marks)
+{
+    // 不比较新旧：探测结果由页面在每次 refresh 时重新算，量很小；
+    // 省掉比较反而不会有"漏一次 update"的坑。
+    m_slotMarks = marks;
+    update();
+}
+
 void NasBoardWidget::setBlink(bool on)
 {
     if (on && !m_blinkTimer->isActive()) m_blinkTimer->start();
@@ -513,6 +521,22 @@ void NasBoardWidget::drawBay(QPainter &p, const Disk &d, int slot, const QRectF 
 
     p.restore();
 
+    // 已在某个阵列/合并卷里：在盘位**底下**画一条该阵列的横线。
+    // 放在盘位外面（下面那道 7px 的缝）而不是里面：盘位内底行是盘号与容量，
+    // 画在里面会压字。也必须画在 restore 之后 —— 不可用的盘位整体被压暗，
+    // 而"它已经被占用了"恰恰是这时候最需要看清的信息。
+    {
+        const auto mk = m_slotMarks.constFind(d.device);
+        if (mk != m_slotMarks.constEnd()) {
+            const QRectF bar(r.left() + r.width() * kSidePad,
+                             r.bottom() + 2.0,
+                             r.width() * (1.0 - 2.0 * kSidePad), 3.0);
+            p.setPen(Qt::NoPen);
+            p.setBrush(mk->color);
+            p.drawRoundedRect(bar, 1.5, 1.5);
+        }
+    }
+
     // 条带序号画在最上层：它压在 LED 位置上，必须在 restore 之后画，
     // 否则会被压暗逻辑影响，也容易被后面的描边盖住。
     if (member) drawStripeBadge(p, r, order);
@@ -655,6 +679,11 @@ QString NasBoardWidget::tipForSlot(int i) const
         t += QStringLiteral("\n\n条带序号 %1，点击移出阵列").arg(memberOrderOf(d.device));
     else
         t += QStringLiteral("\n\n点击加入阵列");
+    // 已被某个阵列占用：说清是哪一套。盘位下面的彩线只表达"有主了"，
+    // 到底属于谁要在这里讲，否则用户看到一条黄线也不知道该不该动它。
+    const auto mk = m_slotMarks.constFind(d.device);
+    if (mk != m_slotMarks.constEnd())
+        t += QStringLiteral("\n\n已在 %1 里（盘位下面的彩线）").arg(mk->note);
     return t;
 }
 

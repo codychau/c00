@@ -237,6 +237,37 @@ QStringList mergerfsArgs(const QVector<QString> &sources, const QString &mountPo
 MembersIssue mergerMembersIssue(const QVector<QString> &devicePaths);
 QString mergerMembersWarning(const QVector<QString> &devicePaths);
 
+// ── 磁盘上已经存在的阵列（只用于在盘位图上打标记）─────────────
+//
+// 与 judge() 的方向相反：这里刻意**放宽**。判错的后果只是多画一条提示线
+// （悬停能看到是哪一套），漏掉一条的后果是用户把镜像成员再选进另一个合并卷，
+// 或者把一套正在服役的卷当成空盘。宁可多标。
+//
+// 三种路线的证据不同，这是它们各自的实现决定的，不是随便挑的：
+//   mdadm    内核在 /proc/mdstat 里记账 —— 最可靠的一手来源
+//   mergerfs 挂载表里只剩 source 的 basename（本机实测：挂 /vol1:/vol2 之后
+//            /proc/mounts 的设备名是 "vol1:vol2"），原始路径只保留在
+//            mergerfs 进程自己的 argv 里
+//   镜像     nasrs 没有状态文件，"这台机器上有一份镜像"的唯一证据就是
+//            <挂载点>/<卷名>.nas-mirror 这个目录本身
+struct ExistingArray
+{
+    Engine engine = Engine::Mdadm;
+    QString name;          // /dev/md0、mergerfs 挂载点、镜像卷名
+    QStringList members;   // mdadm=分区设备路径；mergerfs/镜像=挂载点路径
+    QString note;          // 界面显示的一句话（"mdadm RAID1 /dev/md0"）
+};
+
+// /proc/mdstat 里的 "md0 : active raid1 sdb1[0] sdc1[1]" 行。
+// 只认带 [n] 的成员：没有序号的是状态字（active/inactive）与级别（raid1）。
+QVector<ExistingArray> parseMdstat(const QString &text);
+
+// mergerfs 进程的 argv → source 列表与挂载点。位置参数第一个是 ':' 分隔的
+// source 列表，第二个是挂载点（与 mergerfsArgs 生成的顺序一致）。
+// argv[0] 的 basename 不是 mergerfs 的进程一律不认，返回 false。
+bool mergerfsCmdlineSources(const QStringList &argv, QStringList *sources,
+                            QString *mountPoint);
+
 // IQN：遵循 ietf.2007-06 规范，反序域名 + 日期 + 序号
 // 例：iqn.2026-11.com.example:servertoolbox-01
 QString makeIqn(const QString &reverseDomain, const QString &dateYYMM,

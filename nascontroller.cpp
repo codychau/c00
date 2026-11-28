@@ -11,6 +11,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QMap>
+#include <algorithm>     // std::sort：探测结果排序，界面颜色才稳定
 #include <unistd.h>      // getuid/getgid：建副本目录时要按当前用户的属主建
 
 // ─────────────────────────────────────────────────────────────
@@ -216,25 +218,87 @@ e.smbService = QFileInfo::exists("/usr/lib/systemd/system/smbd.service")
     return e;
 }
 
-QStringList NasController::existingArrays() const
+QVector<Nas::ExistingArray>
+NasController::existingArrays(const QStringList &localMountPoints) const
 {
-    QStringList out;
-    QFile f("/proc/mdstat");
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return out;
-    const QStringList lines = QString::fromUtf8(f.readAll()).split('\n');
-    static const QRegularExpression re("^(md[0-9A-Za-z_-]+)\\s");
-    for (const QString &l : lines) {
-        const auto m = re.match(l);
-        if (m.hasMatch()) out << "/dev/" + m.captured(1);
-    }
-    return out;
-}
+    QVector<Nas::ExistingArray> out;
 
-QString NasController::mdstatText() const
-{
-    QFile f("/proc/mdstat");
-    if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return QString();
-    return QString::fromUtf8(f.readAll());
+    // ① mdadm：内核对 /dev/mdN 与它的成员有完整记账，这是最可靠的一手来源。
+    {
+        QFile f("/proc/mdstat");
+        if (f.open(QIODevice::ReadOnly | QIODevice::Text))
+            out += Nas::parseMdstat(QString::fromUtf8(f.readAll()));
+    }
+
+    // ② mergerfs：挂载表里只剩 source 的 basename（实测 /vol1:/vol2 变成
+    // "vol1:vol2"），原始路径只保留在 mergerfs 进程自己的 argv 里（它作为
+    // FUSE 守护进程一直活着，ps 能看到完整 argv）。所以这里翻 /proc/<pid>/cmdline，
+    // 不解析 ps 的输出 —— 不依赖外部命令，也不受列宽影响。
+    {
+        QDir proc("/proc");
+        const QStringList pids = proc.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+        QStringList seen;
+        for (const QString &pid : pids) {
+            bool ok = false;
+            pid.toInt(&ok);
+            if (!ok) continue;
+            QFile f("/proc/" + pid + "/cmdline");
+            if (!f.open(QIODevice::ReadOnly)) continue;
+            const QByteArray raw = f.readAll();
+            if (raw.isEmpty()) continue;
+            QStringList argv;
+            for (const QByteArray &a : raw.split('\0'))
+                if (!a.isEmpty()) argv << QString::fromUtf8(a);
+            QStringList sources;
+            QString mountPoint;
+            if (!Nas::mergerfsCmdlineSources(argv, &sources, &mountPoint)) continue;
+            if (mountPoint.isEmpty() || seen.contains(mountPoint)) continue;
+            seen << mountPoint;
+            Nas::ExistingArray a;
+            a.engine = Nas::Engine::MergerFs;
+            a.name = mountPoint;
+            a.members = sources;
+            a.note = QString("mergerfs · %1").arg(mountPoint);
+            out << a;
+        }
+    }
+
+    // ③ 自研镜像：nasrs 不写状态文件，证据就是目录本身 ——
+    // <挂载点>/<卷名>.nas-mirror。同一份镜像的两端目录同名，按卷名归组。
+    // 只扫调用方给的挂载点（面板上那些本地分区），不遍历整张挂载表：
+    // 网络挂载 stat 一下就可能把界面卡住。
+    {
+        QMap<QString, QStringList> mirrors;      // 卷名 → 挂载点
+        for (const QString &root : localMountPoints) {
+            if (root.isEmpty()) continue;
+            const QStringList dirs =
+                QDir(root).entryList(QStringList() << "*.nas-mirror",
+                                     QDir::Dirs | QDir::NoDotAndDotDot);
+            for (const QString &dir : dirs) {
+                const QString vol = dir.left(dir.size() - int(qstrlen(".nas-mirror")));
+                if (vol.isEmpty()) continue;
+                QStringList &list = mirrors[vol];
+                if (!list.contains(root)) list << root;
+            }
+        }
+        for (auto it = mirrors.cbegin(); it != mirrors.cend(); ++it) {
+            Nas::ExistingArray a;
+            a.engine = Nas::Engine::MirrorRs;
+            a.name = it.key();
+            a.members = it.value();
+            a.note = QString::fromUtf8("自研镜像「%1」").arg(it.key());
+            out << a;
+        }
+    }
+
+    // 顺序固定下来，界面上的颜色才不会每次刷新都换一遍：
+    // 先 mdadm、再 mergerfs、最后镜像，同类按名字排。
+    std::sort(out.begin(), out.end(),
+              [](const Nas::ExistingArray &a, const Nas::ExistingArray &b) {
+                  if (a.engine != b.engine) return int(a.engine) < int(b.engine);
+                  return a.name < b.name;
+              });
+    return out;
 }
 
 // ── mdadm 路线 ───────────────────────────────────────────────

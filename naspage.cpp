@@ -43,6 +43,7 @@
 #include <QTextCursor>
 #include <QTimer>
 #include <QStyle>
+#include <QHash>
 #include <algorithm>
 
 static constexpr int kTopbarInset = 52;   // 与 MainWindow 顶栏一致，正文自行让出
@@ -222,6 +223,14 @@ NasPage::NasPage(QWidget *parent)
     // 面板只报"用户点了哪个盘位"，插入/拔出的语义在这里决定
     connect(m_board, &NasBoardWidget::slotClicked, this, &NasPage::onSlotClicked);
     connect(m_board, &NasBoardWidget::slotRejected, this, &NasPage::onSlotRejected);
+
+    // 盘位下面那些彩线是"哪一套、什么颜色"：一行图例。没有阵列时整行隐藏，
+    // 所以平时它不占地方；真有阵列时它就贴在面板正下方，不用悬停也看得见。
+    m_arrayLegend = new QLabel();
+    m_arrayLegend->setProperty("role", "mute");
+    m_arrayLegend->setWordWrap(true);
+    m_arrayLegend->setVisible(false);
+    layout->addWidget(m_arrayLegend);
 
     // ── 阵列参数区：这一格说的是"盘怎么拼"，不是"卷怎么交出去" ──
     // 位置紧贴画板，因为它的输入就是画板上点的那几个盘位。
@@ -734,6 +743,8 @@ void NasPage::refresh()
     }
     m_sysMounts = Nas::systemMountPoints(all, mounts);
     m_board->setDisks(m_disks);
+    // 盘位拿到之后才能把"已经存在的阵列"映射到盘位上（成员是设备名或挂载点）
+    refreshArrayMarks();
     updateSummary();
     syncExportMode(m_board->members().size());
 
@@ -741,6 +752,66 @@ void NasPage::refresh()
                   .arg(m_disks.size())
                   .arg(std::count_if(m_disks.cbegin(), m_disks.cend(),
                                      [](const NasBoardWidget::Disk &x) { return x.selectable; })));
+}
+
+// 盘位下面的彩线：哪些分区已经在某个阵列/合并卷里。
+//
+// 动机是实际会发生的错：先做了一份镜像（副本目录就在分区里，而分区本身
+// 仍然是"已挂载、可写"，judge() 据此照放），再切到 mergerfs 时那两个分区
+// 照样能被选中 —— 于是同一份数据既在镜像里又被合并卷算了一遍容量，而
+// mergerfs 的删除会作用到镜像目录上。judge() 不该因此把它们判成"不可选"
+// （镜像与合并卷本来就可以共用分区），但用户必须看得见"这块盘已经有主了"。
+//
+// 所以这里只画、只说明，不拦人。拦不拦是 judge() 的事，别把两件事混在一起。
+void NasPage::refreshArrayMarks()
+{
+    if (!m_board) return;
+
+    QStringList mountPoints;
+    for (const NasBoardWidget::Disk &d : m_disks)
+        if (!d.mountpoint.isEmpty()) mountPoints << d.mountpoint;
+
+    const QVector<Nas::ExistingArray> arrays = m_ctl.existingArrays(mountPoints);
+
+    // 同色 = 同一个阵列。黄色排第一（最常见的是"我做过了，忘了"），
+    // 刻意不用主色青（那是"本次选中的成员"描边）也不用红（那是故障）。
+    const QColor palette[] = { Theme::warn(), Theme::info(), Theme::ok(), Theme::accent2() };
+    const int paletteN = int(sizeof(palette) / sizeof(palette[0]));
+
+    QHash<QString, NasBoardWidget::SlotMark> marks;
+    QStringList legend;
+    int colorIdx = 0;
+    for (const Nas::ExistingArray &a : arrays) {
+        const QColor col = palette[colorIdx % paletteN];
+        QStringList labels;
+        for (const QString &m : a.members) {
+            const NasBoardWidget::Disk *hit = nullptr;
+            for (const NasBoardWidget::Disk &d : m_disks) {
+                // mdadm 的成员是设备路径，mergerfs / 镜像的成员是挂载点
+                if (d.device == m || (!d.mountpoint.isEmpty() && d.mountpoint == m)) {
+                    hit = &d;
+                    break;
+                }
+            }
+            if (!hit) continue;      // 面板上没有这块盘（例如整盘上的 md 成员）
+            marks.insert(hit->device, { col, a.note });
+            if (!labels.contains(hit->label)) labels << hit->label;
+        }
+        // 一个成员都不在面板上：不分配颜色。图例里出现一条面板上根本看不到的
+        // 颜色，只会让人对着盘位找一条不存在的线。
+        if (labels.isEmpty()) continue;
+        legend << QStringLiteral("<span style=\"color:%1\">■</span> %2：%3")
+                      .arg(col.name(), a.note.toHtmlEscaped(),
+                           labels.join(QString::fromUtf8("、")));
+        ++colorIdx;
+    }
+
+    m_board->setSlotMarks(marks);
+    if (!m_arrayLegend) return;
+    if (legend.isEmpty()) { m_arrayLegend->setVisible(false); return; }
+    m_arrayLegend->setText(QString::fromUtf8("盘位下面的彩线 = 已经在阵列/合并卷里的分区：")
+                           + legend.join(QString::fromUtf8("　")));
+    m_arrayLegend->setVisible(true);
 }
 
 void NasPage::onSlotClicked(const QString &device, int slotIndex)

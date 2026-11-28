@@ -11,6 +11,7 @@
 #include <QSet>
 #include <QPair>
 #include <QDir>
+#include <QFileInfo>
 #include <QRegularExpression>
 
 namespace Nas {
@@ -637,6 +638,83 @@ QStringList mergerfsArgs(const QVector<QString> &sources, const QString &mountPo
     args << mountPoint;
     return args;
 }
+
+// ── 已存在的阵列（盘位图上的彩线）──────────────────────────────
+QVector<ExistingArray> parseMdstat(const QString &text)
+{
+    QVector<ExistingArray> out;
+    const QStringList lines = text.split('\n');
+    for (const QString &line : lines) {
+        // 成员/状态行都是缩进的；阵列头一行以 "mdN :" 起头
+        const int colon = line.indexOf(':');
+        if (colon <= 2) continue;
+        const QString head = line.left(colon).trimmed();
+        if (!head.startsWith("md")) continue;
+        bool numOk = false;
+        head.mid(2).toInt(&numOk);
+        // md0 / md127 是设备，md_d127 之类是容器名，这里只认设备号
+        if (!numOk) continue;
+
+        QStringList members;
+        QString raid;
+        const QStringList tok = line.mid(colon + 1).split(' ', Qt::SkipEmptyParts);
+        for (const QString &raw : tok) {
+            const int br = raw.indexOf('[');
+            // 带 [n] 才是成员；[2/2] 这种是同步进度，br 位置在开头附近且左段为空
+            const QString base = br > 0 ? raw.left(br) : raw;
+            if (base.isEmpty() || !base.at(0).isLetterOrNumber()) continue;
+            if (base == "active" || base == "inactive" || base == "auto-read-only")
+                continue;
+            if (base.startsWith("raid") || base == "linear" || base == "multipath"
+                || base == "container") {
+                raid = base;
+                continue;
+            }
+            if (br <= 0) continue;          // 没有序号：不是成员
+            if (base.contains('=')) continue;
+            members << "/dev/" + base;
+        }
+        if (members.isEmpty()) continue;
+
+        ExistingArray a;
+        a.engine = Engine::Mdadm;
+        a.name = "/dev/" + head;
+        a.members = members;
+        a.note = QString("mdadm %1 · %2").arg(raid.isEmpty() ? "RAID" : raid.toUpper(),
+                                              a.name);
+        out << a;
+    }
+    return out;
+}
+
+bool mergerfsCmdlineSources(const QStringList &argv, QStringList *sources,
+                            QString *mountPoint)
+{
+    if (argv.isEmpty()) return false;
+    // 用 basename 判，因为可执行名可能是 /usr/local/bin/mergerfs 或包内路径
+    if (QFileInfo(argv.first()).fileName() != "mergerfs") return false;
+
+    QStringList positional;
+    for (int i = 1; i < argv.size(); ++i) {
+        const QString a = argv.at(i);
+        if (a == "-o" || a == "--options") { ++i; continue; }    // 选项值不是路径
+        if (a.startsWith("-o")) continue;                         // -ocategory.create=…
+        if (a == "--") continue;
+        if (a.startsWith('-')) continue;
+        positional << a;
+    }
+    if (positional.size() < 2) return false;
+
+    const QStringList srcs = positional.at(0).split(':');
+    if (srcs.size() < 1) return false;
+    for (const QString &s : srcs)
+        if (!s.startsWith('/')) return false;      // 不是挂载点 → 不是我们认的形态
+
+    if (sources) *sources = srcs;
+    if (mountPoint) *mountPoint = positional.at(1);
+    return true;
+}
+
 
 QString mirrorRoleNote(bool primaryIsAccess)
 {

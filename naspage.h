@@ -103,6 +103,9 @@ private:
     void onTvScanClicked();
     QWidget *buildRaidFsBox();  // 导出页里「挂载到目录」那个出口框（非独立标签页）
     void refreshRaidFsStatus();
+    // 已经在阵列/合并卷里的分区 → 盘位下面的彩线 + 一行图例。
+    // 只画不拦：能不能选是 Nas::judge 的事，这里只解决"他看不见"。
+    void refreshArrayMarks();
     void onMountFsClicked();
     void onUmountFsClicked();
     void onInstallFuseClicked();
@@ -163,6 +166,8 @@ private:
     // 刻意与右上角那条分开：那条说的是"缺组件"，一键安装能把它们清干净；
     // 这几样装包清不掉，混在一起就会变成"按钮消失了但还在提示缺东西"。
     QLabel *m_blockNote = nullptr;
+    // 彩线的图例（"■ 自研镜像「nas」：sdb1、sdc1"）。没有阵列时整行隐藏。
+    QLabel *m_arrayLegend = nullptr;
     QLabel *m_status = nullptr;
     QComboBox *m_engine = nullptr;
     QLineEdit *m_volName = nullptr;    // 阵列/卷名（破坏性确认时要手输核对）
