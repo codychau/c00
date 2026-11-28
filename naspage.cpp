@@ -133,10 +133,14 @@ NasPage::NasPage(QWidget *parent)
     auto *scroll = new QScrollArea(this);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
-    // widgetResizable(true) 下横向默认是 Ignored：比视口宽的内容会被静默裁掉，
-    // 连滚动条都不给（StoragePage 里踩过同一个坑）。布局行里有长路径与长说明，
-    // 窄窗口下就是这种情况。
-    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    // 只要竖条，横条关掉。关得掉的依据是量出来的，不是猜的：这页内容的最小
+    // 宽度是 876px（最宽的是「实现 + 缺件提示」那一行），而窗口最小宽度被
+    // mainCol 的 1000px 顶着 —— 视口再怎么窄也窄不过 989px（1000 减竖条），
+    // 内容始终放得下。也就是说横条在这页是一条永远不会出现的条：留着不但没用，
+    // 还会在窗口被外部压窄时突然冒出来、白吃掉十几像素高度。
+    // 代价要说清：没有横条兜底之后，万一将来某一行把内容顶得比视口宽，右侧就是
+    // 被裁掉（不是省略号）。所以缺件提示那种会随机器变长的文字都挂了完整 tooltip。
+    scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     auto *content = new QWidget();
     auto *layout = new QVBoxLayout(content);
@@ -615,6 +619,9 @@ void NasPage::syncEnvAndInstallUi()
             hint += QString::fromUtf8("（%1 的官方仓库里没有这些的包，页顶按钮帮不上，要自己装）")
                         .arg(Nas::pkgManagerName(m_env.pkg));
         m_envLabel->setText(hint);
+        // 整页的横向滚动条已关（见构造函数）：万一这句被列到比窗口还宽，右侧是
+        // 直接裁掉、不是省略号，鼠标停一下能读全。正常情况下这句不会长到那么宽。
+        m_envLabel->setToolTip(hint);
         m_envLabel->setStyleSheet("color:" + Theme::bad().name());
         m_envLabel->setVisible(true);
     }

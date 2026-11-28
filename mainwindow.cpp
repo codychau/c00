@@ -108,7 +108,9 @@ MainWindow::MainWindow(QWidget *parent)
     // 玻璃背后就没有内容了。这里让它们重叠，几何在 resizeEvent 里算。
     m_pages = new QStackedWidget(mainCol);
     // 页面内容（主板 + 概览右列）需要约 1000px；不给最小宽的话
-    // 堆栈会被压窄，右列溢出（各页 QScrollArea 已有横向滚动兜底）
+    // 堆栈会被压窄，右列溢出（各页 QScrollArea 已有横向滚动兜底 —— NAS 页例外：
+    // 它内容的最小宽度实测 876px，比这个下限窄，所以那条横条已经关掉了，
+    // 见 naspage.cpp 构造函数里的注释）
     mainCol->setMinimumWidth(1000);
 
     m_topbar = new GlassPanel(mainCol);   // 后创建 ⇒ 叠在堆栈之上
